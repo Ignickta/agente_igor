@@ -69,10 +69,12 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
  *
  * @param contact identificador do contato (telefone) para memória
  * @param text texto já transcrito da mensagem do usuário
+ * @param fromAudio true se a mensagem original era um áudio (já transcrito)
  */
 export async function handleMessage(
   contact: string,
-  text: string
+  text: string,
+  fromAudio = false
 ): Promise<string> {
   // 0) Comandos administrativos (/criar, /agentes, /remover, ...) têm prioridade.
   const command = await tryHandleCommand(contact, text);
@@ -100,7 +102,7 @@ export async function handleMessage(
   console.log(`[central] roteado para: ${target.name}`);
 
   // 2) Executa o subagente escolhido.
-  const reply = await runSubagent(target, text, memory);
+  const reply = await runSubagent(target, text, memory, fromAudio);
 
   // 3) Persiste memória da conversa (usuário + resposta).
   const ts = Date.now();

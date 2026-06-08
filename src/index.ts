@@ -79,7 +79,7 @@ async function processIncoming(body: unknown): Promise<void> {
 
   // Roteia pelo agente central e responde
   try {
-    const reply = await handleMessage(msg.from, text);
+    const reply = await handleMessage(msg.from, text, msg.isAudio);
     await sendText(msg.from, reply);
   } catch (err) {
     console.error('[webhook] falha ao gerar/enviar resposta:', err);
