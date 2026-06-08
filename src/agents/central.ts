@@ -4,6 +4,7 @@ import {
   listSubagents,
   getRecentMemory,
   appendMemory,
+  recordMessage,
 } from '../services/firebase';
 import { runSubagent } from './subagents';
 import { tryHandleCommand } from './commands';
@@ -108,6 +109,11 @@ export async function handleMessage(
     content: reply,
     timestamp: ts + 1,
   });
+
+  // 4) Registra métrica de uso (best-effort, não bloqueia a resposta).
+  recordMessage(target.id, target.name).catch((err) =>
+    console.error('[central] falha ao registrar métrica:', err)
+  );
 
   return reply;
 }

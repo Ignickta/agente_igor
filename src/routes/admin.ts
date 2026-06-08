@@ -11,6 +11,7 @@ import {
   getTask,
   updateTask,
   deleteTask,
+  getMetrics,
 } from '../services/firebase';
 
 export const adminRouter = Router();
@@ -84,19 +85,59 @@ adminRouter.post('/tasks', async (req, res) => {
   res.status(201).json(task);
 });
 
-// Lista tarefas, com filtro opcional por subagente (?subagent=nome|id)
+// Lista tarefas. Filtros opcionais:
+//   ?subagent=nome|id  -> só de um projeto
+//   ?upcoming=true     -> só pendentes com data futura (próximos lembretes)
 adminRouter.get('/tasks', async (req, res) => {
-  const tasks = await listTasks();
-  const filter = (req.query.subagent as string)?.trim();
-  if (!filter) return res.json(tasks);
+  let tasks = await listTasks();
 
-  // Aceita tanto o id do subagente quanto o nome (case-insensitive).
-  const subs = await listSubagents(true);
-  const match = subs.find(
-    (s) => s.id === filter || s.name.toLowerCase() === filter.toLowerCase()
-  );
-  const subId = match?.id || filter;
-  res.json(tasks.filter((t) => t.subagentId === subId));
+  const filter = (req.query.subagent as string)?.trim();
+  if (filter) {
+    const subs = await listSubagents(true);
+    const match = subs.find(
+      (s) => s.id === filter || s.name.toLowerCase() === filter.toLowerCase()
+    );
+    const subId = match?.id || filter;
+    tasks = tasks.filter((t) => t.subagentId === subId);
+  }
+
+  if (req.query.upcoming === 'true') {
+    const nowIso = new Date().toISOString();
+    tasks = tasks.filter((t) => !t.done && t.remindAt >= nowIso);
+  }
+
+  res.json(tasks);
+});
+
+// Estatísticas de uso para o dashboard.
+// Retorna: mensagens de hoje, total e uso por subagente nos últimos N dias.
+adminRouter.get('/stats', async (req, res) => {
+  const days = Math.min(Math.max(parseInt((req.query.days as string) || '7', 10), 1), 31);
+  const metrics = await getMetrics(days);
+
+  const today = metrics[metrics.length - 1];
+  const totalPeriod = metrics.reduce((acc, m) => acc + m.total, 0);
+
+  // Agrega uso por subagente no período.
+  const byAgent: Record<string, { name: string; count: number }> = {};
+  for (const m of metrics) {
+    for (const [id, count] of Object.entries(m.byAgent)) {
+      if (!byAgent[id]) byAgent[id] = { name: m.names[id] || id, count: 0 };
+      byAgent[id].count += count;
+      if (m.names[id]) byAgent[id].name = m.names[id];
+    }
+  }
+  const usageByAgent = Object.entries(byAgent)
+    .map(([id, v]) => ({ id, name: v.name, count: v.count }))
+    .sort((a, b) => b.count - a.count);
+
+  res.json({
+    today: today?.total || 0,
+    totalPeriod,
+    days,
+    daily: metrics.map((m) => ({ day: m.day, total: m.total })),
+    usageByAgent,
+  });
 });
 
 // Atualiza uma tarefa (marcar como feito, editar texto, remindAt, etc.)

@@ -17,6 +17,7 @@ const db = admin.firestore();
 const subagentsCol = db.collection('subagents');
 const tasksCol = db.collection('tasks');
 const memoryCol = db.collection('memory');
+const metricsCol = db.collection('metrics');
 
 // ===================== Subagentes =====================
 
@@ -191,6 +192,68 @@ export async function updateTask(
 
 export async function deleteTask(id: string): Promise<void> {
   await tasksCol.doc(id).delete();
+}
+
+// ===================== Métricas de uso =====================
+
+/** Data local (YYYY-MM-DD) no timezone configurado — id do documento de métricas. */
+function dayKey(date = new Date()): string {
+  // en-CA produz YYYY-MM-DD; força o timezone do sistema.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: config.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Registra uma mensagem processada incrementando contadores do dia.
+ * Estrutura: metrics/{YYYY-MM-DD} = { total, byAgent: { <id>: n }, names: { <id>: nome } }.
+ * Sem índices compostos: leitura por range de ids de documento.
+ */
+export async function recordMessage(
+  subagentId: string,
+  subagentName: string
+): Promise<void> {
+  const ref = metricsCol.doc(dayKey());
+  const inc = admin.firestore.FieldValue.increment(1);
+  await ref.set(
+    {
+      total: inc,
+      byAgent: { [subagentId]: inc },
+      names: { [subagentId]: subagentName },
+      updatedAt: Date.now(),
+    },
+    { merge: true }
+  );
+}
+
+export interface DayMetric {
+  day: string;
+  total: number;
+  byAgent: Record<string, number>;
+  names: Record<string, string>;
+}
+
+/** Métricas dos últimos N dias (inclui hoje), em ordem cronológica. */
+export async function getMetrics(days = 7): Promise<DayMetric[]> {
+  const keys: string[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    keys.push(dayKey(d));
+  }
+  const refs = keys.map((k) => metricsCol.doc(k));
+  const snaps = await db.getAll(...refs);
+  return snaps.map((snap, idx) => {
+    const data = snap.exists ? (snap.data() as Partial<DayMetric>) : {};
+    return {
+      day: keys[idx],
+      total: data.total || 0,
+      byAgent: data.byAgent || {},
+      names: data.names || {},
+    };
+  });
 }
 
 export { db };
