@@ -60,10 +60,16 @@ async function processIncoming(body: unknown): Promise<void> {
       return;
     }
     try {
+      console.log(
+        `[webhook] transcrevendo áudio de ${msg.from} (${msg.audioBase64.length} chars base64)...`
+      );
       text = await transcribeAudioBase64(msg.audioBase64);
       console.log(`[webhook] áudio transcrito de ${msg.from}: "${text}"`);
     } catch (err) {
-      console.error('[webhook] falha na transcrição:', err);
+      console.error(
+        '[webhook] falha na transcrição:',
+        err instanceof Error ? err.message : err
+      );
       await sendText(msg.from, 'Tive um problema para transcrever seu áudio. Pode escrever?');
       return;
     }

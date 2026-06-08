@@ -29,14 +29,35 @@ export async function sendText(to: string, text: string): Promise<void> {
 
 /**
  * Baixa a mídia (áudio) de uma mensagem em base64 a partir da Evolution API.
- * Usado quando o webhook não traz o áudio embutido.
+ *
+ * Na Evolution v2 o endpoint espera o objeto COMPLETO da mensagem
+ * (com `key` e `message`) dentro de `{ message: <objeto> }`. Algumas versões
+ * exigem `key.id`. Retorna o base64 puro (sem prefixo data URI).
+ *
+ * @param fullMessage objeto { key, message, ... } vindo do webhook (data)
  */
-export async function getBase64FromMediaMessage(messageKey: unknown): Promise<string> {
-  const { data } = await client.post(
-    `/chat/getBase64FromMediaMessage/${config.evolution.instance}`,
-    { message: messageKey }
-  );
-  return data?.base64 || data?.media || '';
+export async function getBase64FromMediaMessage(
+  fullMessage: unknown
+): Promise<string> {
+  try {
+    const { data } = await client.post(
+      `/chat/getBase64FromMediaMessage/${config.evolution.instance}`,
+      { message: fullMessage, convertToMp4: false }
+    );
+    // A Evolution pode responder em diferentes chaves dependendo da versão.
+    const base64 =
+      data?.base64 || data?.media || data?.buffer || data?.data || '';
+    if (!base64) {
+      console.error(
+        '[evolution:getBase64] resposta sem base64:',
+        JSON.stringify(data).slice(0, 300)
+      );
+    }
+    return base64;
+  } catch (err) {
+    logAxiosError('getBase64FromMediaMessage', err);
+    return '';
+  }
 }
 
 /** Remove sufixos do JID (@s.whatsapp.net) e caracteres não numéricos. */
