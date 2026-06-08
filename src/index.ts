@@ -12,6 +12,18 @@ import { startScheduler } from './scheduler';
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 
+// CORS — o painel web (origem diferente) consome as rotas /admin.
+app.use((req: Request, res: Response, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-admin-token');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 // Healthcheck
 app.get('/', (_req, res) => res.json({ ok: true, name: 'agente-igor' }));
 app.get('/health', (_req, res) => res.json({ status: 'up' }));

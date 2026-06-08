@@ -7,6 +7,9 @@ import {
   updateSubagent,
   deleteSubagent,
   createTask,
+  listTasks,
+  setTaskDone,
+  deleteTask,
 } from '../services/firebase';
 
 export const adminRouter = Router();
@@ -66,6 +69,12 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 
 // ===================== Tarefas / Lembretes =====================
 
+adminRouter.get('/tasks', async (req, res) => {
+  const subagentId = (req.query.subagentId as string) || undefined;
+  const tasks = await listTasks(subagentId);
+  res.json(tasks);
+});
+
 adminRouter.post('/tasks', async (req, res) => {
   const { text, remindAt, to, subagentId } = req.body;
   if (!text || !remindAt) {
@@ -78,4 +87,18 @@ adminRouter.post('/tasks', async (req, res) => {
     subagentId,
   });
   res.status(201).json(task);
+});
+
+adminRouter.put('/tasks/:id', async (req, res) => {
+  const { done } = req.body;
+  if (typeof done !== 'boolean') {
+    return res.status(400).json({ error: 'done (boolean) é obrigatório' });
+  }
+  await setTaskDone(req.params.id, done);
+  res.json({ ok: true });
+});
+
+adminRouter.delete('/tasks/:id', async (req, res) => {
+  await deleteTask(req.params.id);
+  res.json({ ok: true });
 });
