@@ -175,6 +175,40 @@ Exemplo:
 - `memory/{contato}/messages/{id}` — histórico de conversa.
 - `tasks/{id}` — lembretes/tarefas agendadas.
 
+## 🚀 Deploy na VPS (Docker)
+
+O deploy roda o app num container Docker, na porta 3000, com restart automático.
+
+### Na sua VPS (Ubuntu, como root):
+
+```bash
+# 1. Crie o arquivo de credenciais (segredos NÃO ficam no Git)
+nano /opt/agente-igor.env
+#    -> cole o conteúdo baseado no .env.example, com suas chaves reais
+
+# 2. Baixe e rode o script de deploy
+curl -fsSL https://raw.githubusercontent.com/Ignickta/agente_igor/main/deploy.sh -o deploy.sh
+bash deploy.sh
+```
+
+O script instala o Docker (se necessário), clona o repositório, builda a imagem e sobe o container.
+
+### Atualizar depois de um novo commit:
+
+```bash
+bash deploy.sh   # faz git pull + rebuild + restart
+```
+
+### Comandos úteis:
+
+```bash
+docker logs -f agente-igor          # ver logs ao vivo
+docker restart agente-igor          # reiniciar
+curl http://localhost:3000/health   # checar se está no ar
+```
+
+> O `.env` de produção fica em `/opt/agente-igor.env` (fora do repositório). Nunca commite segredos.
+
 ## 📝 Licença
 
 MIT
