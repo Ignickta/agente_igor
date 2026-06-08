@@ -84,6 +84,66 @@ export async function getBase64FromMediaMessage(
   }
 }
 
+/**
+ * Consulta o estado da conexão da instância.
+ * Retorna o estado bruto (ex: 'open', 'connecting', 'close') ou null se falhar.
+ * Na Evolution v2 o estado costuma vir em data.instance.state.
+ */
+export async function getConnectionState(): Promise<string | null> {
+  try {
+    const { data } = await client.get(
+      `/instance/connectionState/${config.evolution.instance}`
+    );
+    return data?.instance?.state || data?.state || null;
+  } catch (err) {
+    logAxiosError('getConnectionState', err);
+    return null;
+  }
+}
+
+/** Dispara a (re)conexão da instância (gera novo pareamento se necessário). */
+export async function connectInstance(): Promise<boolean> {
+  try {
+    await client.get(`/instance/connect/${config.evolution.instance}`);
+    return true;
+  } catch (err) {
+    logAxiosError('connectInstance', err);
+    return false;
+  }
+}
+
+/**
+ * Verifica a conexão e, se não estiver conectada ('open'), tenta reconectar.
+ * Pensada para rodar periodicamente (node-cron). Loga o status.
+ */
+export async function ensureConnected(): Promise<void> {
+  const state = await getConnectionState();
+
+  if (state === 'open') {
+    console.log('[evolution] conexão OK (open).');
+    return;
+  }
+
+  if (state === null) {
+    console.warn('[evolution] não foi possível obter o estado da conexão.');
+    return;
+  }
+
+  console.warn(`[evolution] instância desconectada (estado: ${state}). Tentando reconectar...`);
+  const ok = await connectInstance();
+  if (ok) {
+    const after = await getConnectionState();
+    console.log(
+      `[evolution] reconexão disparada. Novo estado: ${after ?? 'desconhecido'}` +
+        (after !== 'open'
+          ? ' (pode exigir leitura de QR Code se a sessão expirou).'
+          : '.')
+    );
+  } else {
+    console.error('[evolution] falha ao disparar a reconexão.');
+  }
+}
+
 /** Remove sufixos do JID (@s.whatsapp.net) e caracteres não numéricos. */
 export function normalizeNumber(jidOrNumber: string): string {
   return jidOrNumber.split('@')[0].replace(/\D/g, '');
