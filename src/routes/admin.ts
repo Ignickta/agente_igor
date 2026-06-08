@@ -8,7 +8,8 @@ import {
   deleteSubagent,
   createTask,
   listTasks,
-  setTaskDone,
+  getTask,
+  updateTask,
   deleteTask,
 } from '../services/firebase';
 
@@ -69,12 +70,6 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 
 // ===================== Tarefas / Lembretes =====================
 
-adminRouter.get('/tasks', async (req, res) => {
-  const subagentId = (req.query.subagentId as string) || undefined;
-  const tasks = await listTasks(subagentId);
-  res.json(tasks);
-});
-
 adminRouter.post('/tasks', async (req, res) => {
   const { text, remindAt, to, subagentId } = req.body;
   if (!text || !remindAt) {
@@ -89,16 +84,46 @@ adminRouter.post('/tasks', async (req, res) => {
   res.status(201).json(task);
 });
 
+// Lista tarefas, com filtro opcional por subagente (?subagent=nome|id)
+adminRouter.get('/tasks', async (req, res) => {
+  const tasks = await listTasks();
+  const filter = (req.query.subagent as string)?.trim();
+  if (!filter) return res.json(tasks);
+
+  // Aceita tanto o id do subagente quanto o nome (case-insensitive).
+  const subs = await listSubagents(true);
+  const match = subs.find(
+    (s) => s.id === filter || s.name.toLowerCase() === filter.toLowerCase()
+  );
+  const subId = match?.id || filter;
+  res.json(tasks.filter((t) => t.subagentId === subId));
+});
+
+// Atualiza uma tarefa (marcar como feito, editar texto, remindAt, etc.)
 adminRouter.put('/tasks/:id', async (req, res) => {
-  const { done } = req.body;
-  if (typeof done !== 'boolean') {
-    return res.status(400).json({ error: 'done (boolean) é obrigatório' });
+  const existing = await getTask(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
+
+  const { text, remindAt, done, subagentId, to } = req.body;
+  const update: Record<string, unknown> = {};
+  if (text !== undefined) update.text = text;
+  if (remindAt !== undefined) update.remindAt = remindAt;
+  if (done !== undefined) update.done = !!done;
+  if (subagentId !== undefined) update.subagentId = subagentId;
+  if (to !== undefined) update.to = to;
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
-  await setTaskDone(req.params.id, done);
+
+  await updateTask(req.params.id, update);
   res.json({ ok: true });
 });
 
+// Remove uma tarefa
 adminRouter.delete('/tasks/:id', async (req, res) => {
+  const existing = await getTask(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
   await deleteTask(req.params.id);
   res.json({ ok: true });
 });

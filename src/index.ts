@@ -12,15 +12,13 @@ import { startScheduler } from './scheduler';
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 
-// CORS — o painel web (origem diferente) consome as rotas /admin.
-app.use((req: Request, res: Response, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+// CORS — permite que o painel web (agente-igor-web) consuma a API do navegador.
+// Aberto por padrão; restrinja via CORS_ORIGIN (ex: https://painel.seudominio.com).
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, x-admin-token');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(204);
-    return;
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 

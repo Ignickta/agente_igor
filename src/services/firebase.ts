@@ -113,25 +113,34 @@ export async function getDueTasks(): Promise<Task[]> {
     .filter((t) => t.remindAt <= nowIso);
 }
 
-/** Lista todas as tarefas, opcionalmente filtrando por subagente. Mais recentes primeiro. */
-export async function listTasks(subagentId?: string): Promise<Task[]> {
-  const snap = await tasksCol.get();
-  let tasks = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Task));
-  if (subagentId) tasks = tasks.filter((t) => t.subagentId === subagentId);
-  return tasks.sort((a, b) => b.createdAt - a.createdAt);
+export async function markTaskDone(id: string): Promise<void> {
+  await tasksCol.doc(id).set({ done: true }, { merge: true });
 }
 
-/** Marca uma tarefa como concluída ou reabre. */
-export async function setTaskDone(id: string, done: boolean): Promise<void> {
-  await tasksCol.doc(id).set({ done }, { merge: true });
+/** Lista todas as tarefas, ordenadas por horário de lembrar (crescente). */
+export async function listTasks(): Promise<Task[]> {
+  const snap = await tasksCol.get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+}
+
+export async function getTask(id: string): Promise<Task | null> {
+  const doc = await tasksCol.doc(id).get();
+  if (!doc.exists) return null;
+  return { id: doc.id, ...doc.data() } as Task;
+}
+
+/** Atualiza campos de uma tarefa (texto, done, remindAt, subagentId...). */
+export async function updateTask(
+  id: string,
+  data: Partial<Omit<Task, 'id' | 'createdAt'>>
+): Promise<void> {
+  await tasksCol.doc(id).set(data, { merge: true });
 }
 
 export async function deleteTask(id: string): Promise<void> {
   await tasksCol.doc(id).delete();
-}
-
-export async function markTaskDone(id: string): Promise<void> {
-  await tasksCol.doc(id).set({ done: true }, { merge: true });
 }
 
 export { db };
