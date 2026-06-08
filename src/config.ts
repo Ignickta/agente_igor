@@ -10,6 +10,39 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * Normaliza a private key do Firebase para PEM válido.
+ *
+ * Dependendo de como a env é carregada (dotenv local vs. `docker run --env-file`),
+ * a chave pode chegar:
+ *  - envolta em aspas literais (" ou ');
+ *  - com `\n` literais em vez de quebras reais;
+ *  - com `\r\n` (CRLF) se o arquivo foi salvo no Windows.
+ * Esta função cobre todos esses casos e valida o resultado.
+ */
+function normalizePrivateKey(raw: string): string {
+  let key = raw.trim();
+
+  // Remove aspas externas que o --env-file pode ter mantido no valor.
+  if (
+    (key.startsWith('"') && key.endsWith('"')) ||
+    (key.startsWith("'") && key.endsWith("'"))
+  ) {
+    key = key.slice(1, -1);
+  }
+
+  // Converte \n e \r\n literais em quebras de linha reais e remove CRs.
+  key = key.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\r/g, '');
+
+  if (!key.includes('-----BEGIN') || !key.includes('PRIVATE KEY-----')) {
+    throw new Error(
+      'FIREBASE_PRIVATE_KEY inválida: não parece um PEM. Verifique aspas e quebras de linha (\\n) no .env.'
+    );
+  }
+
+  return key;
+}
+
 export const config = {
   evolution: {
     apiUrl: required('EVOLUTION_API_URL').replace(/\/$/, ''),
@@ -24,8 +57,8 @@ export const config = {
   firebase: {
     projectId: required('FIREBASE_PROJECT_ID'),
     clientEmail: required('FIREBASE_CLIENT_EMAIL'),
-    // Normaliza \n literais vindos do .env
-    privateKey: required('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n'),
+    // Normaliza aspas, \n literais e CRLF vindos do .env / docker --env-file
+    privateKey: normalizePrivateKey(required('FIREBASE_PRIVATE_KEY')),
   },
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
