@@ -1,0 +1,36 @@
+{
+  "name": "agente-igor",
+  "version": "1.0.0",
+  "description": "Agente pessoal de IA com roteamento por subagentes via WhatsApp (Evolution API)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "whatsapp",
+    "evolution-api",
+    "openai",
+    "agent",
+    "firebase"
+  ],
+  "author": "Igor",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.1",
+    "node-cron": "^3.0.3",
+    "openai": "^4.52.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.2",
+    "@types/node-cron": "^3.0.11",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}
