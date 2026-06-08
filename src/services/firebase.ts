@@ -64,30 +64,80 @@ export async function seedDefaultSubagents(defaults: Omit<Subagent, 'id'>[]): Pr
   console.log(`[firebase] ${defaults.length} subagentes padrão criados.`);
 }
 
-// ===================== Memória =====================
+// ===================== Memória (por subagente) =====================
 
-/** Salva uma mensagem na memória de conversa de um contato. */
-export async function appendMemory(
-  contact: string,
-  message: MemoryMessage
-): Promise<void> {
-  await memoryCol.doc(contact).collection('messages').add(message);
+/**
+ * Memória separada por subagente, para não misturar assuntos de projetos
+ * diferentes. Estrutura: memory/{contato}/agents/{subagentId}/messages.
+ */
+function messagesCol(contact: string, subagentId: string) {
+  return memoryCol
+    .doc(contact)
+    .collection('agents')
+    .doc(subagentId)
+    .collection('messages');
 }
 
-/** Recupera as últimas N mensagens de um contato, em ordem cronológica. */
+/** Salva uma mensagem na memória de um contato dentro de um subagente. */
+export async function appendMemory(
+  contact: string,
+  subagentId: string,
+  message: MemoryMessage
+): Promise<void> {
+  await messagesCol(contact, subagentId).add(message);
+}
+
+/** Últimas N mensagens do contato naquele subagente, em ordem cronológica. */
 export async function getRecentMemory(
   contact: string,
+  subagentId: string,
   limit = 12
 ): Promise<MemoryMessage[]> {
-  const snap = await memoryCol
-    .doc(contact)
-    .collection('messages')
+  const snap = await messagesCol(contact, subagentId)
     .orderBy('timestamp', 'desc')
     .limit(limit)
     .get();
-  return snap.docs
-    .map((d) => d.data() as MemoryMessage)
-    .reverse();
+  return snap.docs.map((d) => d.data() as MemoryMessage).reverse();
+}
+
+// ===================== Fatos persistentes (por subagente) =====================
+
+/**
+ * Fatos de longo prazo que o agente deve lembrar entre conversas
+ * (ex: nomes de clientes, preferências, status de projetos).
+ * Estrutura: memory/{contato}/agents/{subagentId}/facts.
+ */
+function factsCol(contact: string, subagentId: string) {
+  return memoryCol
+    .doc(contact)
+    .collection('agents')
+    .doc(subagentId)
+    .collection('facts');
+}
+
+export async function saveFact(
+  contact: string,
+  subagentId: string,
+  fact: string
+): Promise<void> {
+  const text = fact.trim();
+  if (!text) return;
+  // Evita duplicar o mesmo fato.
+  const dup = await factsCol(contact, subagentId).where('text', '==', text).limit(1).get();
+  if (!dup.empty) return;
+  await factsCol(contact, subagentId).add({ text, createdAt: Date.now() });
+}
+
+export async function getFacts(
+  contact: string,
+  subagentId: string,
+  limit = 30
+): Promise<string[]> {
+  const snap = await factsCol(contact, subagentId)
+    .orderBy('createdAt', 'desc')
+    .limit(limit)
+    .get();
+  return snap.docs.map((d) => (d.data() as { text: string }).text);
 }
 
 // ===================== Tarefas =====================

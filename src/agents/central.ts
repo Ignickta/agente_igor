@@ -87,27 +87,23 @@ export async function handleMessage(
     return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
   }
 
-  const memory = await getRecentMemory(contact, 12);
-  const recentContext = memory
-    .slice(-4)
-    .map((m) => `${m.role === 'user' ? 'Igor' : 'Agente'}: ${m.content}`)
-    .join('\n');
-
   // 1) Roteamento barato por keyword, com fallback para LLM.
+  //    (A memória agora é por subagente, então roteamos antes de carregá-la.)
   let target = routeByKeywords(text, subagents);
   if (!target) {
-    target = await routeByLLM(text, subagents, recentContext);
+    target = await routeByLLM(text, subagents, '');
   }
 
   console.log(`[central] roteado para: ${target.name}`);
 
-  // 2) Executa o subagente escolhido.
-  const reply = await runSubagent(target, text, memory, fromAudio);
+  // 2) Carrega a memória DESTE subagente e executa.
+  const memory = await getRecentMemory(contact, target.id, 12);
+  const reply = await runSubagent(target, text, memory, fromAudio, contact);
 
-  // 3) Persiste memória da conversa (usuário + resposta).
+  // 3) Persiste memória da conversa nesse subagente (usuário + resposta).
   const ts = Date.now();
-  await appendMemory(contact, { role: 'user', content: text, timestamp: ts });
-  await appendMemory(contact, {
+  await appendMemory(contact, target.id, { role: 'user', content: text, timestamp: ts });
+  await appendMemory(contact, target.id, {
     role: 'assistant',
     content: reply,
     timestamp: ts + 1,

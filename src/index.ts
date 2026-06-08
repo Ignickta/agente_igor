@@ -3,7 +3,8 @@ import { config, isAllowed } from './config';
 import { adminRouter } from './routes/admin';
 import { parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
-import { sendText } from './services/evolution';
+import { sendText, sendAudio } from './services/evolution';
+import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
 import { seedDefaultSubagents } from './services/firebase';
 import { DEFAULT_SUBAGENTS } from './agents/subagents/defaults';
@@ -80,7 +81,20 @@ async function processIncoming(body: unknown): Promise<void> {
   // Roteia pelo agente central e responde
   try {
     const reply = await handleMessage(msg.from, text, msg.isAudio);
-    await sendText(msg.from, reply);
+    if (!reply) return;
+
+    // Se a mensagem veio em áudio, responde também em áudio (TTS).
+    // Sempre envia o texto também, como fallback/registro.
+    if (msg.isAudio) {
+      try {
+        const audioBase64 = await textToSpeechBase64(reply);
+        await sendAudio(msg.from, audioBase64);
+      } catch (ttsErr) {
+        console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
+      }
+    }
+    // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
+    await sendText(msg.from, reply, 1200);
   } catch (err) {
     console.error('[webhook] falha ao gerar/enviar resposta:', err);
     await sendText(msg.from, 'Ops, algo deu errado aqui. Tenta de novo em instantes? 🙏');

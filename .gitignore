@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 serviceAccount*.json
+
+# Config local do Claude Code (pode conter segredos)
+.claude/settings.json
+.claude/settings.local.json

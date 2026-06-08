@@ -53,6 +53,8 @@ export const config = {
     apiKey: required('OPENAI_API_KEY'),
     model: process.env.OPENAI_MODEL || 'gpt-4o',
     transcriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1',
+    ttsModel: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+    ttsVoice: process.env.OPENAI_TTS_VOICE || 'alloy',
   },
   firebase: {
     projectId: required('FIREBASE_PROJECT_ID'),

@@ -14,15 +14,39 @@ const client = axios.create({
  * Envia uma mensagem de texto via Evolution API.
  * @param to número no formato internacional sem símbolos, ex: 5511999999999
  */
-export async function sendText(to: string, text: string): Promise<void> {
+export async function sendText(
+  to: string,
+  text: string,
+  delayMs = 0
+): Promise<void> {
   const number = normalizeNumber(to);
   try {
+    // `delay` faz a Evolution exibir "digitando..." pelo tempo informado
+    // antes de entregar a mensagem — feedback natural sem endpoint extra.
     await client.post(`/message/sendText/${config.evolution.instance}`, {
       number,
       text,
+      ...(delayMs > 0 ? { delay: delayMs } : {}),
     });
   } catch (err) {
     logAxiosError('sendText', err);
+    throw err;
+  }
+}
+
+/**
+ * Envia um áudio (PTT/voz) a partir de um base64.
+ * Usado para responder em áudio (TTS).
+ */
+export async function sendAudio(to: string, audioBase64: string): Promise<void> {
+  const number = normalizeNumber(to);
+  try {
+    await client.post(`/message/sendWhatsAppAudio/${config.evolution.instance}`, {
+      number,
+      audio: audioBase64,
+    });
+  } catch (err) {
+    logAxiosError('sendAudio', err);
     throw err;
   }
 }
