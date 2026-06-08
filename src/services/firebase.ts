@@ -98,14 +98,19 @@ export async function createTask(data: Omit<Task, 'id' | 'createdAt' | 'done'>):
   return { id: ref.id, ...task };
 }
 
-/** Tarefas pendentes que já passaram do horário de lembrar. */
+/**
+ * Tarefas pendentes que já passaram do horário de lembrar.
+ *
+ * Usa apenas um filtro de igualdade (`done == false`) — que não exige índice
+ * composto no Firestore — e filtra por horário em memória. O volume de tarefas
+ * pendentes é pequeno, então isso é eficiente e evita a necessidade de índice.
+ */
 export async function getDueTasks(): Promise<Task[]> {
   const nowIso = new Date().toISOString();
-  const snap = await tasksCol
-    .where('done', '==', false)
-    .where('remindAt', '<=', nowIso)
-    .get();
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Task));
+  const snap = await tasksCol.where('done', '==', false).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .filter((t) => t.remindAt <= nowIso);
 }
 
 export async function markTaskDone(id: string): Promise<void> {
