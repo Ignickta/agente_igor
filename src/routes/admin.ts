@@ -12,7 +12,14 @@ import {
   updateTask,
   deleteTask,
   getMetrics,
+  getAgendaForDay,
+  getAgendaItem,
+  createAgendaItem,
+  updateAgendaItem,
+  deleteAgendaItem,
 } from '../services/firebase';
+import { generateDailySchedule, dayKey } from '../agents/orchestrator';
+import { AgendaItem } from '../types';
 
 export const adminRouter = Router();
 
@@ -166,5 +173,83 @@ adminRouter.delete('/tasks/:id', async (req, res) => {
   const existing = await getTask(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
   await deleteTask(req.params.id);
+  res.json({ ok: true });
+});
+
+// ===================== Agenda (cronograma diário) =====================
+
+const AGENDA_TYPES = ['task', 'event', 'research'];
+const AGENDA_STATUSES = ['pending', 'in_progress', 'done'];
+
+// Lista a agenda de um dia. ?date=YYYY-MM-DD (padrão: hoje).
+adminRouter.get('/agenda', async (req, res) => {
+  const date = (req.query.date as string)?.trim() || dayKey();
+  const items = await getAgendaForDay(date);
+  res.json(items);
+});
+
+// Cria um item da agenda. Itens fixos do usuário usam priority 1 / createdBy 'user'.
+adminRouter.post('/agenda', async (req, res) => {
+  const { title, date, startTime, endTime, priority, type, status, createdBy, subagentId, notes } =
+    req.body;
+  if (!title || !date || !startTime || !endTime) {
+    return res
+      .status(400)
+      .json({ error: 'title, date, startTime e endTime são obrigatórios' });
+  }
+  const item = await createAgendaItem({
+    title,
+    date,
+    startTime,
+    endTime,
+    priority: Math.min(5, Math.max(1, Number(priority) || 3)),
+    type: AGENDA_TYPES.includes(type) ? type : 'task',
+    status: AGENDA_STATUSES.includes(status) ? status : 'pending',
+    createdBy: createdBy === 'agent' ? 'agent' : 'user',
+    ...(subagentId ? { subagentId } : {}),
+    ...(notes ? { notes } : {}),
+  });
+  res.status(201).json(item);
+});
+
+// Gera o cronograma do dia a partir das tarefas pendentes. ?date=&force=true
+adminRouter.post('/agenda/generate', async (req, res) => {
+  const date = (req.query.date as string)?.trim() || dayKey();
+  const force = req.query.force === 'true';
+  const items = await generateDailySchedule(date, force);
+  res.json({ date, count: items.length, items });
+});
+
+// Atualiza um item da agenda (status, horários, prioridade, etc.).
+adminRouter.put('/agenda/:id', async (req, res) => {
+  const existing = await getAgendaItem(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
+
+  const { title, date, startTime, endTime, priority, type, status, createdBy, subagentId, notes } =
+    req.body;
+  const update: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> = {};
+  if (title !== undefined) update.title = title;
+  if (date !== undefined) update.date = date;
+  if (startTime !== undefined) update.startTime = startTime;
+  if (endTime !== undefined) update.endTime = endTime;
+  if (priority !== undefined) update.priority = Math.min(5, Math.max(1, Number(priority) || 3));
+  if (type !== undefined && AGENDA_TYPES.includes(type)) update.type = type;
+  if (status !== undefined && AGENDA_STATUSES.includes(status)) update.status = status;
+  if (createdBy !== undefined) update.createdBy = createdBy === 'agent' ? 'agent' : 'user';
+  if (subagentId !== undefined) update.subagentId = subagentId;
+  if (notes !== undefined) update.notes = notes;
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  }
+  await updateAgendaItem(req.params.id, update);
+  res.json({ ok: true });
+});
+
+// Remove um item da agenda.
+adminRouter.delete('/agenda/:id', async (req, res) => {
+  const existing = await getAgendaItem(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
+  await deleteAgendaItem(req.params.id);
   res.json({ ok: true });
 });

@@ -1,6 +1,6 @@
 import admin from 'firebase-admin';
 import { config } from '../config';
-import { Subagent, MemoryMessage, Task } from '../types';
+import { Subagent, MemoryMessage, Task, AgendaItem } from '../types';
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -18,6 +18,7 @@ const subagentsCol = db.collection('subagents');
 const tasksCol = db.collection('tasks');
 const memoryCol = db.collection('memory');
 const metricsCol = db.collection('metrics');
+const agendaCol = db.collection('agenda');
 
 // ===================== Subagentes =====================
 
@@ -63,6 +64,20 @@ export async function seedDefaultSubagents(defaults: Omit<Subagent, 'id'>[]): Pr
   }
   await batch.commit();
   console.log(`[firebase] ${defaults.length} subagentes padrão criados.`);
+}
+
+/**
+ * Garante que um subagente exista (por nome), criando-o se ausente.
+ *
+ * Diferente de `seedDefaultSubagents` (que só roda com a coleção vazia), isto é
+ * idempotente e funciona em bancos já populados — usado para introduzir o
+ * subagente "Agenda / Orquestrador" sem duplicar a cada reboot.
+ */
+export async function ensureSubagent(def: Omit<Subagent, 'id'>): Promise<Subagent> {
+  const existing = await listSubagents(true);
+  const found = existing.find((s) => s.name === def.name);
+  if (found) return found;
+  return createSubagent(def);
 }
 
 // ===================== Memória (por subagente) =====================
@@ -254,6 +269,56 @@ export async function getMetrics(days = 7): Promise<DayMetric[]> {
       names: data.names || {},
     };
   });
+}
+
+// ===================== Agenda (cronograma diário) =====================
+
+/**
+ * Cria um item da agenda. Injeta `createdAt` e default `status:'pending'`.
+ * Datas/horas seguem o schema textual do resto do projeto (date YYYY-MM-DD,
+ * horários HH:mm), sem usar Timestamp nativo do Firestore.
+ */
+export async function createAgendaItem(
+  data: Omit<AgendaItem, 'id' | 'createdAt' | 'status'> & { status?: AgendaItem['status'] }
+): Promise<AgendaItem> {
+  const item = {
+    status: 'pending' as const,
+    ...data,
+    createdAt: Date.now(),
+  };
+  const ref = await agendaCol.add(item);
+  return { id: ref.id, ...item };
+}
+
+/**
+ * Itens da agenda de um dia (YYYY-MM-DD), ordenados por horário de início.
+ *
+ * Usa apenas um filtro de igualdade (`date ==`) — que não exige índice composto
+ * — e ordena em memória, mesma estratégia de `getDueTasks`.
+ */
+export async function getAgendaForDay(date: string): Promise<AgendaItem[]> {
+  const snap = await agendaCol.where('date', '==', date).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as AgendaItem))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+}
+
+export async function getAgendaItem(id: string): Promise<AgendaItem | null> {
+  const doc = await agendaCol.doc(id).get();
+  if (!doc.exists) return null;
+  return { id: doc.id, ...doc.data() } as AgendaItem;
+}
+
+/** Atualiza campos de um item da agenda (status, horários, prioridade...). */
+export async function updateAgendaItem(
+  id: string,
+  data: Partial<Omit<AgendaItem, 'id' | 'createdAt'>>
+): Promise<void> {
+  await agendaCol.doc(id).set(data, { merge: true });
+}
+
+export async function deleteAgendaItem(id: string): Promise<void> {
+  await agendaCol.doc(id).delete();
 }
 
 export { db };

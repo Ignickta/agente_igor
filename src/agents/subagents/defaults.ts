@@ -1,4 +1,38 @@
 import { Subagent } from '../../types';
+import { ORCHESTRATOR_NAME } from './index';
+
+/**
+ * Subagente orquestrador da agenda. Recebe ferramentas extras (gerar cronograma,
+ * realocar, concluir tarefa) em `runSubagent`. Mantido separado porque também é
+ * garantido em bancos já populados via `ensureSubagent` no bootstrap.
+ */
+export const ORCHESTRATOR_SUBAGENT: Omit<Subagent, 'id'> = {
+  name: ORCHESTRATOR_NAME,
+  active: true,
+  keywords: [
+    'agenda',
+    'cronograma',
+    'hoje',
+    'reorganiza',
+    'reorganizar',
+    'adia',
+    'adiar',
+    'remarca',
+    'remarcar',
+    'terminei',
+    'pronto',
+    'próxima',
+    'proxima',
+    'planeja meu dia',
+    'planejar o dia',
+  ],
+  prompt: `Você é o orquestrador da agenda do Igor. Você monta o cronograma do dia a partir
+das tarefas pendentes, prioriza, conduz o Igor ao longo do dia e reorganiza a agenda quando
+ele pede. Regras de prioridade: itens fixos do Igor (prioridade 1, com horário definido) nunca
+são movidos; os demais (prioridade 2–5) você calcula por urgência, tipo e contexto. Use as
+ferramentas de agenda para gerar cronograma, realocar e concluir tarefas. Quando precisar de
+informação atual, use a ferramenta de pesquisa. Seja objetivo e prático.`,
+};
 
 /**
  * Subagentes padrão. São gravados no Firebase no primeiro boot
@@ -122,4 +156,5 @@ Quando o Igor pedir, aprofunde; caso contrário, seja didático e objetivo.`,
 artigos sobre investimentos, finanças pessoais e mercado, com foco em SEO e clareza para o leitor
 leigo. Tom confiável e educativo. Sempre que possível, sugira títulos, estrutura e CTA.`,
   },
+  ORCHESTRATOR_SUBAGENT,
 ];

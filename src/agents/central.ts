@@ -1,4 +1,5 @@
 import { Subagent } from '../types';
+import { config } from '../config';
 import { chat, ChatMessage } from '../services/openai';
 import {
   listSubagents,
@@ -8,6 +9,42 @@ import {
 } from '../services/firebase';
 import { runSubagent } from './subagents';
 import { tryHandleCommand } from './commands';
+import { getActiveItem, advanceTask } from './orchestrator';
+
+/** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
+const DONE_PHRASES = [
+  'terminei',
+  'terminado',
+  'concluí',
+  'conclui',
+  'concluído',
+  'concluido',
+  'finalizei',
+  'pronto',
+  'feito',
+  'acabei',
+  'já fiz',
+  'ja fiz',
+];
+
+/**
+ * Atalho de conclusão: se a mensagem for uma confirmação curta e houver um item
+ * em andamento na agenda de hoje, avança a tarefa e avisa a próxima — sem gastar
+ * roteamento por LLM. Retorna a resposta a enviar, ou null se não se aplica.
+ */
+async function tryAdvanceAgenda(text: string): Promise<string | null> {
+  const lower = text.trim().toLowerCase();
+  // Só dispara para mensagens curtas, evitando falsos positivos em textos longos.
+  if (lower.length > 40) return null;
+  if (!DONE_PHRASES.some((p) => lower.includes(p))) return null;
+
+  const active = await getActiveItem();
+  if (!active || active.status !== 'in_progress') return null;
+
+  await advanceTask(active);
+  // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.
+  return '';
+}
 
 /**
  * Tenta um roteamento rápido por palavras-chave antes de gastar uma
@@ -81,6 +118,13 @@ export async function handleMessage(
   const command = await tryHandleCommand(contact, text);
   if (command.handled) {
     return command.reply || '';
+  }
+
+  // 0.5) Atalho de conclusão da tarefa atual ("terminei", "pronto", ...).
+  //      Só do dono e quando há item em andamento na agenda.
+  if (contact === config.ownerPhone || !config.ownerPhone) {
+    const advanced = await tryAdvanceAgenda(text);
+    if (advanced !== null) return advanced;
   }
 
   const subagents = await listSubagents();

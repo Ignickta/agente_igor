@@ -34,6 +34,43 @@ export interface Task {
   createdAt: number;
 }
 
+/** Tipo de item da agenda. */
+export type AgendaType = 'task' | 'event' | 'research';
+
+/** Estado de um item da agenda ao longo do dia. */
+export type AgendaStatus = 'pending' | 'in_progress' | 'done';
+
+/** Quem criou o item: o usuário (fixo) ou o agente (calculado). */
+export type CreatedBy = 'user' | 'agent';
+
+/**
+ * Item do cronograma diário, persistido na collection `agenda`.
+ *
+ * Convenção de prioridade:
+ *  - priority 1  → item fixo do usuário com horário definido; NUNCA é movido
+ *    pelo reorganizador.
+ *  - priority 2–5 → calculada pelo agente (deadline, tipo e contexto da
+ *    memória); reencaixada em volta dos itens fixos.
+ */
+export interface AgendaItem {
+  id: string;
+  title: string;
+  /** Data ISO no formato YYYY-MM-DD (dia local). */
+  date: string;
+  /** Horário de início HH:mm. */
+  startTime: string;
+  /** Horário de fim HH:mm. */
+  endTime: string;
+  /** 1 (fixo do usuário) a 5 (menos prioritário). */
+  priority: number;
+  type: AgendaType;
+  status: AgendaStatus;
+  createdBy: CreatedBy;
+  subagentId?: string;
+  notes?: string;
+  createdAt: number;
+}
+
 /** Mensagem normalizada extraída do webhook da Evolution. */
 export interface IncomingMessage {
   from: string;

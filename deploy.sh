@@ -17,7 +17,7 @@ APP_DIR="/opt/agente-igor"
 ENV_FILE="/opt/agente-igor.env"   # arquivo com os segredos (NAO versionado)
 IMAGE_NAME="agente-igor"
 CONTAINER_NAME="agente-igor"
-PORT="3000"
+PORT="3001"
 
 log()  { echo -e "\n\033[1;32m==>\033[0m $*"; }
 err()  { echo -e "\n\033[1;31mERRO:\033[0m $*" >&2; exit 1; }
