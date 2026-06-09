@@ -63,13 +63,21 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'pesquisar',
       description:
-        'Pesquisa um tema/pergunta na web e retorna um resumo com fontes. Use quando o usuário ' +
-        'pedir informação atual, novidades, dados de mercado, ou algo que você não saiba com ' +
-        'certeza. A resposta da ferramenta já vem formatada — repasse-a ao usuário.',
+        'Pesquisa um tema/pergunta na web e retorna fatos atuais com fontes. Acione por conta ' +
+        'própria, SEM o usuário precisar pedir, sempre que pesquisar deixaria sua resposta mais ' +
+        'precisa: informação que muda com o tempo (preços, cotações, datas, versões, notícias, ' +
+        'novidades), dados que você não sabe com certeza, ou qualquer coisa que valha confirmar. ' +
+        'O retorno é material de apoio: NÃO o cole cru — extraia o que importa e incorpore na sua ' +
+        'resposta com naturalidade, dentro do seu papel de subagente. Pode pesquisar mais de uma ' +
+        'vez se precisar de ângulos diferentes.',
       parameters: {
         type: 'object',
         properties: {
-          tema: { type: 'string', description: 'A pergunta ou tema a pesquisar.' },
+          tema: {
+            type: 'string',
+            description:
+              'A pergunta ou tema a pesquisar, específico o suficiente para uma busca útil.',
+          },
         },
         required: ['tema'],
       },
@@ -171,7 +179,13 @@ Regras gerais:
     fromAudio ? '\n- A mensagem atual foi enviada por áudio (já transcrita).' : ''
   }
 - Data e hora atuais: ${nowStr} (fuso ${config.timezone}). Use isto para calcular lembretes.
-- Você PODE criar lembretes e salvar fatos usando as ferramentas disponíveis.${
+- Você PODE criar lembretes e salvar fatos usando as ferramentas disponíveis.
+- Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
+  sem o Igor pedir, sempre que dados atuais ou que você não tenha certeza melhorariam
+  sua resposta (preços, cotações, versões, notícias, novidades do seu domínio). Depois
+  incorpore os achados naturalmente à sua resposta — falando como o subagente
+  "${subagent.name}", sem colar o texto da pesquisa cru e sem dizer "segundo a pesquisa".
+  Cite as fontes brevemente só quando fizer sentido.${
     facts.length
       ? `\n\nFatos que você já sabe sobre este projeto/usuário:\n${facts
           .map((f) => `- ${f}`)
@@ -264,7 +278,9 @@ async function executeTool(
     if (call.function.name === 'pesquisar') {
       const tema = String(args.tema || '').trim();
       if (!tema) return 'Tema de pesquisa vazio.';
-      return await research(tema);
+      // Modo 'findings': material de apoio cru, para o subagente integrar à sua
+      // própria resposta (em vez de colar uma resposta pronta).
+      return await research(tema, 'findings');
     }
 
     if (call.function.name === 'gerar_cronograma') {
