@@ -6,8 +6,8 @@ import { transcribeAudioBase64 } from './services/transcription';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
-import { seedDefaultSubagents } from './services/firebase';
-import { DEFAULT_SUBAGENTS } from './agents/subagents/defaults';
+import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
+import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
 
 const app = express();
@@ -105,7 +105,10 @@ async function bootstrap(): Promise<void> {
   // Garante os subagentes padrão no primeiro boot
   await seedDefaultSubagents(DEFAULT_SUBAGENTS);
 
-  // Inicia jobs proativos (bom dia, lembretes)
+  // Garante o subagente orquestrador mesmo em bancos já populados (idempotente).
+  await ensureSubagent(ORCHESTRATOR_SUBAGENT);
+
+  // Inicia jobs proativos (cronograma do dia, lembretes, transições)
   startScheduler();
 
   app.listen(config.server.port, () => {

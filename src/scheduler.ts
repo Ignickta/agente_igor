@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
 import { getDueTasks, markTaskDone } from './services/firebase';
+import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 
 /**
  * Inicia os jobs proativos:
@@ -33,18 +34,16 @@ export function startScheduler(): void {
     return;
   }
 
-  // Bom dia — todo dia às 07:00
+  // Bom dia + cronograma do dia — todo dia às 07:00.
+  // O orquestrador gera a agenda a partir das tarefas pendentes e envia ao dono.
   cron.schedule(
     '0 7 * * *',
     async () => {
       try {
-        await sendText(
-          config.ownerPhone,
-          'Bom dia, Igor! ☀️ Qual o foco de hoje? Posso te ajudar com odonto, arroz, automação, estudos ou o blog.'
-        );
-        console.log('[scheduler] mensagem de bom dia enviada.');
+        await sendDailySchedule();
+        console.log('[scheduler] cronograma do dia enviado.');
       } catch (err) {
-        console.error('[scheduler] falha ao enviar bom dia:', err);
+        console.error('[scheduler] falha ao enviar cronograma do dia:', err);
       }
     },
     opts
@@ -63,6 +62,14 @@ export function startScheduler(): void {
         }
       } catch (err) {
         console.error('[scheduler] falha ao processar lembretes:', err);
+      }
+
+      // Transições da agenda por horário (modo horário do híbrido): avança itens
+      // cujo endTime já passou e avisa a próxima tarefa.
+      try {
+        await processTimeBasedTransitions();
+      } catch (err) {
+        console.error('[scheduler] falha nas transições da agenda:', err);
       }
     },
     opts

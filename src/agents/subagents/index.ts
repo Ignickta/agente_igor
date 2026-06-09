@@ -2,7 +2,20 @@ import { Subagent, MemoryMessage } from '../../types';
 import { openai, ChatMessage } from '../../services/openai';
 import { config } from '../../config';
 import { createTask, saveFact, getFacts } from '../../services/firebase';
+import { research } from '../research';
+import {
+  generateDailySchedule,
+  formatSchedule,
+  sendDailySchedule,
+  reorganize,
+  getActiveItem,
+  advanceTask,
+  dayKey,
+} from '../orchestrator';
 import type OpenAI from 'openai';
+
+/** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
+export const ORCHESTRATOR_NAME = 'Agenda / Orquestrador';
 
 /** Ferramentas que o agente pode chamar por conta própria (function calling). */
 const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
@@ -45,7 +58,90 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'pesquisar',
+      description:
+        'Pesquisa um tema/pergunta na web e retorna um resumo com fontes. Use quando o usuário ' +
+        'pedir informação atual, novidades, dados de mercado, ou algo que você não saiba com ' +
+        'certeza. A resposta da ferramenta já vem formatada — repasse-a ao usuário.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tema: { type: 'string', description: 'A pergunta ou tema a pesquisar.' },
+        },
+        required: ['tema'],
+      },
+    },
+  },
 ];
+
+/**
+ * Ferramentas exclusivas do subagente orquestrador (Agenda). Só são oferecidas
+ * quando o subagente em execução é o de agenda — os demais seguem com o conjunto
+ * base, mantendo compatibilidade.
+ */
+const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'gerar_cronograma',
+      description:
+        'Gera (ou mostra) o cronograma do dia a partir das tarefas pendentes e prioridade ' +
+        'calculada, e envia ao Igor. Use quando ele pedir para planejar/montar/ver o dia.',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'string',
+            description: 'Data YYYY-MM-DD. Opcional; padrão = hoje.',
+          },
+          enviar: {
+            type: 'boolean',
+            description:
+              'Se true, envia o cronograma pelo WhatsApp além de retornar. Padrão false.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'realocar_agenda',
+      description:
+        'Reorganiza a agenda de hoje conforme um pedido em linguagem natural (ex: "adia o ' +
+        'dentista pra depois do almoço"). Itens fixos do usuário (prioridade 1) nunca são movidos.',
+      parameters: {
+        type: 'object',
+        properties: {
+          instrucao: {
+            type: 'string',
+            description: 'O pedido de realocação, em linguagem natural.',
+          },
+        },
+        required: ['instrucao'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'concluir_tarefa_atual',
+      description:
+        'Marca a tarefa atual (em andamento) como concluída e avança para a próxima, avisando ' +
+        'o usuário. Use quando ele disser que terminou/concluiu o item atual.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+];
+
+/** Conjunto de tools efetivo para um subagente (base + orquestrador, se for o caso). */
+function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  return subagent.name === ORCHESTRATOR_NAME ? [...TOOLS, ...ORCHESTRATOR_TOOLS] : TOOLS;
+}
 
 /**
  * Executa um subagente com function calling: monta o system prompt (personalidade
@@ -89,13 +185,15 @@ Regras gerais:
     { role: 'user', content: userText },
   ];
 
+  const tools = toolsFor(subagent);
+
   // Loop de tool-calling: o modelo pode chamar ferramentas antes da resposta final.
   for (let step = 0; step < 4; step++) {
     const completion = await openai.chat.completions.create({
       model: config.openai.model,
       temperature: 0.7,
       messages,
-      tools: TOOLS,
+      tools,
     });
 
     const choice = completion.choices[0].message;
@@ -161,6 +259,36 @@ async function executeTool(
       if (!fato || !contact) return 'Nada para salvar.';
       await saveFact(contact, subagentId, fato);
       return `Fato memorizado: "${fato}".`;
+    }
+
+    if (call.function.name === 'pesquisar') {
+      const tema = String(args.tema || '').trim();
+      if (!tema) return 'Tema de pesquisa vazio.';
+      return await research(tema);
+    }
+
+    if (call.function.name === 'gerar_cronograma') {
+      const data = String(args.data || '').trim() || dayKey();
+      const enviar = args.enviar === true;
+      if (enviar) {
+        await sendDailySchedule(data);
+        return `Cronograma de ${data} gerado e enviado pelo WhatsApp.`;
+      }
+      const items = await generateDailySchedule(data);
+      return formatSchedule(items, data);
+    }
+
+    if (call.function.name === 'realocar_agenda') {
+      const instrucao = String(args.instrucao || '').trim();
+      if (!instrucao) return 'Diga o que devo reorganizar.';
+      return await reorganize(instrucao);
+    }
+
+    if (call.function.name === 'concluir_tarefa_atual') {
+      const active = await getActiveItem();
+      if (!active) return 'Não há tarefa em andamento na agenda de hoje.';
+      await advanceTask(active);
+      return `Tarefa "${active.title}" concluída e próxima iniciada.`;
     }
   } catch (err) {
     console.error('[tool] erro ao executar', call.function.name, err);
