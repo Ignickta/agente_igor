@@ -38,9 +38,64 @@ const DONE_REGEX = new RegExp(
 );
 
 /**
- * Atalho de conclusão: se a mensagem for uma confirmação curta e houver um item
- * em andamento na agenda de hoje, avança a tarefa e avisa a próxima — sem gastar
- * roteamento por LLM. Retorna a resposta a enviar, ou null se não se aplica.
+ * Palavras de preenchimento toleradas ao redor de uma confirmação ("sim, já
+ * terminei!", "ok pronto"). Não carregam conteúdo, então não impedem o atalho.
+ */
+const FILLER_WORDS = new Set([
+  'sim',
+  'ok',
+  'okay',
+  'já',
+  'ja',
+  'tudo',
+  'agora',
+  'então',
+  'entao',
+  'pois',
+  'é',
+  'e',
+  'isso',
+  'aí',
+  'ai',
+  'tá',
+  'ta',
+  'está',
+  'esta',
+  'foi',
+  'consegui',
+  'a',
+  'o',
+  'esse',
+  'essa',
+  'task',
+  'tarefa',
+  'item',
+]);
+
+/**
+ * Remove TODAS as ocorrências de frases de conclusão da mensagem e devolve as
+ * palavras de conteúdo restantes (descartando pontuação e fillers). Se sobrar
+ * vazio, a mensagem é uma confirmação "pura".
+ */
+function leftoverContentWords(lower: string): string[] {
+  // Tira as frases de conclusão (com fronteira de palavra).
+  let rest = lower;
+  for (const p of DONE_PHRASES) {
+    rest = rest.replace(
+      new RegExp(`(^|[^\\p{L}])${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^\\p{L}]|$)`, 'giu'),
+      ' '
+    );
+  }
+  return rest
+    .split(/[^\p{L}]+/u)
+    .filter((w) => w && !FILLER_WORDS.has(w));
+}
+
+/**
+ * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA
+ * (somente frases de conclusão + fillers, sem outras palavras de conteúdo) e há
+ * um item em andamento na agenda. Evita falsos positivos como "tá pronto pra
+ * começar". Retorna a resposta a enviar, ou null se não se aplica.
  */
 async function tryAdvanceAgenda(text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
@@ -49,6 +104,9 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
   // Uma pergunta não é uma confirmação de conclusão (ex: "feito o quê?").
   if (lower.includes('?')) return null;
   if (!DONE_REGEX.test(lower)) return null;
+  // Blindagem: a mensagem precisa ser SÓ a confirmação. Se sobrar qualquer
+  // palavra de conteúdo após remover frases de conclusão e fillers, não dispara.
+  if (leftoverContentWords(lower).length > 0) return null;
 
   const active = await getActiveItem();
   if (!active || active.status !== 'in_progress') return null;
