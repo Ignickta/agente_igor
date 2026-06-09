@@ -6,6 +6,7 @@ import { transcribeAudioBase64 } from './services/transcription';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
+import { wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
@@ -106,14 +107,19 @@ async function processIncoming(body: unknown): Promise<void> {
     console.error('[webhook] erro no modo foco (seguindo fluxo normal):', err);
   }
 
+  // Pedido pontual de resposta em áudio (ex: "responde em áudio"). One-shot:
+  // vale só para esta mensagem; o padrão volta a ser texto na próxima.
+  const audioRequested = wantsAudioReply(text);
+
   // Roteia pelo agente central e responde
   try {
     const reply = await handleMessage(msg.from, text, msg.isAudio);
     if (!reply) return;
 
-    // Se a mensagem veio em áudio, responde também em áudio (TTS).
-    // Sempre envia o texto também, como fallback/registro.
-    if (msg.isAudio) {
+    // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que
+    // são transcritas na entrada). Só geramos áudio (TTS) quando o usuário pediu
+    // explicitamente nesta mensagem; nesse caso o texto vai junto como registro.
+    if (audioRequested) {
       try {
         const audioBase64 = await textToSpeechBase64(reply);
         await sendAudio(msg.from, audioBase64);

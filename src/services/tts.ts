@@ -5,7 +5,8 @@ import { config } from '../config';
  * Gera áudio (TTS) a partir de um texto usando a OpenAI.
  * Retorna o áudio em base64, pronto para envio via Evolution.
  *
- * Usado apenas quando o usuário enviou áudio (resposta no mesmo formato).
+ * Usado quando o usuário pede explicitamente uma resposta em áudio
+ * (ex: "responde em áudio"); por padrão o agente responde por texto.
  */
 export async function textToSpeechBase64(text: string): Promise<string> {
   const clean = text.trim();
