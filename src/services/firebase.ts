@@ -1,6 +1,6 @@
 import admin from 'firebase-admin';
 import { config } from '../config';
-import { Subagent, MemoryMessage, Task, AgendaItem } from '../types';
+import { Subagent, MemoryMessage, Task, AgendaItem, FocusSession } from '../types';
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -19,6 +19,7 @@ const tasksCol = db.collection('tasks');
 const memoryCol = db.collection('memory');
 const metricsCol = db.collection('metrics');
 const agendaCol = db.collection('agenda');
+const focusCol = db.collection('focus');
 
 // ===================== Subagentes =====================
 
@@ -180,7 +181,24 @@ export async function getDueTasks(): Promise<Task[]> {
 }
 
 export async function markTaskDone(id: string): Promise<void> {
-  await tasksCol.doc(id).set({ done: true }, { merge: true });
+  await tasksCol.doc(id).set({ done: true, completedAt: Date.now() }, { merge: true });
+}
+
+/**
+ * Tarefas concluídas num intervalo [start, end] de epoch ms (por completedAt).
+ * Tarefas antigas sem completedAt são ignoradas neste recorte temporal.
+ */
+export async function getCompletedTasksBetween(start: number, end: number): Promise<Task[]> {
+  const snap = await tasksCol.where('done', '==', true).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .filter((t) => t.completedAt != null && t.completedAt >= start && t.completedAt <= end);
+}
+
+/** Todas as tarefas pendentes (done == false), sem filtro de horário. */
+export async function getPendingTasks(): Promise<Task[]> {
+  const snap = await tasksCol.where('done', '==', false).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Task));
 }
 
 /** Lista todas as tarefas, ordenadas por horário de lembrar (crescente). */
@@ -303,6 +321,25 @@ export async function getAgendaForDay(date: string): Promise<AgendaItem[]> {
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
 }
 
+/**
+ * Itens da agenda num intervalo de datas [start, end] inclusivo (YYYY-MM-DD),
+ * ordenados por data e depois por horário de início.
+ *
+ * Como `date` é string YYYY-MM-DD (ordenável lexicograficamente), um range em um
+ * único campo não exige índice composto no Firestore.
+ */
+export async function getAgendaInRange(start: string, end: string): Promise<AgendaItem[]> {
+  const snap = await agendaCol
+    .where('date', '>=', start)
+    .where('date', '<=', end)
+    .get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as AgendaItem))
+    .sort((a, b) =>
+      a.date === b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date)
+    );
+}
+
 export async function getAgendaItem(id: string): Promise<AgendaItem | null> {
   const doc = await agendaCol.doc(id).get();
   if (!doc.exists) return null;
@@ -319,6 +356,35 @@ export async function updateAgendaItem(
 
 export async function deleteAgendaItem(id: string): Promise<void> {
   await agendaCol.doc(id).delete();
+}
+
+// ===================== Modo foco =====================
+
+/** Inicia/renova a sessão de foco de um contato (documento por contato). */
+export async function startFocus(contact: string, endsAt: number): Promise<FocusSession> {
+  const session: FocusSession = { contact, startedAt: Date.now(), endsAt, ended: false };
+  await focusCol.doc(contact).set(session);
+  return session;
+}
+
+/** Sessão de foco do contato, ou null se não houver. */
+export async function getFocus(contact: string): Promise<FocusSession | null> {
+  const doc = await focusCol.doc(contact).get();
+  if (!doc.exists) return null;
+  return doc.data() as FocusSession;
+}
+
+/** Marca a sessão de foco como encerrada (após avisar o usuário). */
+export async function endFocus(contact: string): Promise<void> {
+  await focusCol.doc(contact).set({ ended: true }, { merge: true });
+}
+
+/** Sessões de foco expiradas (endsAt passou) e ainda não avisadas. */
+export async function getExpiredFocusSessions(now = Date.now()): Promise<FocusSession[]> {
+  const snap = await focusCol.where('ended', '==', false).get();
+  return snap.docs
+    .map((d) => d.data() as FocusSession)
+    .filter((s) => s.endsAt <= now);
 }
 
 export { db };

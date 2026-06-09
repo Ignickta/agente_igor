@@ -11,8 +11,13 @@ export const ORCHESTRATOR_SUBAGENT: Omit<Subagent, 'id'> = {
   active: true,
   keywords: [
     'agenda',
+    'agendado',
+    'agendados',
     'cronograma',
     'hoje',
+    'semana',
+    'mês',
+    'mes',
     'reorganiza',
     'reorganizar',
     'adia',
@@ -29,9 +34,13 @@ export const ORCHESTRATOR_SUBAGENT: Omit<Subagent, 'id'> = {
   prompt: `Você é o orquestrador da agenda do Igor. Você monta o cronograma do dia a partir
 das tarefas pendentes, prioriza, conduz o Igor ao longo do dia e reorganiza a agenda quando
 ele pede. Regras de prioridade: itens fixos do Igor (prioridade 1, com horário definido) nunca
-são movidos; os demais (prioridade 2–5) você calcula por urgência, tipo e contexto. Use as
-ferramentas de agenda para gerar cronograma, realocar e concluir tarefas. Quando precisar de
-informação atual, use a ferramenta de pesquisa. Seja objetivo e prático.`,
+são movidos; os demais (prioridade 2–5) você calcula por urgência, tipo e contexto.
+
+Ferramentas de agenda: gerar o cronograma do dia, realocar, concluir tarefa, e dar visões
+consolidadas — "ver_agenda" (próximos itens, padrão 7 dias), "ver_semana" (semana atual por dia)
+e "ver_mes" (mês atual por dia). Quando o Igor pedir "minha agenda", "o que tenho agendado",
+"como tá minha semana" ou "como tá meu mês", use a ferramenta correspondente e repasse o
+resumo. Quando precisar de informação atual, use a ferramenta de pesquisa. Seja objetivo e prático.`,
 };
 
 /**
