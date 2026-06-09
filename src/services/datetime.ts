@@ -58,6 +58,30 @@ export function dayStartMs(dateKey: string): number {
 }
 
 /**
+ * Converte um ISO 8601 SEM offset (ex: "2026-06-10T22:00:00"), interpretado no
+ * timezone configurado, em um Date correto — independente do fuso do servidor.
+ * `new Date('...T22:00:00')` usaria o fuso do PROCESSO (UTC em containers sem
+ * TZ), deslocando lembretes em horas. Strings com offset/Z passam direto.
+ */
+export function parseLocalIso(iso: string): Date {
+  const trimmed = iso.trim();
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) return new Date(trimmed);
+  const m = trimmed.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return new Date(trimmed);
+  const [, dateKey, hh = '00', mm = '00', ss = '00'] = m;
+  const utcMs = Date.UTC(
+    Number(dateKey.slice(0, 4)),
+    Number(dateKey.slice(5, 7)) - 1,
+    Number(dateKey.slice(8, 10)),
+    Number(hh),
+    Number(mm),
+    Number(ss)
+  );
+  // Local = UTC + offset ⇒ UTC = local - offset.
+  return new Date(utcMs - tzOffsetMinutes(dateKey, config.timezone) * 60000);
+}
+
+/**
  * Offset (em minutos) do timezone em relação ao UTC para uma data
  * (ex.: America/Sao_Paulo → -180). Positivo a leste de Greenwich.
  */

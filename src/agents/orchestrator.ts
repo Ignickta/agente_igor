@@ -153,9 +153,10 @@ export async function generateDailySchedule(
     return existing;
   }
 
-  // Tarefas pendentes cujo lembrete cai no dia alvo.
+  // Tarefas pendentes cujo lembrete cai no dia alvo (data LOCAL: remindAt é
+  // ISO UTC, e cortar a string colocaria lembretes após as 21h no dia seguinte).
   const tasks = (await listTasks()).filter(
-    (t) => !t.done && t.remindAt.slice(0, 10) === date
+    (t) => !t.done && dayKey(new Date(t.remindAt)) === date
   );
 
   // Itens fixos do usuário (não serão movidos).
@@ -391,7 +392,8 @@ async function collectEntries(start: string, end: string): Promise<Map<string, S
 
   for (const t of tasks) {
     if (t.done) continue;
-    const date = t.remindAt.slice(0, 10);
+    // Dia LOCAL do lembrete (remindAt é ISO UTC; cortar a string erraria o dia).
+    const date = dayKey(new Date(t.remindAt));
     if (date < start || date > end) continue;
     // Horário local do lembrete (HH:mm) a partir do ISO em remindAt.
     const time = timeKey(new Date(t.remindAt));
