@@ -10,44 +10,13 @@ import {
   createAgendaItem,
   updateAgendaItem,
   getCompletedTasksBetween,
+  markTaskDone,
 } from '../services/firebase';
 import { AgendaItem } from '../types';
+import { dayKey, timeKey, addDays, weekdayOf } from '../services/datetime';
 
-/** Data local (YYYY-MM-DD) no timezone configurado. */
-export function dayKey(date = new Date()): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: config.timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-}
-
-/** Hora local (HH:mm) no timezone configurado. */
-function timeKey(date = new Date()): string {
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone: config.timezone,
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date);
-}
-
-/** Soma `days` a uma data YYYY-MM-DD e devolve outra YYYY-MM-DD (UTC-safe). */
-function addDays(dateKey: string, days: number): string {
-  const d = new Date(`${dateKey}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-/** Dia da semana local (0=domingo .. 6=sábado) de uma data YYYY-MM-DD. */
-function weekdayOf(dateKey: string): number {
-  const wd = new Intl.DateTimeFormat('en-US', {
-    timeZone: config.timezone,
-    weekday: 'short',
-  }).format(new Date(`${dateKey}T12:00:00Z`));
-  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(wd);
-}
+// Reexporta para callers que já importavam dayKey/etc. do orchestrator.
+export { dayKey, addDays, weekdayOf };
 
 /** Intervalo [segunda, domingo] da semana que contém `ref` (padrão: hoje). */
 export function weekRange(ref = dayKey()): { start: string; end: string } {
@@ -272,6 +241,10 @@ Gere o cronograma dos itens NÃO-fixos em JSON:`;
   const fixedTitles = new Set(fixed.map((i) => norm(i.title)));
   const fixedSlots = new Set(fixed.map((i) => `${i.startTime}-${i.endTime}`));
 
+  // Mapa título→taskId para vincular o item de agenda à Task de origem, de modo
+  // que concluir o item depois propague para a Task (markTaskDone).
+  const taskByTitle = new Map(tasks.map((t) => [norm(t.text), t.id]));
+
   // Persiste os itens gerados pelo agente.
   const created: AgendaItem[] = [];
   for (const p of planned) {
@@ -279,6 +252,7 @@ Gere o cronograma dos itens NÃO-fixos em JSON:`;
     if (fixedTitles.has(norm(p.title)) || fixedSlots.has(`${p.startTime}-${p.endTime}`)) {
       continue;
     }
+    const taskId = taskByTitle.get(norm(p.title));
     const item = await createAgendaItem({
       title: p.title,
       date,
@@ -290,6 +264,7 @@ Gere o cronograma dos itens NÃO-fixos em JSON:`;
       ...(p.estimatedMinutes ? { estimatedMinutes: Math.round(Number(p.estimatedMinutes)) } : {}),
       ...(p.notes ? { notes: p.notes } : {}),
       ...(p.subagentId ? { subagentId: p.subagentId } : {}),
+      ...(taskId ? { taskId } : {}),
     });
     created.push(item);
   }
@@ -316,7 +291,11 @@ function itemMinutes(i: AgendaItem): number {
 export async function detectOverload(date = dayKey()): Promise<string | null> {
   const items = await getAgendaForDay(date);
   const moveable = items.filter((i) => i.priority !== 1 && i.createdBy !== 'user' && i.status !== 'done');
-  const totalMin = items.reduce((acc, i) => acc + itemMinutes(i), 0);
+  // Soma apenas o trabalho que ainda RESTA (ignora itens já concluídos), senão
+  // à noite o que já foi feito infla a carga e dispara falso aviso de sobrecarga.
+  const totalMin = items
+    .filter((i) => i.status !== 'done')
+    .reduce((acc, i) => acc + itemMinutes(i), 0);
   const cap = config.maxDailyWorkMinutes;
   if (totalMin <= cap || moveable.length === 0) return null;
 
@@ -520,58 +499,103 @@ export async function sendDailySchedule(date = dayKey()): Promise<void> {
 
 // ===================== Transições de tarefa =====================
 
-/**
- * Avança a agenda: marca `item` como concluído, promove o próximo item pendente
- * para `in_progress` e avisa o usuário no WhatsApp. Usado tanto pelo cron
- * (transição por horário) quanto pelo atalho "terminei" (confirmação).
- */
-export async function advanceTask(item: AgendaItem): Promise<void> {
+/** Marca um item como concluído e propaga para a Task de origem, se houver. */
+async function completeItem(item: AgendaItem): Promise<void> {
   if (item.status !== 'done') {
     await updateAgendaItem(item.id, { status: 'done' });
   }
-
-  const dayItems = await getAgendaForDay(item.date);
-  const next = dayItems.find(
-    (i) => i.id !== item.id && i.status === 'pending'
-  );
-
-  if (!config.ownerPhone) return;
-
-  if (next) {
-    await updateAgendaItem(next.id, { status: 'in_progress' });
-    await sendText(
-      config.ownerPhone,
-      `✅ Concluído: *${item.title}*\n\n➡️ Agora: *${next.title}* (${next.startTime}–${next.endTime})`
-    );
-  } else {
-    await sendText(
-      config.ownerPhone,
-      `✅ Concluído: *${item.title}*\n\n🎉 Era o último item do dia. Mandou bem, Igor!`
+  if (item.taskId) {
+    // Propaga a conclusão para a Task (lembrete) que originou o item, para que
+    // os relatórios não a contem como pendente para sempre.
+    await markTaskDone(item.taskId).catch((err) =>
+      console.error('[orchestrator] falha ao propagar conclusão para a task:', err)
     );
   }
 }
 
 /**
- * Verifica a agenda de hoje e avança itens cujo `endTime` já passou e ainda não
- * foram concluídos (modo horário do híbrido). Pensado para rodar a cada minuto.
+ * Anuncia o estado atual da agenda após uma conclusão: encontra o próximo item
+ * a fazer e, se o horário dele já chegou, promove-o a `in_progress`. Caso o
+ * próximo só comece mais tarde, anuncia como "a seguir" sem promovê-lo (evita
+ * marcar como "agora" algo que só acontece horas depois). Retorna a mensagem.
+ */
+async function announceNext(date: string, doneTitle: string): Promise<void> {
+  if (!config.ownerPhone) return;
+  const items = await getAgendaForDay(date);
+  const now = timeKey();
+  const next = items.find((i) => i.status === 'pending' || i.status === 'in_progress');
+
+  if (!next) {
+    await sendText(
+      config.ownerPhone,
+      `✅ Concluído: *${doneTitle}*\n\n🎉 Era o último item do dia. Mandou bem, Igor!`
+    );
+    return;
+  }
+
+  const slot = `${next.startTime}–${next.endTime}`;
+  if (next.startTime <= now) {
+    if (next.status !== 'in_progress') {
+      await updateAgendaItem(next.id, { status: 'in_progress' });
+    }
+    await sendText(
+      config.ownerPhone,
+      `✅ Concluído: *${doneTitle}*\n\n➡️ Agora: *${next.title}* (${slot})`
+    );
+  } else {
+    await sendText(
+      config.ownerPhone,
+      `✅ Concluído: *${doneTitle}*\n\n🕒 A seguir: *${next.title}* (${slot}) — começa às ${next.startTime}.`
+    );
+  }
+}
+
+/**
+ * Avança a agenda: marca `item` como concluído (propagando para a Task) e avisa
+ * o usuário qual é o próximo. Usado pelo atalho "terminei" e pela conclusão
+ * manual via tool.
+ */
+export async function advanceTask(item: AgendaItem): Promise<void> {
+  await completeItem(item);
+  await announceNext(item.date, item.title);
+}
+
+/**
+ * Transições por horário (modo horário do híbrido), pensado para rodar a cada
+ * minuto. Conclui silenciosamente TODOS os itens cujo `endTime` já passou (sem
+ * uma mensagem por item) e, no fim, faz UM único anúncio do item atual — assim
+ * um backlog (ex: app reiniciado no meio do dia) não dispara uma rajada de
+ * mensagens nem promove itens fora de ordem.
  */
 export async function processTimeBasedTransitions(): Promise<void> {
   const date = dayKey();
   const now = timeKey();
   const items = await getAgendaForDay(date);
-  for (const item of items) {
-    if (item.status !== 'done' && item.endTime <= now) {
-      await advanceTask(item);
-    }
+
+  const overdue = items.filter((i) => i.status !== 'done' && i.endTime <= now);
+  if (overdue.length === 0) return;
+
+  for (const item of overdue) {
+    await completeItem(item);
   }
+
+  // Um único anúncio, citando o último item concluído por horário.
+  const lastDone = overdue.sort((a, b) => a.endTime.localeCompare(b.endTime)).pop()!;
+  await announceNext(date, lastDone.title);
 }
 
-/** Item atualmente em andamento no dia (ou o próximo pendente), se houver. */
+/**
+ * Item atualmente em andamento no dia. Prioriza o que está `in_progress`; se
+ * nenhum estiver, considera ativo um item `pending` cujo horário de início já
+ * passou (em andamento de fato). NÃO retorna itens futuros — assim "concluir a
+ * tarefa atual" nunca marca como feita uma tarefa que ainda não começou.
+ */
 export async function getActiveItem(date = dayKey()): Promise<AgendaItem | null> {
   const items = await getAgendaForDay(date);
+  const now = timeKey();
   return (
     items.find((i) => i.status === 'in_progress') ||
-    items.find((i) => i.status === 'pending') ||
+    items.find((i) => i.status === 'pending' && i.startTime <= now) ||
     null
   );
 }

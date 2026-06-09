@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
-import { getDueTasks, markTaskDone } from './services/firebase';
+import { getDueTasks, markReminderSent } from './services/firebase';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 import { processFocusExpirations } from './agents/focus';
 import {
@@ -108,7 +108,7 @@ export function startScheduler(): void {
         const due = await getDueTasks();
         for (const task of due) {
           await sendText(task.to || config.ownerPhone, `⏰ Lembrete: ${task.text}`);
-          await markTaskDone(task.id);
+          await markReminderSent(task.id);
           console.log(`[scheduler] lembrete enviado: ${task.id}`);
         }
       } catch (err) {
