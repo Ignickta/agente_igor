@@ -3,8 +3,10 @@ import { config, isAllowed } from './config';
 import { adminRouter } from './routes/admin';
 import { parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
-import { sendText } from './services/evolution';
+import { sendText, sendAudio } from './services/evolution';
+import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
+import { wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
@@ -105,13 +107,26 @@ async function processIncoming(body: unknown): Promise<void> {
     console.error('[webhook] erro no modo foco (seguindo fluxo normal):', err);
   }
 
+  // Pedido pontual de resposta em áudio (ex: "responde em áudio"). One-shot:
+  // vale só para esta mensagem; o padrão volta a ser texto na próxima.
+  const audioRequested = wantsAudioReply(text);
+
   // Roteia pelo agente central e responde
   try {
     const reply = await handleMessage(msg.from, text, msg.isAudio);
     if (!reply) return;
 
-    // Resposta sempre por texto, inclusive para mensagens de áudio (que são
-    // transcritas na entrada). Não geramos TTS na resposta.
+    // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que
+    // são transcritas na entrada). Só geramos áudio (TTS) quando o usuário pediu
+    // explicitamente nesta mensagem; nesse caso o texto vai junto como registro.
+    if (audioRequested) {
+      try {
+        const audioBase64 = await textToSpeechBase64(reply);
+        await sendAudio(msg.from, audioBase64);
+      } catch (ttsErr) {
+        console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
+      }
+    }
     // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
     await sendText(msg.from, reply, 1200);
   } catch (err) {
