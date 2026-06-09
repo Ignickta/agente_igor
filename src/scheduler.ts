@@ -3,6 +3,13 @@ import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
 import { getDueTasks, markTaskDone } from './services/firebase';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
+import { processFocusExpirations } from './agents/focus';
+import {
+  sendNightlySummary,
+  sendWeeklyReview,
+  runProactiveCheck,
+  sendSubagentWeeklyReports,
+} from './agents/reports';
 
 /**
  * Inicia os jobs proativos:
@@ -49,6 +56,50 @@ export function startScheduler(): void {
     opts
   );
 
+  // F1: resumo diário noturno — todo dia às 22:00.
+  cron.schedule(
+    '0 22 * * *',
+    () => {
+      sendNightlySummary().catch((err) =>
+        console.error('[scheduler] falha no resumo noturno:', err)
+      );
+    },
+    opts
+  );
+
+  // F2: revisão semanal — toda sexta-feira às 18:00.
+  cron.schedule(
+    '0 18 * * 5',
+    () => {
+      sendWeeklyReview().catch((err) =>
+        console.error('[scheduler] falha na revisão semanal:', err)
+      );
+    },
+    opts
+  );
+
+  // F9: relatório por subagente — toda segunda-feira às 08:00.
+  cron.schedule(
+    '0 8 * * 1',
+    () => {
+      sendSubagentWeeklyReports().catch((err) =>
+        console.error('[scheduler] falha nos relatórios por subagente:', err)
+      );
+    },
+    opts
+  );
+
+  // F7: proatividade dos subagentes — uma vez por dia, às 09:30.
+  cron.schedule(
+    '30 9 * * *',
+    () => {
+      runProactiveCheck().catch((err) =>
+        console.error('[scheduler] falha na verificação proativa:', err)
+      );
+    },
+    opts
+  );
+
   // Lembretes/tarefas — a cada minuto
   cron.schedule(
     '* * * * *',
@@ -70,6 +121,13 @@ export function startScheduler(): void {
         await processTimeBasedTransitions();
       } catch (err) {
         console.error('[scheduler] falha nas transições da agenda:', err);
+      }
+
+      // F3: encerra sessões de modo foco expiradas e avisa o usuário.
+      try {
+        await processFocusExpirations();
+      } catch (err) {
+        console.error('[scheduler] falha ao processar fim de foco:', err);
       }
     },
     opts

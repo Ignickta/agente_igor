@@ -71,6 +71,19 @@ export const config = {
   timezone: process.env.TZ || 'America/Sao_Paulo',
   adminToken: process.env.ADMIN_TOKEN || '',
   /**
+   * Kill-switch das mensagens proativas (resumo noturno, revisão semanal,
+   * relatórios, notificações proativas). Desligue com PROACTIVE_NOTIFICATIONS=off
+   * para silenciar todas de uma vez sem mexer no código.
+   */
+  proactiveNotifications: (process.env.PROACTIVE_NOTIFICATIONS || 'on').toLowerCase() !== 'off',
+  /** Carga máxima estimada de trabalho por dia (minutos) antes de avisar sobrecarga. */
+  maxDailyWorkMinutes: parseInt(process.env.MAX_DAILY_WORK_MINUTES || '480', 10),
+  /** Palavras que marcam uma mensagem como urgente (passam mesmo em modo foco). */
+  urgentKeywords: (process.env.URGENT_KEYWORDS || 'urgente,urgência,urgencia,emergência,emergencia,agora,imediato')
+    .split(',')
+    .map((k) => k.trim().toLowerCase())
+    .filter(Boolean),
+  /**
    * Números autorizados a conversar com o agente (só dígitos, separados por vírgula).
    * Se vazio, cai no OWNER_PHONE. O dono é sempre incluído automaticamente.
    * Qualquer mensagem de número fora desta lista é ignorada.

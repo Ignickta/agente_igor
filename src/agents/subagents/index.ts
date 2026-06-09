@@ -1,8 +1,15 @@
 import { Subagent, MemoryMessage } from '../../types';
 import { openai, ChatMessage } from '../../services/openai';
 import { config } from '../../config';
-import { createTask, saveFact, getFacts } from '../../services/firebase';
+import {
+  createTask,
+  saveFact,
+  getFacts,
+  listSubagents,
+  getRecentMemory,
+} from '../../services/firebase';
 import { research } from '../research';
+import { estimateDurationMinutes } from '../estimate';
 import {
   generateDailySchedule,
   formatSchedule,
@@ -13,6 +20,7 @@ import {
   weeklyView,
   monthlyView,
   upcomingView,
+  detectOverload,
   dayKey,
 } from '../orchestrator';
 import type OpenAI from 'openai';
@@ -49,9 +57,10 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'salvar_fato',
       description:
-        'Salva um fato importante e duradouro sobre o Igor ou este projeto para lembrar em ' +
-        'conversas futuras (ex: nome de um cliente, uma preferência, um status). NÃO use para ' +
-        'coisas triviais ou temporárias.',
+        'Salva, por conta própria, um fato duradouro sobre o Igor ou este projeto para enriquecer ' +
+        'conversas futuras: DECISÕES importantes, PREFERÊNCIAS, padrões de comportamento, nomes de ' +
+        'clientes, status de projetos. Acione sempre que captar algo assim na conversa, sem o Igor ' +
+        'pedir. NÃO use para trivialidades ou coisas temporárias.',
       parameters: {
         type: 'object',
         properties: {
@@ -83,6 +92,31 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           },
         },
         required: ['tema'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'consultar_subagente',
+      description:
+        'Aciona OUTRO subagente especializado para opinar sobre parte da pergunta que pertence à ' +
+        'área dele (ex: você é o financeiro e precisa da visão do agente pessoal). Recebe a ' +
+        'resposta dele como insumo — combine-a com a sua antes de responder ao Igor. Use só quando ' +
+        'a tarefa realmente cruzar duas áreas.',
+      parameters: {
+        type: 'object',
+        properties: {
+          area: {
+            type: 'string',
+            description: 'Nome ou tema do subagente a consultar (ex: "Pessoal", "SaaS Odontológico").',
+          },
+          pergunta: {
+            type: 'string',
+            description: 'A pergunta específica para aquele subagente, com o contexto necessário.',
+          },
+        },
+        required: ['area', 'pergunta'],
       },
     },
   },
@@ -206,7 +240,9 @@ export async function runSubagent(
   userText: string,
   memory: MemoryMessage[],
   fromAudio = false,
-  contact = ''
+  contact = '',
+  /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
+  depth = 0
 ): Promise<string> {
   const facts = contact ? await getFacts(contact, subagent.id) : [];
   const now = new Date();
@@ -225,6 +261,13 @@ Regras gerais:
   }
 - Data e hora atuais: ${nowStr} (fuso ${config.timezone}). Use isto para calcular lembretes.
 - Você PODE criar lembretes e salvar fatos usando as ferramentas disponíveis.
+- Memória ativa: sempre que o Igor revelar uma DECISÃO importante, uma PREFERÊNCIA, ou um
+  PADRÃO de comportamento relevante para a sua área, salve com a ferramenta "salvar_fato"
+  por conta própria (sem ele pedir), de forma concisa. Isso enriquece suas respostas futuras.
+  Não salve trivialidades nem coisas temporárias.
+- Se a tarefa do Igor envolver claramente OUTRA área (ex: você é o financeiro mas ele toca num
+  assunto pessoal/odontológico), use a ferramenta "consultar_subagente" para obter a visão do
+  agente daquela área e combine as duas perspectivas numa resposta única e coerente.
 - Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
   sem o Igor pedir, sempre que dados atuais ou que você não tenha certeza melhorariam
   sua resposta (preços, cotações, versões, notícias, novidades do seu domínio). Depois
@@ -264,7 +307,7 @@ Regras gerais:
     // Registra a intenção do assistente e executa cada ferramenta.
     messages.push(choice);
     for (const call of choice.tool_calls) {
-      const result = await executeTool(call, subagent.id, contact);
+      const result = await executeTool(call, subagent.id, contact, depth);
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -286,7 +329,8 @@ Regras gerais:
 async function executeTool(
   call: OpenAI.Chat.Completions.ChatCompletionMessageToolCall,
   subagentId: string,
-  contact: string
+  contact: string,
+  depth = 0
 ): Promise<string> {
   let args: Record<string, unknown> = {};
   try {
@@ -303,14 +347,20 @@ async function executeTool(
       if (!texto || isNaN(when.getTime())) {
         return 'Não foi possível criar: texto ou data inválidos.';
       }
+      // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
+      const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
       await createTask({
         text: texto,
         remindAt: when.toISOString(),
         to: contact || config.ownerPhone,
         subagentId,
+        ...(estimatedMinutes ? { estimatedMinutes } : {}),
       });
       const quandoBr = when.toLocaleString('pt-BR', { timeZone: config.timezone });
-      return `Lembrete criado para ${quandoBr}: "${texto}".`;
+      const dur = estimatedMinutes
+        ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
+        : '';
+      return `Lembrete criado para ${quandoBr}: "${texto}".${dur}`;
     }
 
     if (call.function.name === 'salvar_fato') {
@@ -328,6 +378,30 @@ async function executeTool(
       return await research(tema, 'findings');
     }
 
+    if (call.function.name === 'consultar_subagente') {
+      // F8: encadeamento. Profundidade máxima 1 para evitar loops.
+      if (depth >= 1) {
+        return 'Encadeamento já em uso; responda com o que tem, sem consultar outro agente.';
+      }
+      const area = String(args.area || '').trim();
+      const pergunta = String(args.pergunta || '').trim();
+      if (!area || !pergunta) return 'Informe a área e a pergunta para consultar.';
+
+      const subs = await listSubagents();
+      const lower = area.toLowerCase();
+      const target =
+        subs.find((s) => s.id === area) ||
+        subs.find((s) => s.name.toLowerCase() === lower) ||
+        subs.find((s) => s.name.toLowerCase().includes(lower)) ||
+        subs.find((s) => s.keywords.some((k) => lower.includes(k.toLowerCase())));
+      if (!target) return `Não encontrei um subagente para a área "${area}".`;
+      if (target.id === subagentId) return 'Essa área é a sua própria; responda diretamente.';
+
+      const mem = contact ? await getRecentMemory(contact, target.id, 6) : [];
+      const resposta = await runSubagent(target, pergunta, mem, false, contact, depth + 1);
+      return `Resposta do subagente "${target.name}":\n${resposta}`;
+    }
+
     if (call.function.name === 'gerar_cronograma') {
       const data = String(args.data || '').trim() || dayKey();
       const enviar = args.enviar === true;
@@ -336,7 +410,9 @@ async function executeTool(
         return `Cronograma de ${data} gerado e enviado pelo WhatsApp.`;
       }
       const items = await generateDailySchedule(data);
-      return formatSchedule(items, data);
+      const base = formatSchedule(items, data);
+      const overload = await detectOverload(data);
+      return overload ? `${base}\n\n${overload}` : base;
     }
 
     if (call.function.name === 'realocar_agenda') {

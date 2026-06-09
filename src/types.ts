@@ -32,6 +32,10 @@ export interface Task {
   to: string;
   done: boolean;
   createdAt: number;
+  /** Duração estimada em minutos (sugerida pelo LLM na criação). */
+  estimatedMinutes?: number;
+  /** Quando foi concluída (epoch ms), para relatórios/aprendizado. */
+  completedAt?: number;
 }
 
 /** Tipo de item da agenda. */
@@ -69,6 +73,22 @@ export interface AgendaItem {
   subagentId?: string;
   notes?: string;
   createdAt: number;
+  /** Duração estimada em minutos (para detecção de sobrecarga e aprendizado). */
+  estimatedMinutes?: number;
+}
+
+/**
+ * Sessão de "modo foco": durante [startedAt, endsAt] só mensagens urgentes são
+ * processadas. Documento único por contato na collection `focus`.
+ */
+export interface FocusSession {
+  /** Contato (telefone) dono da sessão = id do documento. */
+  contact: string;
+  startedAt: number;
+  /** Fim do foco em epoch ms. */
+  endsAt: number;
+  /** Se já avisamos o usuário que o foco terminou. */
+  ended: boolean;
 }
 
 /** Mensagem normalizada extraída do webhook da Evolution. */
