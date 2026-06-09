@@ -3,8 +3,7 @@ import { config, isAllowed } from './config';
 import { adminRouter } from './routes/admin';
 import { parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
-import { sendText, sendAudio } from './services/evolution';
-import { textToSpeechBase64 } from './services/tts';
+import { sendText } from './services/evolution';
 import { handleMessage } from './agents/central';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
@@ -111,16 +110,8 @@ async function processIncoming(body: unknown): Promise<void> {
     const reply = await handleMessage(msg.from, text, msg.isAudio);
     if (!reply) return;
 
-    // Se a mensagem veio em áudio, responde também em áudio (TTS).
-    // Sempre envia o texto também, como fallback/registro.
-    if (msg.isAudio) {
-      try {
-        const audioBase64 = await textToSpeechBase64(reply);
-        await sendAudio(msg.from, audioBase64);
-      } catch (ttsErr) {
-        console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
-      }
-    }
+    // Resposta sempre por texto, inclusive para mensagens de áudio (que são
+    // transcritas na entrada). Não geramos TTS na resposta.
     // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
     await sendText(msg.from, reply, 1200);
   } catch (err) {
