@@ -51,9 +51,11 @@ export const config = {
   },
   openai: {
     apiKey: required('OPENAI_API_KEY'),
-    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    model: process.env.OPENAI_MODEL || 'gpt-5.1',
+    // Modelo barato/rápido para tarefas utilitárias (roteamento, JSON curto).
+    utilityModel: process.env.OPENAI_UTILITY_MODEL || 'gpt-5-mini',
     // Modelo usado pelo ResearchAgent com a tool nativa web_search_preview.
-    researchModel: process.env.OPENAI_RESEARCH_MODEL || process.env.OPENAI_MODEL || 'gpt-4o',
+    researchModel: process.env.OPENAI_RESEARCH_MODEL || process.env.OPENAI_MODEL || 'gpt-5.1',
     transcriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1',
     ttsModel: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
     ttsVoice: process.env.OPENAI_TTS_VOICE || 'alloy',
