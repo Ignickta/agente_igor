@@ -6,6 +6,7 @@ import {
   listSubagents,
   getFacts,
   getAgendaForDay,
+  getAgendaInRange,
   createAgendaItem,
   updateAgendaItem,
 } from '../services/firebase';
@@ -29,6 +30,48 @@ function timeKey(date = new Date()): string {
     minute: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+/** Soma `days` a uma data YYYY-MM-DD e devolve outra YYYY-MM-DD (UTC-safe). */
+function addDays(dateKey: string, days: number): string {
+  const d = new Date(`${dateKey}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Dia da semana local (0=domingo .. 6=sábado) de uma data YYYY-MM-DD. */
+function weekdayOf(dateKey: string): number {
+  const wd = new Intl.DateTimeFormat('en-US', {
+    timeZone: config.timezone,
+    weekday: 'short',
+  }).format(new Date(`${dateKey}T12:00:00Z`));
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(wd);
+}
+
+/** Intervalo [segunda, domingo] da semana que contém `ref` (padrão: hoje). */
+export function weekRange(ref = dayKey()): { start: string; end: string } {
+  const wd = weekdayOf(ref); // 0=dom..6=sáb
+  const offsetToMonday = (wd + 6) % 7; // segunda como início
+  const start = addDays(ref, -offsetToMonday);
+  return { start, end: addDays(start, 6) };
+}
+
+/** Intervalo [dia 1, último dia] do mês que contém `ref` (padrão: hoje). */
+export function monthRange(ref = dayKey()): { start: string; end: string } {
+  const start = `${ref.slice(0, 7)}-01`;
+  const d = new Date(`${start}T12:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + 1); // 1º do mês seguinte
+  d.setUTCDate(0); // volta para o último dia do mês de `ref`
+  return { start, end: d.toISOString().slice(0, 10) };
+}
+
+const WEEKDAY_PT = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+
+/** Rótulo "seg, 09/06" para uma data YYYY-MM-DD. */
+function dayLabel(dateKey: string): string {
+  const wd = WEEKDAY_PT[weekdayOf(dateKey)].slice(0, 3);
+  const [, m, d] = dateKey.split('-');
+  return `${wd}, ${d}/${m}`;
 }
 
 const PRIORITY_EMOJI: Record<number, string> = {
@@ -210,6 +253,128 @@ export function formatSchedule(items: AgendaItem[], date = dayKey()): string {
     return `${prio} *${i.startTime}–${i.endTime}* ${typ} ${i.title}${done}`;
   });
   return `🗓️ *Cronograma de ${date}*\n\n${lines.join('\n')}\n\n_Quer reorganizar algo? É só me dizer._`;
+}
+
+// ===================== Visões consolidadas (semana / mês / próximos) =====================
+
+/** Entrada normalizada para exibição: vem da agenda ou de uma task (lembrete). */
+interface ScheduleEntry {
+  date: string;
+  /** HH:mm; tasks usam o horário do remindAt; ausência vira '--:--'. */
+  time: string;
+  endTime?: string;
+  title: string;
+  priority?: number;
+  type: AgendaItem['type'] | 'reminder';
+  status?: AgendaItem['status'];
+}
+
+const STATUS_EMOJI: Record<AgendaItem['status'], string> = {
+  pending: '⬜',
+  in_progress: '⏳',
+  done: '✔️',
+};
+
+/**
+ * Reúne, num intervalo [start, end], os itens da `agenda` e as `tasks` pendentes
+ * cujo `remindAt` cai no período — normalizados e agrupados por dia.
+ */
+async function collectEntries(start: string, end: string): Promise<Map<string, ScheduleEntry[]>> {
+  const [items, tasks] = await Promise.all([getAgendaInRange(start, end), listTasks()]);
+
+  const entries: ScheduleEntry[] = items.map((i) => ({
+    date: i.date,
+    time: i.startTime,
+    endTime: i.endTime,
+    title: i.title,
+    priority: i.priority,
+    type: i.type,
+    status: i.status,
+  }));
+
+  for (const t of tasks) {
+    if (t.done) continue;
+    const date = t.remindAt.slice(0, 10);
+    if (date < start || date > end) continue;
+    // Horário local do lembrete (HH:mm) a partir do ISO em remindAt.
+    const time = timeKey(new Date(t.remindAt));
+    entries.push({ date, time, title: t.text, type: 'reminder' });
+  }
+
+  const byDay = new Map<string, ScheduleEntry[]>();
+  for (const e of entries) {
+    const list = byDay.get(e.date) ?? [];
+    list.push(e);
+    byDay.set(e.date, list);
+  }
+  for (const list of byDay.values()) {
+    list.sort((a, b) => a.time.localeCompare(b.time));
+  }
+  return byDay;
+}
+
+/** Emoji/rótulo de uma entrada (item de agenda ou lembrete). */
+function entryLine(e: ScheduleEntry): string {
+  if (e.type === 'reminder') {
+    return `   ⏰ *${e.time}* ${e.title} _(lembrete)_`;
+  }
+  const prio = e.priority ? PRIORITY_EMOJI[e.priority] || '⚪' : '⚪';
+  const typ = TYPE_EMOJI[e.type as AgendaItem['type']] || '';
+  const st = e.status ? STATUS_EMOJI[e.status] : '';
+  const horario = e.endTime ? `${e.time}–${e.endTime}` : e.time;
+  return `   ${prio} *${horario}* ${typ} ${e.title} ${st}`.trimEnd();
+}
+
+/**
+ * Formata uma visão por intervalo, agrupada por dia. Dias sem itens são
+ * omitidos. `title` é o cabeçalho (ex: "Sua semana").
+ */
+function formatRangeView(
+  title: string,
+  start: string,
+  end: string,
+  byDay: Map<string, ScheduleEntry[]>
+): string {
+  const days: string[] = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) {
+    const list = byDay.get(d);
+    if (!list || list.length === 0) continue;
+    days.push(`📌 *${dayLabel(d)}*\n${list.map(entryLine).join('\n')}`);
+  }
+  if (days.length === 0) {
+    return `🗓️ *${title}*\n\nNada agendado nesse período. Quer planejar algo? 🙂`;
+  }
+  return `🗓️ *${title}* (${dayLabel(start)} – ${dayLabel(end)})\n\n${days.join('\n\n')}`;
+}
+
+/** Resumo da semana atual (ou da que contém `ref`), agrupado por dia. */
+export async function weeklyView(ref = dayKey()): Promise<string> {
+  const { start, end } = weekRange(ref);
+  const byDay = await collectEntries(start, end);
+  return formatRangeView('Sua semana', start, end, byDay);
+}
+
+/** Resumo do mês atual (ou do que contém `ref`), agrupado por dia. */
+export async function monthlyView(ref = dayKey()): Promise<string> {
+  const { start, end } = monthRange(ref);
+  const byDay = await collectEntries(start, end);
+  const [, mm] = start.split('-');
+  const monthName = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: config.timezone,
+    month: 'long',
+  }).format(new Date(`${start}T12:00:00Z`));
+  return formatRangeView(`Seu mês de ${monthName} (${mm})`, start, end, byDay);
+}
+
+/**
+ * Visão consolidada dos próximos `days` dias (padrão 7, incluindo hoje),
+ * agrupada por dia — o "minha agenda / o que tenho agendado".
+ */
+export async function upcomingView(days = 7, ref = dayKey()): Promise<string> {
+  const start = ref;
+  const end = addDays(ref, Math.max(1, days) - 1);
+  const byDay = await collectEntries(start, end);
+  return formatRangeView(`Próximos ${days} dias`, start, end, byDay);
 }
 
 /** Gera (se necessário) e envia o cronograma do dia ao dono via WhatsApp. */

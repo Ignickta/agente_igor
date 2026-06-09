@@ -303,6 +303,25 @@ export async function getAgendaForDay(date: string): Promise<AgendaItem[]> {
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
 }
 
+/**
+ * Itens da agenda num intervalo de datas [start, end] inclusivo (YYYY-MM-DD),
+ * ordenados por data e depois por horário de início.
+ *
+ * Como `date` é string YYYY-MM-DD (ordenável lexicograficamente), um range em um
+ * único campo não exige índice composto no Firestore.
+ */
+export async function getAgendaInRange(start: string, end: string): Promise<AgendaItem[]> {
+  const snap = await agendaCol
+    .where('date', '>=', start)
+    .where('date', '<=', end)
+    .get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as AgendaItem))
+    .sort((a, b) =>
+      a.date === b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date)
+    );
+}
+
 export async function getAgendaItem(id: string): Promise<AgendaItem | null> {
   const doc = await agendaCol.doc(id).get();
   if (!doc.exists) return null;

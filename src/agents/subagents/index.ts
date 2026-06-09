@@ -10,6 +10,9 @@ import {
   reorganize,
   getActiveItem,
   advanceTask,
+  weeklyView,
+  monthlyView,
+  upcomingView,
   dayKey,
 } from '../orchestrator';
 import type OpenAI from 'openai';
@@ -141,6 +144,48 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       description:
         'Marca a tarefa atual (em andamento) como concluída e avança para a próxima, avisando ' +
         'o usuário. Use quando ele disser que terminou/concluiu o item atual.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ver_agenda',
+      description:
+        'Mostra um resumo consolidado dos próximos itens agendados (padrão: próximos 7 dias), ' +
+        'agrupados por dia, com horário, status e prioridade. Use quando o Igor pedir "minha ' +
+        'agenda", "o que tenho agendado", "o que vem por aí". Já vem formatado — repasse ao usuário.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dias: {
+            type: 'number',
+            description: 'Quantos dias à frente incluir (incluindo hoje). Padrão 7.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ver_semana',
+      description:
+        'Mostra o resumo da SEMANA atual (segunda a domingo), organizado por dia, com as tarefas ' +
+        'e eventos agendados. Use quando o Igor pedir "me mostra minha semana", "como tá minha ' +
+        'semana". Já vem formatado — repasse ao usuário.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ver_mes',
+      description:
+        'Mostra o resumo do MÊS atual, organizado por dia, com as tarefas e eventos agendados. ' +
+        'Use quando o Igor pedir "como tá meu mês", "me mostra o mês". Já vem formatado — repasse ' +
+        'ao usuário.',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -305,6 +350,19 @@ async function executeTool(
       if (!active) return 'Não há tarefa em andamento na agenda de hoje.';
       await advanceTask(active);
       return `Tarefa "${active.title}" concluída e próxima iniciada.`;
+    }
+
+    if (call.function.name === 'ver_agenda') {
+      const dias = Number(args.dias);
+      return await upcomingView(Number.isFinite(dias) && dias > 0 ? Math.floor(dias) : 7);
+    }
+
+    if (call.function.name === 'ver_semana') {
+      return await weeklyView();
+    }
+
+    if (call.function.name === 'ver_mes') {
+      return await monthlyView();
     }
   } catch (err) {
     console.error('[tool] erro ao executar', call.function.name, err);
