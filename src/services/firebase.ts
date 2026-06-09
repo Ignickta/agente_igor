@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
 import { config } from '../config';
+import { dayKey } from './datetime';
 import { Subagent, MemoryMessage, Task, AgendaItem, FocusSession } from '../types';
 
 if (!admin.apps.length) {
@@ -180,8 +181,22 @@ export async function getDueTasks(): Promise<Task[]> {
     .filter((t) => t.remindAt <= nowIso);
 }
 
+/**
+ * Marca uma tarefa como genuinamente CONCLUÍDA (pelo usuário/agenda), gravando
+ * `completedAt` — entra na contagem de "concluídas" dos relatórios e no
+ * aprendizado de padrões.
+ */
 export async function markTaskDone(id: string): Promise<void> {
   await tasksCol.doc(id).set({ done: true, completedAt: Date.now() }, { merge: true });
+}
+
+/**
+ * Marca um lembrete como JÁ ENVIADO (deixa de re-disparar), sem `completedAt`.
+ * Disparar um lembrete não é o mesmo que concluir uma tarefa, então isto NÃO
+ * deve inflar a contagem de tarefas concluídas nos relatórios.
+ */
+export async function markReminderSent(id: string): Promise<void> {
+  await tasksCol.doc(id).set({ done: true }, { merge: true });
 }
 
 /**
@@ -228,17 +243,6 @@ export async function deleteTask(id: string): Promise<void> {
 }
 
 // ===================== Métricas de uso =====================
-
-/** Data local (YYYY-MM-DD) no timezone configurado — id do documento de métricas. */
-function dayKey(date = new Date()): string {
-  // en-CA produz YYYY-MM-DD; força o timezone do sistema.
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: config.timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-}
 
 /**
  * Registra uma mensagem processada incrementando contadores do dia.

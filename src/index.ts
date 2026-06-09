@@ -6,7 +6,7 @@ import { transcribeAudioBase64 } from './services/transcription';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
-import { isFocusRequest, enterFocus, focusGate } from './agents/focus';
+import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
@@ -79,18 +79,28 @@ async function processIncoming(body: unknown): Promise<void> {
 
   if (!text.trim()) return;
 
-  // F3: modo foco. Pedido de foco entra direto; durante o foco, mensagens não
-  // urgentes são seguradas com um aviso curto (urgentes passam normalmente).
+  // F3: modo foco. Pedido de foco entra direto; pedido de SAIR encerra; durante
+  // o foco, mensagens não urgentes são seguradas com um aviso curto. Comandos
+  // administrativos ("/...") e mensagens urgentes NUNCA são bloqueados — o
+  // usuário precisa poder se administrar mesmo em foco.
   try {
+    if (isCancelFocusRequest(text)) {
+      const reply = await cancelFocus(msg.from);
+      await sendText(msg.from, reply, 800);
+      return;
+    }
     if (isFocusRequest(text)) {
       const reply = await enterFocus(msg.from, text);
       await sendText(msg.from, reply, 800);
       return;
     }
-    const gate = await focusGate(msg.from, text);
-    if (gate.active && gate.reply) {
-      await sendText(msg.from, gate.reply, 800);
-      return;
+    const isCommand = text.trim().startsWith('/');
+    if (!isCommand) {
+      const gate = await focusGate(msg.from, text);
+      if (gate.active && gate.reply) {
+        await sendText(msg.from, gate.reply, 800);
+        return;
+      }
     }
   } catch (err) {
     console.error('[webhook] erro no modo foco (seguindo fluxo normal):', err);

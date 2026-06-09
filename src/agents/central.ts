@@ -28,6 +28,16 @@ const DONE_PHRASES = [
 ];
 
 /**
+ * Regex que casa qualquer DONE_PHRASE como PALAVRA inteira (não substring), para
+ * não confundir "perfeito" com "feito" nem "prontidão" com "pronto". A fronteira
+ * é qualquer caractere que não seja letra (inclui acentos) ou a borda do texto.
+ */
+const DONE_REGEX = new RegExp(
+  `(^|[^\\p{L}])(${DONE_PHRASES.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})([^\\p{L}]|$)`,
+  'iu'
+);
+
+/**
  * Atalho de conclusão: se a mensagem for uma confirmação curta e houver um item
  * em andamento na agenda de hoje, avança a tarefa e avisa a próxima — sem gastar
  * roteamento por LLM. Retorna a resposta a enviar, ou null se não se aplica.
@@ -36,7 +46,9 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
   // Só dispara para mensagens curtas, evitando falsos positivos em textos longos.
   if (lower.length > 40) return null;
-  if (!DONE_PHRASES.some((p) => lower.includes(p))) return null;
+  // Uma pergunta não é uma confirmação de conclusão (ex: "feito o quê?").
+  if (lower.includes('?')) return null;
+  if (!DONE_REGEX.test(lower)) return null;
 
   const active = await getActiveItem();
   if (!active || active.status !== 'in_progress') return null;

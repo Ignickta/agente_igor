@@ -9,13 +9,8 @@ import {
   getFacts,
   getMetrics,
 } from '../services/firebase';
-import { dayKey, weekRange } from './orchestrator';
-
-/** Início (epoch ms) de um dia local YYYY-MM-DD. */
-function dayStartMs(date: string): number {
-  // Aproxima o início do dia local; suficiente para recortes de relatório.
-  return new Date(`${date}T00:00:00`).getTime();
-}
+import { weekRange } from './orchestrator';
+import { dayKey, addDays, dayStartMs } from '../services/datetime';
 
 /** True se as notificações proativas estão ligadas e há dono configurado. */
 function canNotify(): boolean {
@@ -37,7 +32,7 @@ export async function sendNightlySummary(): Promise<void> {
   const [completed, pending, tomorrowItems] = await Promise.all([
     getCompletedTasksBetween(start, end),
     getPendingTasks(),
-    getAgendaForDay(addDaysLocal(today, 1)),
+    getAgendaForDay(addDays(today, 1)),
   ]);
 
   const top3 = [...tomorrowItems]
@@ -57,13 +52,6 @@ export async function sendNightlySummary(): Promise<void> {
     `_Bom descanso, Igor!_`;
   await sendText(config.ownerPhone, text);
   console.log('[reports] resumo noturno enviado.');
-}
-
-/** Soma dias a YYYY-MM-DD (UTC-safe), uso interno. */
-function addDaysLocal(dateKey: string, days: number): string {
-  const d = new Date(`${dateKey}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
 }
 
 // ===================== F2: revisão semanal (sexta 18h) =====================

@@ -181,6 +181,42 @@ adminRouter.delete('/tasks/:id', async (req, res) => {
 const AGENDA_TYPES = ['task', 'event', 'research'];
 const AGENDA_STATUSES = ['pending', 'in_progress', 'done'];
 
+const clampPriority = (p: unknown): number => Math.min(5, Math.max(1, Number(p) || 3));
+
+/**
+ * Coage e valida os campos de um item de agenda vindos do body, com as MESMAS
+ * regras para POST e PUT. Em modo `partial` (PUT) só inclui os campos presentes;
+ * caso contrário aplica os defaults de criação.
+ */
+function coerceAgendaFields(
+  body: Record<string, unknown>,
+  partial = false
+): Partial<Omit<AgendaItem, 'id' | 'createdAt'>> {
+  const { title, date, startTime, endTime, priority, type, status, createdBy, subagentId, notes } =
+    body;
+  const out: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> = {};
+
+  if (!partial || title !== undefined) out.title = title as string;
+  if (!partial || date !== undefined) out.date = date as string;
+  if (!partial || startTime !== undefined) out.startTime = startTime as string;
+  if (!partial || endTime !== undefined) out.endTime = endTime as string;
+  if (!partial || priority !== undefined) out.priority = clampPriority(priority);
+  if (!partial || type !== undefined) {
+    out.type = (AGENDA_TYPES.includes(type as string) ? type : 'task') as AgendaItem['type'];
+  }
+  if (!partial || status !== undefined) {
+    out.status = (AGENDA_STATUSES.includes(status as string)
+      ? status
+      : 'pending') as AgendaItem['status'];
+  }
+  if (!partial || createdBy !== undefined) {
+    out.createdBy = createdBy === 'agent' ? 'agent' : 'user';
+  }
+  if (subagentId !== undefined) out.subagentId = subagentId as string;
+  if (notes !== undefined) out.notes = notes as string;
+  return out;
+}
+
 // Lista a agenda de um dia. ?date=YYYY-MM-DD (padrão: hoje).
 adminRouter.get('/agenda', async (req, res) => {
   const date = (req.query.date as string)?.trim() || dayKey();
@@ -190,25 +226,14 @@ adminRouter.get('/agenda', async (req, res) => {
 
 // Cria um item da agenda. Itens fixos do usuário usam priority 1 / createdBy 'user'.
 adminRouter.post('/agenda', async (req, res) => {
-  const { title, date, startTime, endTime, priority, type, status, createdBy, subagentId, notes } =
-    req.body;
+  const { title, date, startTime, endTime } = req.body;
   if (!title || !date || !startTime || !endTime) {
     return res
       .status(400)
       .json({ error: 'title, date, startTime e endTime são obrigatórios' });
   }
-  const item = await createAgendaItem({
-    title,
-    date,
-    startTime,
-    endTime,
-    priority: Math.min(5, Math.max(1, Number(priority) || 3)),
-    type: AGENDA_TYPES.includes(type) ? type : 'task',
-    status: AGENDA_STATUSES.includes(status) ? status : 'pending',
-    createdBy: createdBy === 'agent' ? 'agent' : 'user',
-    ...(subagentId ? { subagentId } : {}),
-    ...(notes ? { notes } : {}),
-  });
+  const fields = coerceAgendaFields(req.body, false) as Parameters<typeof createAgendaItem>[0];
+  const item = await createAgendaItem(fields);
   res.status(201).json(item);
 });
 
@@ -225,20 +250,7 @@ adminRouter.put('/agenda/:id', async (req, res) => {
   const existing = await getAgendaItem(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
 
-  const { title, date, startTime, endTime, priority, type, status, createdBy, subagentId, notes } =
-    req.body;
-  const update: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> = {};
-  if (title !== undefined) update.title = title;
-  if (date !== undefined) update.date = date;
-  if (startTime !== undefined) update.startTime = startTime;
-  if (endTime !== undefined) update.endTime = endTime;
-  if (priority !== undefined) update.priority = Math.min(5, Math.max(1, Number(priority) || 3));
-  if (type !== undefined && AGENDA_TYPES.includes(type)) update.type = type;
-  if (status !== undefined && AGENDA_STATUSES.includes(status)) update.status = status;
-  if (createdBy !== undefined) update.createdBy = createdBy === 'agent' ? 'agent' : 'user';
-  if (subagentId !== undefined) update.subagentId = subagentId;
-  if (notes !== undefined) update.notes = notes;
-
+  const update = coerceAgendaFields(req.body, true);
   if (Object.keys(update).length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }

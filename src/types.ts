@@ -75,6 +75,11 @@ export interface AgendaItem {
   createdAt: number;
   /** Duração estimada em minutos (para detecção de sobrecarga e aprendizado). */
   estimatedMinutes?: number;
+  /**
+   * Id da Task (lembrete) que originou este item, quando aplicável. Permite
+   * propagar a conclusão do item de volta para a Task (markTaskDone).
+   */
+  taskId?: string;
 }
 
 /**

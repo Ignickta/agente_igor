@@ -1,5 +1,6 @@
 import { config } from '../config';
 import { sendText } from '../services/evolution';
+import { timeKey } from '../services/datetime';
 import {
   startFocus,
   getFocus,
@@ -10,20 +11,35 @@ import {
 /** Default de duração do foco quando o usuário não especifica (minutos). */
 const DEFAULT_FOCUS_MINUTES = 60;
 
+/** True se a mensagem é um pedido para SAIR do modo foco. */
+export function isCancelFocusRequest(text: string): boolean {
+  const t = text.toLowerCase();
+  return /(sair|encerrar|terminar|parar|desativar|cancelar|tirar|desliga(r)?)\s+(d?o\s+|do\s+)?(modo\s*)?foco|fim\s+do\s+foco/.test(
+    t
+  );
+}
+
 /** True se a mensagem é um pedido para entrar em modo foco. */
 export function isFocusRequest(text: string): boolean {
+  // Não confundir um pedido de SAIR com um de entrar.
+  if (isCancelFocusRequest(text)) return false;
   const t = text.toLowerCase();
   return /modo\s*foco|entrar\s+em\s+foco|\bfoco\s+por\b|\bfoca(r)?\b|me\s+foca/.test(t);
 }
 
-/** Extrai a duração (minutos) de frases como "foco por 2h", "foco por 90 min". */
+/**
+ * Extrai a duração (minutos) de frases como "foco por 2h", "1h30", "90 min".
+ * Soma horas e minutos quando vierem juntos ("1h30" → 90).
+ */
 function parseFocusMinutes(text: string): number {
   const t = text.toLowerCase();
-  const h = t.match(/(\d+(?:[.,]\d+)?)\s*h(?:oras?)?\b/);
-  if (h) return Math.round(parseFloat(h[1].replace(',', '.')) * 60);
-  const m = t.match(/(\d+)\s*(?:min|minutos?)\b/);
-  if (m) return parseInt(m[1], 10);
-  return DEFAULT_FOCUS_MINUTES;
+  const h = t.match(/(\d+(?:[.,]\d+)?)\s*h(?:oras?)?/);
+  // Minutos: ou explícitos ("30 min") ou logo após a hora ("1h30").
+  const m = t.match(/(\d+)\s*(?:min|minutos?)\b/) || (h ? t.match(/\dh\s*(\d{1,2})\b/) : null);
+  let total = 0;
+  if (h) total += parseFloat(h[1].replace(',', '.')) * 60;
+  if (m) total += parseInt(m[1], 10);
+  return total > 0 ? Math.round(total) : DEFAULT_FOCUS_MINUTES;
 }
 
 /** True se a mensagem é marcada como urgente (passa mesmo durante o foco). */
@@ -39,11 +55,7 @@ export async function enterFocus(contact: string, text: string): Promise<string>
   const minutes = Math.min(600, Math.max(10, parseFocusMinutes(text)));
   const endsAt = Date.now() + minutes * 60000;
   await startFocus(contact, endsAt);
-  const fim = new Date(endsAt).toLocaleTimeString('pt-BR', {
-    timeZone: config.timezone,
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const fim = timeKey(new Date(endsAt));
   const horas = minutes >= 60 ? `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)}h` : `${minutes} min`;
   return (
     `🔕 *Modo foco ativado* por ${horas} (até ${fim}).\n` +
@@ -69,15 +81,21 @@ export async function focusGate(
   if (isUrgent(text)) {
     return { active: true }; // urgente: deixa passar
   }
-  const fim = new Date(session.endsAt).toLocaleTimeString('pt-BR', {
-    timeZone: config.timezone,
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const fim = timeKey(new Date(session.endsAt));
   return {
     active: true,
-    reply: `🔕 Você está em modo foco até ${fim}. Anotei sua mensagem mentalmente — me chame com "urgente" se for mesmo importante. 🙂`,
+    reply: `🔕 Você está em modo foco até ${fim}. Anotei sua mensagem mentalmente — me chame com "urgente" (ou peça para "sair do foco") se precisar. 🙂`,
   };
+}
+
+/** Encerra a sessão de foco do contato a pedido dele. Retorna a resposta. */
+export async function cancelFocus(contact: string): Promise<string> {
+  const session = await getFocus(contact);
+  if (!session || session.ended || session.endsAt <= Date.now()) {
+    return 'Você não está em modo foco agora. 🙂';
+  }
+  await endFocus(contact);
+  return '✅ *Modo foco encerrado.* Pode mandar o que precisar.';
 }
 
 /**
