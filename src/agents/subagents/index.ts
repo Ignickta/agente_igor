@@ -10,7 +10,10 @@ import {
   getFacts,
   listSubagents,
   getRecentMemory,
+  getAgendaForDay,
+  updateAgendaItem,
 } from '../../services/firebase';
+import { recordUndo, undoLast } from '../undo';
 import { rememberFact, recallFacts } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { research } from '../research';
@@ -117,6 +120,17 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         },
         required: ['id'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'desfazer_ultima_acao',
+      description:
+        'Desfaz a última alteração que VOCÊ fez (criar/editar/remover lembrete, reorganizar ' +
+        'agenda...). Use quando o Igor pedir para desfazer, voltar atrás ou cancelar o que ' +
+        'acabou de ser feito.',
+      parameters: { type: 'object', properties: {}, required: [] },
     },
   },
   {
@@ -484,13 +498,14 @@ async function executeTool(
       }
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
-      await createTask({
+      const created = await createTask({
         text: texto,
         remindAt: when.toISOString(),
         to: contact || config.ownerPhone,
         subagentId,
         ...(estimatedMinutes ? { estimatedMinutes } : {}),
       });
+      recordUndo(contact, `a criação do lembrete "${texto}"`, () => deleteTask(created.id));
       const quandoBr = when.toLocaleString('pt-BR', { timeZone: config.timezone });
       const dur = estimatedMinutes
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
@@ -536,6 +551,8 @@ async function executeTool(
         if (!task.completedAt) updates.done = false;
       }
       await updateTask(id, updates);
+      const prev = { text: task.text, remindAt: task.remindAt, done: task.done };
+      recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
 
       const after = { ...task, ...updates };
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
@@ -550,7 +567,20 @@ async function executeTool(
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       await deleteTask(id);
+      recordUndo(contact, `a remoção do lembrete "${task.text}"`, async () => {
+        await createTask({
+          text: task.text,
+          remindAt: task.remindAt,
+          to: task.to,
+          ...(task.subagentId ? { subagentId: task.subagentId } : {}),
+          ...(task.estimatedMinutes ? { estimatedMinutes: task.estimatedMinutes } : {}),
+        });
+      });
       return `Lembrete removido: "${task.text}".`;
+    }
+
+    if (call.function.name === 'desfazer_ultima_acao') {
+      return await undoLast(contact);
     }
 
     if (call.function.name === 'salvar_fato') {
@@ -625,7 +655,22 @@ async function executeTool(
     if (call.function.name === 'realocar_agenda') {
       const instrucao = String(args.instrucao || '').trim();
       if (!instrucao) return 'Diga o que devo reorganizar.';
-      return await reorganize(instrucao);
+      // Snapshot dos horários do dia para permitir desfazer a reorganização.
+      const before = (await getAgendaForDay(dayKey())).map((i) => ({
+        id: i.id,
+        startTime: i.startTime,
+        endTime: i.endTime,
+      }));
+      const result = await reorganize(instrucao);
+      recordUndo(contact, 'a reorganização da agenda de hoje', async () => {
+        for (const item of before) {
+          await updateAgendaItem(item.id, {
+            startTime: item.startTime,
+            endTime: item.endTime,
+          });
+        }
+      });
+      return result;
     }
 
     if (call.function.name === 'concluir_tarefa_atual') {
