@@ -25,9 +25,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Healthcheck
+// Healthcheck — `version` é o commit do build (GIT_SHA via deploy.sh) e
+// `startedAt` diz quando o container subiu, para conferir se o deploy pegou.
+const startedAt = new Date().toISOString();
 app.get('/', (_req, res) => res.json({ ok: true, name: 'agente-igor' }));
-app.get('/health', (_req, res) => res.json({ status: 'up' }));
+app.get('/health', (_req, res) =>
+  res.json({ status: 'up', version: process.env.GIT_SHA || 'dev', startedAt })
+);
 
 // Rotas administrativas (CRUD de subagentes e tarefas)
 app.use('/admin', adminRouter);

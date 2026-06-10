@@ -63,8 +63,9 @@ else
 fi
 
 # ===== 4. Build da imagem Docker =====
-log "Construindo imagem Docker ($IMAGE_NAME)..."
-docker build -t "$IMAGE_NAME" "$APP_DIR"
+GIT_SHA="$(git -C "$APP_DIR" rev-parse --short HEAD)"
+log "Construindo imagem Docker ($IMAGE_NAME) no commit $GIT_SHA..."
+docker build -t "$IMAGE_NAME" --build-arg GIT_SHA="$GIT_SHA" "$APP_DIR"
 
 # ===== 5. (Re)sobe o container =====
 log "Reiniciando container ($CONTAINER_NAME) na porta $PORT..."
