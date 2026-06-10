@@ -310,7 +310,8 @@ export async function runSubagent(
   fromAudio = false,
   contact = '',
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
-  depth = 0
+  depth = 0,
+  opts: { isCorrection?: boolean } = {}
 ): Promise<string> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
@@ -356,7 +357,15 @@ Regras gerais:
 - Se a tarefa do Igor envolver claramente OUTRA área (ex: você é o financeiro mas ele toca num
   assunto pessoal/odontológico), use a ferramenta "consultar_subagente" para obter a visão do
   agente daquela área e combine as duas perspectivas numa resposta única e coerente.
-- Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
+${
+    opts.isCorrection
+      ? `- ATENÇÃO: a mensagem atual parece CORRIGIR um erro seu. Faça três coisas: (1) reconheça
+  com naturalidade, sem se desculpar demais; (2) conserte de fato o que foi pedido, usando as
+  ferramentas se preciso; (3) salve a lição com "salvar_fato", começando com "Correção:" —
+  o que você errou e o que fazer da próxima vez. Assim você não repete o erro.
+`
+      : ''
+  }- Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
   sem o Igor pedir, sempre que dados atuais ou que você não tenha certeza melhorariam
   sua resposta (preços, cotações, versões, notícias, novidades do seu domínio). Depois
   incorpore os achados naturalmente à sua resposta — falando como o subagente

@@ -117,6 +117,14 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
 }
 
 /**
+ * Sinais de que o usuário está CORRIGINDO algo que o agente fez ou disse.
+ * Quando detectado, o subagente é instruído a reconhecer, consertar e salvar a
+ * lição na memória compartilhada — para o erro não se repetir.
+ */
+const CORRECTION_REGEX =
+  /\b(errado|errada|errou|não era isso|nao era isso|não foi isso|nao foi isso|não é isso|nao é isso|entendeu errado|corrige isso|corrigindo|não pedi isso|nao pedi isso|você tinha dito|voce tinha dito)\b/i;
+
+/**
  * Última rota por contato, para dar continuidade a mensagens curtas/ambíguas
  * ("e amanhã?", "muda pra 15h") sem perder o assunto da conversa anterior.
  * Em memória: sobrevive entre mensagens, zera num restart (aceitável).
@@ -250,7 +258,10 @@ export async function handleMessage(
 
   // 2) Carrega a memória DESTE subagente e executa.
   const memory = await getRecentMemory(contact, target.id, 12);
-  const reply = await runSubagent(target, text, memory, fromAudio, contact);
+  const isCorrection = CORRECTION_REGEX.test(text);
+  const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
+    isCorrection,
+  });
 
   // 3) Persiste memória da conversa nesse subagente (usuário + resposta).
   const ts = Date.now();
