@@ -1,5 +1,11 @@
 import { embed } from './openai';
-import { saveSharedFact, getSharedFacts } from './firebase';
+import {
+  saveSharedFact,
+  getSharedFacts,
+  saveConversationEntry,
+  getConversationLog,
+} from './firebase';
+import { dayKey, timeKey } from './datetime';
 
 /**
  * Memória semântica compartilhada: fatos salvos por QUALQUER subagente ficam
@@ -46,6 +52,66 @@ export async function rememberFact(
     console.error('[memory] embedding falhou (salvando sem vetor):', err);
   }
   await saveSharedFact({ contact, text: text.trim(), embedding, subagentId, createdAt: Date.now() });
+}
+
+/**
+ * Registra uma TROCA (mensagem do Igor + resposta) no log pesquisável, com um
+ * único embedding por troca (barato). Best-effort: nunca lança.
+ */
+export async function logExchange(
+  contact: string,
+  subagentId: string,
+  subagentName: string,
+  userText: string,
+  reply: string,
+  timestamp: number
+): Promise<void> {
+  try {
+    let embedding: number[] = [];
+    try {
+      embedding = await embed(`${userText}\n${reply}`.slice(0, 6000));
+    } catch (err) {
+      console.error('[memory] embedding da troca falhou (salvando sem vetor):', err);
+    }
+    await saveConversationEntry({
+      contact,
+      subagentId,
+      subagentName,
+      user: userText.slice(0, 1500),
+      assistant: reply.slice(0, 1500),
+      embedding,
+      timestamp,
+    });
+  } catch (err) {
+    console.error('[memory] falha ao registrar troca no log:', err);
+  }
+}
+
+/**
+ * Busca semântica no histórico de conversas antigas. Retorna as trocas mais
+ * relevantes formatadas com data, hora e subagente — pronto para tool result.
+ */
+export async function searchHistory(contact: string, query: string, k = 5): Promise<string[]> {
+  const all = await getConversationLog(contact);
+  if (all.length === 0) return [];
+
+  let queryEmb: number[] = [];
+  try {
+    queryEmb = await embed(query.slice(0, 2000));
+  } catch (err) {
+    console.error('[memory] embedding da busca falhou:', err);
+    return [];
+  }
+
+  return all
+    .map((e) => ({ e, score: cosine(queryEmb, e.embedding || []) }))
+    .sort((a, b) => b.score - a.score)
+    .filter((s) => s.score >= MIN_SIMILARITY)
+    .slice(0, k)
+    .map(({ e }) => {
+      const d = new Date(e.timestamp);
+      return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${e.user}\nAgente: ${e.assistant}`;
+    });
 }
 
 /**

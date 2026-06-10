@@ -7,6 +7,7 @@ import {
   getTask,
   updateTask,
   deleteTask,
+  markTaskDone,
   getFacts,
   listSubagents,
   getRecentMemory,
@@ -17,8 +18,9 @@ import {
   deleteAgendaItem,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
-import { rememberFact, recallFacts } from '../../services/memory';
+import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
+import { listConnectedApps, describeApp, queryApp } from '../../services/apps';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
 import {
@@ -78,15 +80,22 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'listar_lembretes',
       description:
-        'Lista os lembretes/tarefas PENDENTES com id, data e hora locais. Use para descobrir ' +
-        'o id antes de editar_lembrete/remover_lembrete, ou quando o usuário perguntar quais ' +
-        'lembretes existem.',
+        'Lista lembretes/tarefas com id, data e hora locais. Use para descobrir o id antes de ' +
+        'editar_lembrete/remover_lembrete/concluir_lembrete, ou quando o usuário perguntar ' +
+        'quais lembretes existem.',
       parameters: {
         type: 'object',
         properties: {
           data: {
             type: 'string',
             description: 'Filtra por um dia local YYYY-MM-DD. Opcional; sem filtro, lista todos.',
+          },
+          status: {
+            type: 'string',
+            enum: ['pendentes', 'disparados_hoje'],
+            description:
+              '"pendentes" (padrão) ou "disparados_hoje": lembretes que tocaram hoje e ainda ' +
+              'não foram confirmados como feitos (para o acompanhamento do dia).',
           },
         },
         required: [],
@@ -125,6 +134,24 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'concluir_lembrete',
+      description:
+        'Marca um lembrete como realmente FEITO (confirmado pelo Igor) — usado no acompanhamento ' +
+        'do dia, quando ele disser que concluiu algo que tinha tocado. Se não souber o id, use ' +
+        'listar_lembretes com status "disparados_hoje". Para a tarefa atual da AGENDA, prefira ' +
+        'concluir_tarefa_atual.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do lembrete.' },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'remover_lembrete',
       description:
         'Apaga um lembrete de vez (quando o usuário cancelar o compromisso). Se não souber o ' +
@@ -135,6 +162,27 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           id: { type: 'string', description: 'ID do lembrete (obtido em listar_lembretes).' },
         },
         required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'buscar_no_historico',
+      description:
+        'Busca semântica em TODO o histórico de conversas antigas com o Igor (além das últimas ' +
+        'mensagens que você já vê). Use sempre que ele referenciar algo do passado: "o que ' +
+        'combinamos", "aquele cliente que te falei", "semana passada", "você lembra...". ' +
+        'Retorna as trocas mais relevantes com data e contexto.',
+      parameters: {
+        type: 'object',
+        properties: {
+          consulta: {
+            type: 'string',
+            description: 'O que procurar, em linguagem natural (ex: "acordo com o João sobre entrega").',
+          },
+        },
+        required: ['consulta'],
       },
     },
   },
@@ -249,6 +297,61 @@ function n8nTool(): OpenAI.Chat.Completions.ChatCompletionTool {
       },
     },
   };
+}
+
+/**
+ * Tools de apps conectados (CRM, SaaS...) — só entram quando há apps em
+ * CONNECTED_APPS. Leitura apenas; a lista de apps vai na descrição.
+ */
+function appsTools(): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  const resumo = listConnectedApps()
+    .map((a) => `"${a.name}" (${a.description})`)
+    .join(', ');
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'explorar_app',
+        description:
+          'Mostra o mapa de um app conectado do Igor: as collections do banco e o que contêm. ' +
+          `Use antes de consultar_app quando não souber onde está o dado. Apps: ${resumo}.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            app: { type: 'string', description: 'Nome do app (ex: "crm").' },
+          },
+          required: ['app'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'consultar_app',
+        description:
+          'Consulta (SOMENTE leitura) dados reais de um app conectado do Igor — clientes, ' +
+          'negócios, agendamentos etc. Use para responder perguntas sobre os negócios dele ' +
+          `com dados de verdade. Apps: ${resumo}. Filtros são igualdade exata em até 3 campos.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            app: { type: 'string', description: 'Nome do app (ex: "crm").' },
+            colecao: { type: 'string', description: 'Collection a consultar.' },
+            filtros: {
+              type: 'string',
+              description:
+                'JSON de filtros por igualdade, ex: {"empresaId":"abc","status":"aberto"}. Opcional.',
+            },
+            limite: {
+              type: 'number',
+              description: 'Máximo de documentos (padrão 10, teto 20).',
+            },
+          },
+          required: ['app', 'colecao'],
+        },
+      },
+    },
+  ];
 }
 
 /**
@@ -435,9 +538,11 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
-/** Conjunto de tools efetivo para um subagente (base + n8n + orquestrador). */
+/** Conjunto de tools efetivo para um subagente (base + n8n + apps + orquestrador). */
 function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  const base = listAutomations().length > 0 ? [...TOOLS, n8nTool()] : [...TOOLS];
+  const base = [...TOOLS];
+  if (listAutomations().length > 0) base.push(n8nTool());
+  if (listConnectedApps().length > 0) base.push(...appsTools());
   return subagent.name === ORCHESTRATOR_NAME ? [...base, ...ORCHESTRATOR_TOOLS] : base;
 }
 
@@ -617,11 +722,19 @@ async function executeTool(
 
     if (call.function.name === 'listar_lembretes') {
       const data = String(args.data || '').trim();
-      const pending = (await listTasks()).filter((t) => !t.done);
+      const status = String(args.status || 'pendentes').trim();
+      const all = await listTasks();
+      const byStatus =
+        status === 'disparados_hoje'
+          ? all.filter(
+              (t) => t.done && !t.completedAt && dayKey(new Date(t.remindAt)) === dayKey()
+            )
+          : all.filter((t) => !t.done);
       const filtered = data
-        ? pending.filter((t) => dayKey(new Date(t.remindAt)) === data)
-        : pending;
+        ? byStatus.filter((t) => dayKey(new Date(t.remindAt)) === data)
+        : byStatus;
       if (filtered.length === 0) {
+        if (status === 'disparados_hoje') return 'Nenhum lembrete disparado hoje sem confirmação.';
         return data ? `Sem lembretes pendentes em ${data}.` : 'Sem lembretes pendentes.';
       }
       return filtered
@@ -680,6 +793,19 @@ async function executeTool(
       return `Lembrete atualizado: "${after.text}" — ${quandoBr}.`;
     }
 
+    if (call.function.name === 'concluir_lembrete') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do lembrete.';
+      const task = await getTask(id);
+      if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
+      if (task.completedAt) return `O lembrete "${task.text}" já estava concluído.`;
+      await markTaskDone(id);
+      recordUndo(contact, `a conclusão do lembrete "${task.text}"`, () =>
+        updateTask(id, { done: task.done, completedAt: null })
+      );
+      return `Concluído ✅: "${task.text}".`;
+    }
+
     if (call.function.name === 'remover_lembrete') {
       const id = String(args.id || '').trim();
       if (!id) return 'Informe o id do lembrete.';
@@ -696,6 +822,16 @@ async function executeTool(
         });
       });
       return `Lembrete removido: "${task.text}".`;
+    }
+
+    if (call.function.name === 'buscar_no_historico') {
+      const consulta = String(args.consulta || '').trim();
+      if (!consulta) return 'Diga o que devo procurar no histórico.';
+      if (!contact) return 'Sem contato identificado para buscar histórico.';
+      const hits = await searchHistory(contact, consulta);
+      return hits.length
+        ? `Trechos relevantes do histórico:\n\n${hits.join('\n\n')}`
+        : 'Não encontrei nada relacionado no histórico de conversas.';
     }
 
     if (call.function.name === 'desfazer_ultima_acao') {
@@ -724,6 +860,29 @@ async function executeTool(
         }
       }
       return await triggerAutomation(nome, dados);
+    }
+
+    if (call.function.name === 'explorar_app') {
+      return await describeApp(String(args.app || '').trim());
+    }
+
+    if (call.function.name === 'consultar_app') {
+      const app = String(args.app || '').trim();
+      const colecao = String(args.colecao || '').trim();
+      const limite = Number(args.limite) || 10;
+      let filtros: Record<string, unknown> = {};
+      const filtrosRaw = String(args.filtros || '').trim();
+      if (filtrosRaw) {
+        try {
+          const parsed = JSON.parse(filtrosRaw);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            filtros = parsed as Record<string, unknown>;
+          }
+        } catch {
+          return 'Filtros inválidos: envie um JSON de igualdades, ex: {"status":"aberto"}.';
+        }
+      }
+      return await queryApp(app, colecao, filtros, limite);
     }
 
     if (call.function.name === 'pesquisar') {

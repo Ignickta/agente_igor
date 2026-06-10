@@ -10,6 +10,7 @@ import {
   sendWeeklyReview,
   runProactiveCheck,
   sendSubagentWeeklyReports,
+  sendPendingFollowUp,
 } from './agents/reports';
 
 /**
@@ -53,6 +54,18 @@ export function startScheduler(): void {
       } catch (err) {
         console.error('[scheduler] falha ao enviar cronograma do dia:', err);
       }
+    },
+    opts
+  );
+
+  // Follow-up de pendências — todo dia às 20:30 (antes do resumo noturno):
+  // cobra com gentileza os lembretes que tocaram e não foram confirmados.
+  cron.schedule(
+    '30 20 * * *',
+    () => {
+      sendPendingFollowUp().catch((err) =>
+        console.error('[scheduler] falha no follow-up de pendências:', err)
+      );
     },
     opts
   );

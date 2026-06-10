@@ -37,8 +37,8 @@ export interface Task {
   createdAt: number;
   /** Duração estimada em minutos (sugerida pelo LLM na criação). */
   estimatedMinutes?: number;
-  /** Quando foi concluída (epoch ms), para relatórios/aprendizado. */
-  completedAt?: number;
+  /** Quando foi concluída (epoch ms), para relatórios/aprendizado. null = não. */
+  completedAt?: number | null;
   /** Recorrência: o lembrete se reagenda em vez de morrer ao disparar. null = sem. */
   recurrence?: Recurrence | null;
 }
