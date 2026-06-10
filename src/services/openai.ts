@@ -15,6 +15,15 @@ export function supportsCustomTemperature(model: string): boolean {
   return true;
 }
 
+/** Embedding de um texto, para a memória semântica compartilhada. */
+export async function embed(text: string): Promise<number[]> {
+  const res = await openai.embeddings.create({
+    model: config.openai.embeddingModel,
+    input: text.slice(0, 8000),
+  });
+  return res.data[0]?.embedding ?? [];
+}
+
 /** Chamada de chat completion simples retornando o texto. */
 export async function chat(
   messages: ChatMessage[],

@@ -54,6 +54,8 @@ export const config = {
     model: process.env.OPENAI_MODEL || 'gpt-5.1',
     // Modelo barato/rápido para tarefas utilitárias (roteamento, JSON curto).
     utilityModel: process.env.OPENAI_UTILITY_MODEL || 'gpt-5-mini',
+    // Modelo de embeddings da memória semântica compartilhada.
+    embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
     // Modelo usado pelo ResearchAgent com a tool nativa web_search_preview.
     researchModel: process.env.OPENAI_RESEARCH_MODEL || process.env.OPENAI_MODEL || 'gpt-5.1',
     transcriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1',
@@ -68,6 +70,27 @@ export const config = {
   },
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
+  },
+  /**
+   * Automações n8n acionáveis pelo agente, via webhook. Formato:
+   * N8N_WEBHOOKS="enviar-planilha=https://n8n.../webhook/abc;cobranca=https://..."
+   * Token opcional (N8N_WEBHOOK_TOKEN) vai como Bearer no header Authorization.
+   */
+  n8n: {
+    webhooks: Object.fromEntries(
+      (process.env.N8N_WEBHOOKS || '')
+        .split(';')
+        .map((pair) => pair.trim())
+        .filter(Boolean)
+        .map((pair) => {
+          const idx = pair.indexOf('=');
+          return idx > 0
+            ? [pair.slice(0, idx).trim(), pair.slice(idx + 1).trim()]
+            : ['', ''];
+        })
+        .filter(([name, url]) => name && url)
+    ) as Record<string, string>,
+    token: process.env.N8N_WEBHOOK_TOKEN || '',
   },
   ownerPhone: process.env.OWNER_PHONE || '',
   timezone: process.env.TZ || 'America/Sao_Paulo',

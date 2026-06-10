@@ -21,6 +21,7 @@ const memoryCol = db.collection('memory');
 const metricsCol = db.collection('metrics');
 const agendaCol = db.collection('agenda');
 const focusCol = db.collection('focus');
+const sharedFactsCol = db.collection('shared_facts');
 
 // ===================== Subagentes =====================
 
@@ -240,6 +241,44 @@ export async function updateTask(
 
 export async function deleteTask(id: string): Promise<void> {
   await tasksCol.doc(id).delete();
+}
+
+// ===================== Memória semântica compartilhada =====================
+
+/**
+ * Fato de longo prazo no pool COMPARTILHADO entre todos os subagentes, com
+ * embedding para busca semântica. Substitui gradualmente os facts por
+ * subagente: o que o agente de Vendas aprende, o Pessoal também enxerga.
+ */
+export interface SharedFact {
+  id: string;
+  contact: string;
+  text: string;
+  /** Embedding do texto (vazio se a API de embeddings falhou na gravação). */
+  embedding: number[];
+  /** Subagente que registrou o fato (origem), para contexto. */
+  subagentId?: string;
+  createdAt: number;
+}
+
+export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<void> {
+  if (!data.text.trim()) return;
+  const dup = await sharedFactsCol
+    .where('contact', '==', data.contact)
+    .where('text', '==', data.text)
+    .limit(1)
+    .get();
+  if (!dup.empty) return;
+  await sharedFactsCol.add(data);
+}
+
+/** Todos os fatos compartilhados do contato, mais recentes primeiro. */
+export async function getSharedFacts(contact: string, limit = 400): Promise<SharedFact[]> {
+  const snap = await sharedFactsCol.where('contact', '==', contact).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as SharedFact))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit);
 }
 
 // ===================== Métricas de uso =====================

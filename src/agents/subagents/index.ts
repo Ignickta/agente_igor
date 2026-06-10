@@ -1,4 +1,4 @@
-import { Subagent, MemoryMessage, Task } from '../../types';
+import { Subagent, MemoryMessage, Task, AgendaItem } from '../../types';
 import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
@@ -7,11 +7,18 @@ import {
   getTask,
   updateTask,
   deleteTask,
-  saveFact,
   getFacts,
   listSubagents,
   getRecentMemory,
+  getAgendaForDay,
+  updateAgendaItem,
+  createAgendaItem,
+  getAgendaItem,
+  deleteAgendaItem,
 } from '../../services/firebase';
+import { recordUndo, undoLast } from '../undo';
+import { rememberFact, recallFacts } from '../../services/memory';
+import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
 import {
@@ -53,6 +60,13 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               'Data e hora LOCAIS do lembrete (fuso do Igor), em ISO 8601 sem offset ' +
               '(ex: 2026-06-10T14:00:00). Use as datas de "hoje" e "amanhã" fornecidas ' +
               'no contexto — não calcule dias de cabeça.',
+          },
+          recorrencia: {
+            type: 'string',
+            enum: ['diaria', 'semanal', 'mensal', 'dias_uteis'],
+            description:
+              'Se o lembrete se repete ("todo dia", "toda segunda", "todo mês", "dias úteis"). ' +
+              'Omita para lembrete único.',
           },
         },
         required: ['texto', 'quando_iso'],
@@ -97,6 +111,12 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             description:
               'Novo horário LOCAL em ISO 8601 sem offset (ex: 2026-06-10T08:30:00). Opcional.',
           },
+          recorrencia: {
+            type: 'string',
+            enum: ['diaria', 'semanal', 'mensal', 'dias_uteis', 'nenhuma'],
+            description:
+              'Muda a recorrência; "nenhuma" transforma em lembrete único. Opcional.',
+          },
         },
         required: ['id'],
       },
@@ -116,6 +136,17 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         },
         required: ['id'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'desfazer_ultima_acao',
+      description:
+        'Desfaz a última alteração que VOCÊ fez (criar/editar/remover lembrete, reorganizar ' +
+        'agenda...). Use quando o Igor pedir para desfazer, voltar atrás ou cancelar o que ' +
+        'acabou de ser feito.',
+      parameters: { type: 'object', properties: {}, required: [] },
     },
   },
   {
@@ -189,6 +220,38 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
 ];
 
 /**
+ * Tool de automações n8n — só entra no conjunto quando há webhooks configurados
+ * (N8N_WEBHOOKS). A lista de nomes vai na descrição para o modelo escolher.
+ */
+function n8nTool(): OpenAI.Chat.Completions.ChatCompletionTool {
+  return {
+    type: 'function',
+    function: {
+      name: 'acionar_automacao',
+      description:
+        'Dispara um workflow do n8n do Igor. Use quando ele pedir para executar uma automação ' +
+        `(ex: "dispara a automação X", "manda a planilha pro cliente"). Disponíveis: ` +
+        `${listAutomations().join(', ')}. Em "dados", passe as informações úteis ao workflow.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          nome: {
+            type: 'string',
+            description: 'Nome exato da automação (uma das disponíveis).',
+          },
+          dados: {
+            type: 'string',
+            description:
+              'Informações para o workflow, em texto livre ou JSON. Opcional.',
+          },
+        },
+        required: ['nome'],
+      },
+    },
+  };
+}
+
+/**
  * Ferramentas exclusivas do subagente orquestrador (Agenda). Só são oferecidas
  * quando o subagente em execução é o de agenda — os demais seguem com o conjunto
  * base, mantendo compatibilidade.
@@ -236,6 +299,85 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           },
         },
         required: ['instrucao'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'criar_evento',
+      description:
+        'Cria um EVENTO com horário de início e fim na agenda (ex: "reunião amanhã 15h às 16h"). ' +
+        'Por padrão o evento é FIXO (prioridade 1, nunca movido pelo reorganizador). Use para ' +
+        'compromissos com hora marcada; para um simples "me lembra de X", use criar_lembrete.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título do evento.' },
+          data: {
+            type: 'string',
+            description: 'Dia local YYYY-MM-DD. Opcional; padrão = hoje.',
+          },
+          inicio: { type: 'string', description: 'Início HH:mm (ex: 15:00).' },
+          fim: { type: 'string', description: 'Fim HH:mm (ex: 16:00).' },
+          fixo: {
+            type: 'boolean',
+            description: 'Se false, o evento pode ser remanejado pelo agente. Padrão true.',
+          },
+        },
+        required: ['titulo', 'inicio', 'fim'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'listar_itens_agenda',
+      description:
+        'Lista os itens da agenda de um dia COM os ids, para poder editar/remover. Use antes ' +
+        'de editar_item_agenda/remover_item_agenda quando não souber o id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: { type: 'string', description: 'Dia local YYYY-MM-DD. Opcional; padrão = hoje.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'editar_item_agenda',
+      description:
+        'Altera um item da agenda: título, horários e/ou dia. Se não souber o id, chame ' +
+        'listar_itens_agenda primeiro.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do item (de listar_itens_agenda).' },
+          titulo: { type: 'string', description: 'Novo título. Opcional.' },
+          inicio: { type: 'string', description: 'Novo início HH:mm. Opcional.' },
+          fim: { type: 'string', description: 'Novo fim HH:mm. Opcional.' },
+          data: { type: 'string', description: 'Novo dia YYYY-MM-DD (mover de dia). Opcional.' },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remover_item_agenda',
+      description:
+        'Remove um item da agenda (evento cancelado). Se não souber o id, use ' +
+        'listar_itens_agenda primeiro.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do item (de listar_itens_agenda).' },
+        },
+        required: ['id'],
       },
     },
   },
@@ -293,9 +435,10 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
-/** Conjunto de tools efetivo para um subagente (base + orquestrador, se for o caso). */
+/** Conjunto de tools efetivo para um subagente (base + n8n + orquestrador). */
 function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  return subagent.name === ORCHESTRATOR_NAME ? [...TOOLS, ...ORCHESTRATOR_TOOLS] : TOOLS;
+  const base = listAutomations().length > 0 ? [...TOOLS, n8nTool()] : [...TOOLS];
+  return subagent.name === ORCHESTRATOR_NAME ? [...base, ...ORCHESTRATOR_TOOLS] : base;
 }
 
 /**
@@ -310,9 +453,19 @@ export async function runSubagent(
   fromAudio = false,
   contact = '',
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
-  depth = 0
+  depth = 0,
+  opts: { isCorrection?: boolean } = {}
 ): Promise<string> {
-  const facts = contact ? await getFacts(contact, subagent.id) : [];
+  // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
+  // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
+  let facts: string[] = [];
+  if (contact) {
+    const [shared, legacy] = await Promise.all([
+      recallFacts(contact, userText, 8).catch(() => [] as string[]),
+      getFacts(contact, subagent.id, 8),
+    ]);
+    facts = [...new Set([...shared, ...legacy])].slice(0, 12);
+  }
   const now = new Date();
   const nowStr = now.toLocaleString('pt-BR', { timeZone: config.timezone });
   // Âncoras de data explícitas (dia da semana + hoje/amanhã em ISO) para o
@@ -347,14 +500,22 @@ Regras gerais:
 - Se a tarefa do Igor envolver claramente OUTRA área (ex: você é o financeiro mas ele toca num
   assunto pessoal/odontológico), use a ferramenta "consultar_subagente" para obter a visão do
   agente daquela área e combine as duas perspectivas numa resposta única e coerente.
-- Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
+${
+    opts.isCorrection
+      ? `- ATENÇÃO: a mensagem atual parece CORRIGIR um erro seu. Faça três coisas: (1) reconheça
+  com naturalidade, sem se desculpar demais; (2) conserte de fato o que foi pedido, usando as
+  ferramentas se preciso; (3) salve a lição com "salvar_fato", começando com "Correção:" —
+  o que você errou e o que fazer da próxima vez. Assim você não repete o erro.
+`
+      : ''
+  }- Você tem acesso à ferramenta "pesquisar" (busca na web). Use-a por conta própria,
   sem o Igor pedir, sempre que dados atuais ou que você não tenha certeza melhorariam
   sua resposta (preços, cotações, versões, notícias, novidades do seu domínio). Depois
   incorpore os achados naturalmente à sua resposta — falando como o subagente
   "${subagent.name}", sem colar o texto da pesquisa cru e sem dizer "segundo a pesquisa".
   Cite as fontes brevemente só quando fizer sentido.${
     facts.length
-      ? `\n\nFatos que você já sabe sobre este projeto/usuário:\n${facts
+      ? `\n\nFatos que você sabe sobre o Igor e os projetos dele (memória compartilhada entre as áreas):\n${facts
           .map((f) => `- ${f}`)
           .join('\n')}`
       : ''
@@ -430,20 +591,28 @@ async function executeTool(
       if (!texto || isNaN(when.getTime())) {
         return 'Não foi possível criar: texto ou data inválidos.';
       }
+      const recorrencia = String(args.recorrencia || '').trim() as Task['recurrence'];
+      const recValida =
+        recorrencia && ['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recorrencia)
+          ? recorrencia
+          : null;
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
-      await createTask({
+      const created = await createTask({
         text: texto,
         remindAt: when.toISOString(),
         to: contact || config.ownerPhone,
         subagentId,
         ...(estimatedMinutes ? { estimatedMinutes } : {}),
+        ...(recValida ? { recurrence: recValida } : {}),
       });
+      recordUndo(contact, `a criação do lembrete "${texto}"`, () => deleteTask(created.id));
       const quandoBr = when.toLocaleString('pt-BR', { timeZone: config.timezone });
       const dur = estimatedMinutes
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
         : '';
-      return `Lembrete criado para ${quandoBr}: "${texto}".${dur}`;
+      const rec = recValida ? ` Recorrência: ${recValida.replace('_', ' ')}.` : '';
+      return `Lembrete criado para ${quandoBr}: "${texto}".${rec}${dur}`;
     }
 
     if (call.function.name === 'listar_lembretes') {
@@ -459,7 +628,8 @@ async function executeTool(
         .slice(0, 30)
         .map((t) => {
           const d = new Date(t.remindAt);
-          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}`;
+          const rec = t.recurrence ? ` (${t.recurrence.replace('_', ' ')})` : '';
+          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}${rec}`;
         })
         .join('\n');
     }
@@ -468,13 +638,24 @@ async function executeTool(
       const id = String(args.id || '').trim();
       const texto = String(args.texto || '').trim();
       const quando = String(args.quando_iso || '').trim();
+      const recRaw = String(args.recorrencia || '').trim();
       if (!id) return 'Informe o id do lembrete.';
-      if (!texto && !quando) return 'Nada para alterar: informe texto e/ou quando_iso.';
+      if (!texto && !quando && !recRaw) {
+        return 'Nada para alterar: informe texto, quando_iso e/ou recorrencia.';
+      }
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
 
       const updates: Partial<Omit<Task, 'id' | 'createdAt'>> = {};
       if (texto) updates.text = texto;
+      if (recRaw) {
+        if (recRaw === 'nenhuma') updates.recurrence = null;
+        else if (['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recRaw)) {
+          updates.recurrence = recRaw as Task['recurrence'];
+        } else {
+          return 'Recorrência inválida: use diaria, semanal, mensal, dias_uteis ou nenhuma.';
+        }
+      }
       if (quando) {
         const when = parseLocalIso(quando);
         if (isNaN(when.getTime())) return 'Horário inválido; use ISO 8601 (2026-06-10T08:30:00).';
@@ -484,6 +665,13 @@ async function executeTool(
         if (!task.completedAt) updates.done = false;
       }
       await updateTask(id, updates);
+      const prev = {
+        text: task.text,
+        remindAt: task.remindAt,
+        done: task.done,
+        recurrence: task.recurrence ?? null,
+      };
+      recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
 
       const after = { ...task, ...updates };
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
@@ -498,14 +686,44 @@ async function executeTool(
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       await deleteTask(id);
+      recordUndo(contact, `a remoção do lembrete "${task.text}"`, async () => {
+        await createTask({
+          text: task.text,
+          remindAt: task.remindAt,
+          to: task.to,
+          ...(task.subagentId ? { subagentId: task.subagentId } : {}),
+          ...(task.estimatedMinutes ? { estimatedMinutes: task.estimatedMinutes } : {}),
+        });
+      });
       return `Lembrete removido: "${task.text}".`;
+    }
+
+    if (call.function.name === 'desfazer_ultima_acao') {
+      return await undoLast(contact);
     }
 
     if (call.function.name === 'salvar_fato') {
       const fato = String(args.fato || '').trim();
       if (!fato || !contact) return 'Nada para salvar.';
-      await saveFact(contact, subagentId, fato);
+      // Pool compartilhado com embedding: todas as áreas enxergam o fato.
+      await rememberFact(contact, subagentId, fato);
       return `Fato memorizado: "${fato}".`;
+    }
+
+    if (call.function.name === 'acionar_automacao') {
+      const nome = String(args.nome || '').trim();
+      if (!nome) return 'Informe o nome da automação.';
+      const dadosRaw = String(args.dados || '').trim();
+      // Aceita JSON ou texto livre nos dados.
+      let dados: unknown = dadosRaw || undefined;
+      if (dadosRaw.startsWith('{') || dadosRaw.startsWith('[')) {
+        try {
+          dados = JSON.parse(dadosRaw);
+        } catch {
+          /* mantém como texto */
+        }
+      }
+      return await triggerAutomation(nome, dados);
     }
 
     if (call.function.name === 'pesquisar') {
@@ -556,7 +774,120 @@ async function executeTool(
     if (call.function.name === 'realocar_agenda') {
       const instrucao = String(args.instrucao || '').trim();
       if (!instrucao) return 'Diga o que devo reorganizar.';
-      return await reorganize(instrucao);
+      // Snapshot dos horários do dia para permitir desfazer a reorganização.
+      const before = (await getAgendaForDay(dayKey())).map((i) => ({
+        id: i.id,
+        startTime: i.startTime,
+        endTime: i.endTime,
+      }));
+      const result = await reorganize(instrucao);
+      recordUndo(contact, 'a reorganização da agenda de hoje', async () => {
+        for (const item of before) {
+          await updateAgendaItem(item.id, {
+            startTime: item.startTime,
+            endTime: item.endTime,
+          });
+        }
+      });
+      return result;
+    }
+
+    if (call.function.name === 'criar_evento') {
+      const titulo = String(args.titulo || '').trim();
+      const data = String(args.data || '').trim() || dayKey();
+      const inicio = String(args.inicio || '').trim();
+      const fim = String(args.fim || '').trim();
+      const fixo = args.fixo !== false;
+      if (!titulo) return 'Informe o título do evento.';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
+      if (!/^\d{2}:\d{2}$/.test(inicio) || !/^\d{2}:\d{2}$/.test(fim)) {
+        return 'Horários inválidos; use HH:mm (ex: 15:00).';
+      }
+      if (fim <= inicio) return 'O fim deve ser depois do início.';
+      const item = await createAgendaItem({
+        title: titulo,
+        date: data,
+        startTime: inicio,
+        endTime: fim,
+        priority: fixo ? 1 : 3,
+        type: 'event',
+        createdBy: 'user',
+      });
+      recordUndo(contact, `a criação do evento "${titulo}"`, () => deleteAgendaItem(item.id));
+      return `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}.`;
+    }
+
+    if (call.function.name === 'listar_itens_agenda') {
+      const data = String(args.data || '').trim() || dayKey();
+      const items = await getAgendaForDay(data);
+      if (items.length === 0) return `Sem itens na agenda de ${data}.`;
+      return items
+        .map(
+          (i) =>
+            `- id: ${i.id} | ${i.startTime}–${i.endTime} | ${i.title} | prio ${i.priority}` +
+            `${i.priority === 1 ? ' (fixo)' : ''} | ${i.status}`
+        )
+        .join('\n');
+    }
+
+    if (call.function.name === 'editar_item_agenda') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do item.';
+      const item = await getAgendaItem(id);
+      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+
+      const titulo = String(args.titulo || '').trim();
+      const inicio = String(args.inicio || '').trim();
+      const fim = String(args.fim || '').trim();
+      const data = String(args.data || '').trim();
+      if (inicio && !/^\d{2}:\d{2}$/.test(inicio)) return 'Início inválido; use HH:mm.';
+      if (fim && !/^\d{2}:\d{2}$/.test(fim)) return 'Fim inválido; use HH:mm.';
+      if (data && !/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
+
+      const updates: Partial<Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date'>> = {};
+      if (titulo) updates.title = titulo;
+      if (inicio) updates.startTime = inicio;
+      if (fim) updates.endTime = fim;
+      if (data) updates.date = data;
+      if (Object.keys(updates).length === 0) {
+        return 'Nada para alterar: informe título, horários e/ou data.';
+      }
+      await updateAgendaItem(id, updates);
+      recordUndo(contact, `a edição do item "${item.title}"`, () =>
+        updateAgendaItem(id, {
+          title: item.title,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          date: item.date,
+        })
+      );
+      const after = { ...item, ...updates };
+      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.`;
+    }
+
+    if (call.function.name === 'remover_item_agenda') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do item.';
+      const item = await getAgendaItem(id);
+      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+      await deleteAgendaItem(id);
+      recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
+        await createAgendaItem({
+          title: item.title,
+          date: item.date,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          priority: item.priority,
+          type: item.type,
+          createdBy: item.createdBy,
+          status: item.status,
+          ...(item.notes ? { notes: item.notes } : {}),
+          ...(item.subagentId ? { subagentId: item.subagentId } : {}),
+          ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
+          ...(item.taskId ? { taskId: item.taskId } : {}),
+        });
+      });
+      return `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime}).`;
     }
 
     if (call.function.name === 'concluir_tarefa_atual') {
