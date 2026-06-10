@@ -9,6 +9,7 @@ import {
 } from '../services/firebase';
 import { runSubagent } from './subagents';
 import { tryHandleCommand } from './commands';
+import { logExchange } from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
@@ -272,9 +273,12 @@ export async function handleMessage(
     timestamp: ts + 1,
   });
 
-  // 4) Registra métrica de uso (best-effort, não bloqueia a resposta).
+  // 4) Registra métrica de uso e o log pesquisável (best-effort, não bloqueia).
   recordMessage(target.id, target.name).catch((err) =>
     console.error('[central] falha ao registrar métrica:', err)
+  );
+  logExchange(contact, target.id, target.name, text, reply, ts).catch((err) =>
+    console.error('[central] falha ao registrar log de conversa:', err)
   );
 
   return reply;

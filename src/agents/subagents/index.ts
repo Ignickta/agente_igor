@@ -17,7 +17,7 @@ import {
   deleteAgendaItem,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
-import { rememberFact, recallFacts } from '../../services/memory';
+import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
@@ -135,6 +135,27 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           id: { type: 'string', description: 'ID do lembrete (obtido em listar_lembretes).' },
         },
         required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'buscar_no_historico',
+      description:
+        'Busca semântica em TODO o histórico de conversas antigas com o Igor (além das últimas ' +
+        'mensagens que você já vê). Use sempre que ele referenciar algo do passado: "o que ' +
+        'combinamos", "aquele cliente que te falei", "semana passada", "você lembra...". ' +
+        'Retorna as trocas mais relevantes com data e contexto.',
+      parameters: {
+        type: 'object',
+        properties: {
+          consulta: {
+            type: 'string',
+            description: 'O que procurar, em linguagem natural (ex: "acordo com o João sobre entrega").',
+          },
+        },
+        required: ['consulta'],
       },
     },
   },
@@ -696,6 +717,16 @@ async function executeTool(
         });
       });
       return `Lembrete removido: "${task.text}".`;
+    }
+
+    if (call.function.name === 'buscar_no_historico') {
+      const consulta = String(args.consulta || '').trim();
+      if (!consulta) return 'Diga o que devo procurar no histórico.';
+      if (!contact) return 'Sem contato identificado para buscar histórico.';
+      const hits = await searchHistory(contact, consulta);
+      return hits.length
+        ? `Trechos relevantes do histórico:\n\n${hits.join('\n\n')}`
+        : 'Não encontrei nada relacionado no histórico de conversas.';
     }
 
     if (call.function.name === 'desfazer_ultima_acao') {

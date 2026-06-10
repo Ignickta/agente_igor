@@ -22,6 +22,7 @@ const metricsCol = db.collection('metrics');
 const agendaCol = db.collection('agenda');
 const focusCol = db.collection('focus');
 const sharedFactsCol = db.collection('shared_facts');
+const conversationLogCol = db.collection('conversation_log');
 
 // ===================== Subagentes =====================
 
@@ -278,6 +279,42 @@ export async function getSharedFacts(contact: string, limit = 400): Promise<Shar
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as SharedFact))
     .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit);
+}
+
+// ===================== Log pesquisável de conversas =====================
+
+/**
+ * Uma TROCA de mensagens (Igor + resposta) com embedding, para busca semântica
+ * no histórico antigo — além da janela curta de memória por subagente.
+ */
+export interface ConversationEntry {
+  id: string;
+  contact: string;
+  subagentId: string;
+  subagentName: string;
+  user: string;
+  assistant: string;
+  /** Embedding da troca (vazio se a API falhou na gravação). */
+  embedding: number[];
+  timestamp: number;
+}
+
+export async function saveConversationEntry(
+  data: Omit<ConversationEntry, 'id'>
+): Promise<void> {
+  await conversationLogCol.add(data);
+}
+
+/** Trocas do contato, mais recentes primeiro (cap para a busca em memória). */
+export async function getConversationLog(
+  contact: string,
+  limit = 800
+): Promise<ConversationEntry[]> {
+  const snap = await conversationLogCol.where('contact', '==', contact).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as ConversationEntry))
+    .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, limit);
 }
 
