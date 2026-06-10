@@ -389,7 +389,7 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'realocar_agenda',
       description:
-        'Reorganiza os BLOCOS do cronograma de hoje conforme um pedido em linguagem natural ' +
+        'Reorganiza os BLOCOS do cronograma de um dia conforme um pedido em linguagem natural ' +
         '(ex: "adia o dentista pra depois do almoço"). Itens fixos do usuário (prioridade 1) ' +
         'nunca são movidos. Para mudar horário/texto de um LEMBRETE avulso, prefira ' +
         'listar_lembretes + editar_lembrete.',
@@ -399,6 +399,12 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           instrucao: {
             type: 'string',
             description: 'O pedido de realocação, em linguagem natural.',
+          },
+          data: {
+            type: 'string',
+            description:
+              'Dia local YYYY-MM-DD a reorganizar. Opcional; padrão = hoje. Use a data de ' +
+              'AMANHÃ do contexto quando o pedido for sobre amanhã.',
           },
         },
         required: ['instrucao'],
@@ -546,6 +552,47 @@ function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionToo
   return subagent.name === ORCHESTRATOR_NAME ? [...base, ...ORCHESTRATOR_TOOLS] : base;
 }
 
+// ===================== Guarda anti-alucinação de ação =====================
+
+/**
+ * Ferramentas que ALTERAM estado (criam/editam/removem algo persistido). Se a
+ * resposta final afirma ter agendado/criado/alterado algo e NENHUMA destas foi
+ * chamada na rodada, a afirmação é falsa — nada foi salvo.
+ */
+const WRITE_TOOLS = new Set([
+  'criar_lembrete',
+  'editar_lembrete',
+  'concluir_lembrete',
+  'remover_lembrete',
+  'criar_evento',
+  'editar_item_agenda',
+  'remover_item_agenda',
+  'concluir_tarefa_atual',
+  'realocar_agenda',
+  'gerar_cronograma',
+  'desfazer_ultima_acao',
+  'acionar_automacao',
+  'salvar_fato',
+]);
+
+/**
+ * Afirmações fortes de ação concluída/prometida sobre agenda e lembretes
+ * ("organizei seu bloco", "vou te mandar lembrete", "agendei"). Usado SÓ quando
+ * nenhuma WRITE_TOOL foi chamada — aí a resposta promete o que não existe.
+ * Exportado para outros pontos que enviam texto de LLM SEM ferramentas
+ * (ex: proatividade diária), onde QUALQUER promessa dessas é falsa.
+ */
+export const CLAIMS_ACTION_REGEX =
+  /\b(agendei|criei|marquei|remarquei|adiei|encaixei|reorganizei|organizei|realoquei|atualizei (a |sua )?agenda|vou te lembrar|te lembro (às|as|nesses)|vou (te )?mandar lembrete|lembretes? (criado|marcado|agendado)s?|(está|tá|fica) agendado|deixei (anotado|agendado|marcado))\b/i;
+
+/** Mensagem injetada quando o modelo afirma ter agendado sem chamar ferramenta. */
+const HALLUCINATION_NUDGE =
+  'ATENÇÃO: sua resposta afirma que você criou/organizou/agendou algo, mas você NÃO chamou ' +
+  'nenhuma ferramenta nesta rodada — NADA foi salvo e nenhum lembrete vai tocar. Faça uma das ' +
+  'duas coisas AGORA: (1) chame as ferramentas (criar_lembrete, criar_evento, ...) para criar ' +
+  'DE FATO cada item que você prometeu, e só então confirme; ou (2) se não for possível criar, ' +
+  'reformule a resposta sem prometer nada que não foi feito.';
+
 /**
  * Executa um subagente com function calling: monta o system prompt (personalidade
  * + fatos memorizados), injeta o histórico e deixa o modelo usar ferramentas
@@ -559,7 +606,7 @@ export async function runSubagent(
   contact = '',
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
   depth = 0,
-  opts: { isCorrection?: boolean } = {}
+  opts: { isCorrection?: boolean; crossContext?: string } = {}
 ): Promise<string> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
@@ -598,6 +645,15 @@ Regras gerais:
   "amanhã" ou dias da semana, parta SEMPRE destas datas — nunca calcule de cabeça.
   Um compromisso de hoje à noite continua sendo HOJE (${hoje}), mesmo tarde.
 - Você PODE criar lembretes e salvar fatos usando as ferramentas disponíveis.
+- Você vê apenas as ÚLTIMAS mensagens desta conversa. Se o Igor citar algo combinado antes
+  que não esteja no histórico acima, use buscar_no_historico ANTES de dizer que não sabe ou
+  de assumir que não existe.
+- REGRA INEGOCIÁVEL: NUNCA afirme que criou, agendou, alterou ou removeu lembrete/evento/
+  agenda sem ter chamado a ferramenta correspondente NESTA conversa e visto a confirmação.
+  Frases como "agendei", "organizei seu dia", "vou te mandar lembrete às X" só podem aparecer
+  DEPOIS de a ferramenta confirmar. Se o Igor pedir para organizar um bloco de tarefas com
+  horários, chame criar_lembrete (ou criar_evento) para CADA item ANTES de responder. Se você
+  não tem a ferramenta necessária, diga isso — não finja que fez.
 - Memória ativa: sempre que o Igor revelar uma DECISÃO importante, uma PREFERÊNCIA, ou um
   PADRÃO de comportamento relevante para a sua área, salve com a ferramenta "salvar_fato"
   por conta própria (sem ele pedir), de forma concisa. Isso enriquece suas respostas futuras.
@@ -624,6 +680,13 @@ ${
           .map((f) => `- ${f}`)
           .join('\n')}`
       : ''
+  }${
+    opts.crossContext
+      ? `\n\nTrocas recentes desta MESMA conversa que foram atendidas por outras áreas do agente
+(use para manter o fio do assunto; mas a fonte da verdade sobre agenda/lembretes são SEMPRE as
+ferramentas — se outra área PROMETEU agendar algo, confirme com listar_lembretes antes de assumir
+que existe):\n${opts.crossContext}`
+      : ''
   }`;
 
   const messages: ChatMessage[] = [
@@ -637,8 +700,13 @@ ${
   // não de criatividade. Modelos gpt-5*/o* só aceitam a padrão — omitimos.
   const temp = supportsCustomTemperature(config.openai.model) ? { temperature: 0.3 } : {};
 
+  // Guarda anti-alucinação: rastreia se alguma ferramenta de ESCRITA rodou.
+  let usedWriteTool = false;
+  let nudged = false;
+
   // Loop de tool-calling: o modelo pode chamar ferramentas antes da resposta final.
-  for (let step = 0; step < 4; step++) {
+  // (6 passos: até 4 de ferramentas + 1 possível correção anti-alucinação + resposta.)
+  for (let step = 0; step < 6; step++) {
     const completion = await openai.chat.completions.create({
       model: config.openai.model,
       ...temp,
@@ -649,12 +717,24 @@ ${
     const choice = completion.choices[0].message;
 
     if (!choice.tool_calls || choice.tool_calls.length === 0) {
-      return choice.content?.trim() || '';
+      const content = choice.content?.trim() || '';
+      // Se a resposta AFIRMA ter agendado/criado algo mas nenhuma ferramenta de
+      // escrita rodou, devolve a bola para o modelo: criar de verdade ou recuar.
+      // Uma única tentativa, para não entrar em loop.
+      if (!usedWriteTool && !nudged && CLAIMS_ACTION_REGEX.test(content)) {
+        console.warn(`[subagent:${subagent.name}] resposta prometeu ação sem tool call — corrigindo.`);
+        nudged = true;
+        messages.push(choice);
+        messages.push({ role: 'system', content: HALLUCINATION_NUDGE });
+        continue;
+      }
+      return content;
     }
 
     // Registra a intenção do assistente e executa cada ferramenta.
     messages.push(choice);
     for (const call of choice.tool_calls) {
+      if (WRITE_TOOLS.has(call.function.name)) usedWriteTool = true;
       const result = await executeTool(call, subagent.id, contact, depth);
       messages.push({
         role: 'tool',
@@ -933,14 +1013,16 @@ async function executeTool(
     if (call.function.name === 'realocar_agenda') {
       const instrucao = String(args.instrucao || '').trim();
       if (!instrucao) return 'Diga o que devo reorganizar.';
+      const data = String(args.data || '').trim() || dayKey();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
       // Snapshot dos horários do dia para permitir desfazer a reorganização.
-      const before = (await getAgendaForDay(dayKey())).map((i) => ({
+      const before = (await getAgendaForDay(data)).map((i) => ({
         id: i.id,
         startTime: i.startTime,
         endTime: i.endTime,
       }));
-      const result = await reorganize(instrucao);
-      recordUndo(contact, 'a reorganização da agenda de hoje', async () => {
+      const result = await reorganize(instrucao, data);
+      recordUndo(contact, `a reorganização da agenda de ${data}`, async () => {
         for (const item of before) {
           await updateAgendaItem(item.id, {
             startTime: item.startTime,

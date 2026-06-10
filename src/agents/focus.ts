@@ -11,6 +11,31 @@ import {
 /** Default de duração do foco quando o usuário não especifica (minutos). */
 const DEFAULT_FOCUS_MINUTES = 60;
 
+/**
+ * Mensagens seguradas durante o foco, para entregar quando ele terminar. Antes
+ * o bot dizia "anotei sua mensagem mentalmente" e DESCARTAVA o texto — promessa
+ * falsa. Em memória, por contato (um restart perde a fila; janela curta, ok).
+ */
+const heldByContact = new Map<string, { text: string; at: number }[]>();
+const MAX_HELD = 20;
+
+function holdMessage(contact: string, text: string): void {
+  const list = heldByContact.get(contact) ?? [];
+  list.push({ text: text.slice(0, 500), at: Date.now() });
+  heldByContact.set(contact, list.slice(-MAX_HELD));
+}
+
+/** Formata e limpa a fila de mensagens seguradas do contato ('' se vazia). */
+function flushHeld(contact: string): string {
+  const list = heldByContact.get(contact) ?? [];
+  heldByContact.delete(contact);
+  if (list.length === 0) return '';
+  const linhas = list.map((m) => `• [${timeKey(new Date(m.at))}] ${m.text}`).join('\n');
+  return `\n\n📥 Enquanto você focava, você tinha me mandado:\n${linhas}\n\nQuer que eu trate ${
+    list.length > 1 ? 'alguma delas' : 'isso'
+  } agora?`;
+}
+
 /** True se a mensagem é um pedido para SAIR do modo foco. */
 export function isCancelFocusRequest(text: string): boolean {
   const t = text.toLowerCase();
@@ -81,10 +106,12 @@ export async function focusGate(
   if (isUrgent(text)) {
     return { active: true }; // urgente: deixa passar
   }
+  // Segura a mensagem DE VERDADE para reapresentar no fim do foco.
+  holdMessage(contact, text);
   const fim = timeKey(new Date(session.endsAt));
   return {
     active: true,
-    reply: `🔕 Você está em modo foco até ${fim}. Anotei sua mensagem mentalmente — me chame com "urgente" (ou peça para "sair do foco") se precisar. 🙂`,
+    reply: `🔕 Você está em modo foco até ${fim}. Guardei sua mensagem e te mostro quando o foco acabar — me chame com "urgente" (ou peça para "sair do foco") se precisar. 🙂`,
   };
 }
 
@@ -95,7 +122,7 @@ export async function cancelFocus(contact: string): Promise<string> {
     return 'Você não está em modo foco agora. 🙂';
   }
   await endFocus(contact);
-  return '✅ *Modo foco encerrado.* Pode mandar o que precisar.';
+  return `✅ *Modo foco encerrado.* Pode mandar o que precisar.${flushHeld(contact)}`;
 }
 
 /**
@@ -107,7 +134,7 @@ export async function processFocusExpirations(): Promise<void> {
   const expired = await getExpiredFocusSessions();
   for (const s of expired) {
     await endFocus(s.contact);
-    await sendText(s.contact, '✅ *Modo foco encerrado.* Como foi? Posso retomar o que ficou pendente.');
+    await sendText(s.contact, `✅ *Modo foco encerrado.* Como foi?${flushHeld(s.contact)}`);
     console.log(`[focus] foco encerrado para ${s.contact}`);
   }
 }

@@ -11,7 +11,8 @@ import {
   listTasks,
 } from '../services/firebase';
 import { weekRange } from './orchestrator';
-import { dayKey, addDays, dayStartMs } from '../services/datetime';
+import { CLAIMS_ACTION_REGEX } from './subagents';
+import { dayKey, addDays, dayStartMs, timeKey } from '../services/datetime';
 
 /** True se as notificações proativas estão ligadas e há dono configurado. */
 function canNotify(): boolean {
@@ -22,9 +23,10 @@ function canNotify(): boolean {
 
 /**
  * Acompanhamento do dia: lembretes que DISPARARAM hoje mas nunca foram
- * confirmados como feitos (done sem completedAt). Pergunta ao Igor o que
- * concluiu — a resposta cai no fluxo normal, onde o agente marca com
- * concluir_lembrete ou adia com editar_lembrete.
+ * confirmados como feitos (done sem completedAt) + itens da AGENDA do dia cujo
+ * horário passou sem confirmação (eles não são mais auto-concluídos). Pergunta
+ * ao Igor o que concluiu — a resposta cai no fluxo normal, onde o agente marca
+ * com concluir_lembrete/concluir_tarefa_atual ou adia com editar_lembrete.
  */
 export async function sendPendingFollowUp(): Promise<void> {
   if (!canNotify()) return;
@@ -32,14 +34,32 @@ export async function sendPendingFollowUp(): Promise<void> {
   const fired = (await listTasks()).filter(
     (t) => t.done && !t.completedAt && dayKey(new Date(t.remindAt)) === today
   );
-  if (fired.length === 0) return;
 
-  const linhas = fired.map((t) => `• ${t.text}`).join('\n');
+  // Itens da agenda de hoje ainda não concluídos. Dedup: um item vinculado a
+  // (ou homônimo de) um lembrete que já está na lista não entra duas vezes.
+  const firedTexts = new Set(fired.map((t) => t.text.trim().toLowerCase()));
+  const firedIds = new Set(fired.map((t) => t.id));
+  const agendaPending = (await getAgendaForDay(today)).filter(
+    (i) =>
+      i.status !== 'done' &&
+      i.endTime <= timeKey() && // só cobra o que já deveria ter acontecido
+      !(i.taskId && firedIds.has(i.taskId)) &&
+      !firedTexts.has(i.title.trim().toLowerCase())
+  );
+
+  if (fired.length === 0 && agendaPending.length === 0) return;
+
+  const linhas = [
+    ...fired.map((t) => `• ${t.text}`),
+    ...agendaPending.map((i) => `• ${i.title} (${i.startTime}–${i.endTime})`),
+  ].join('\n');
   const text =
-    `🔁 *Acompanhamento do dia*\n\nEsses lembretes tocaram hoje — conseguiu fazer?\n${linhas}\n\n` +
+    `🔁 *Acompanhamento do dia*\n\nEsses itens de hoje ainda estão sem confirmação — conseguiu fazer?\n${linhas}\n\n` +
     `_Me diz o que concluiu que eu marco ✅. O que não deu, posso adiar pra amanhã._`;
   await sendText(config.ownerPhone, text);
-  console.log(`[reports] follow-up de pendências enviado (${fired.length} itens).`);
+  console.log(
+    `[reports] follow-up de pendências enviado (${fired.length + agendaPending.length} itens).`
+  );
 }
 
 // ===================== F1: resumo diário noturno (22h) =====================
@@ -156,7 +176,10 @@ export async function runProactiveCheck(): Promise<void> {
             'para avisar o Igor proativamente agora (prazo chegando, tarefa parada há muito tempo, ' +
             'algo importante da sua área). Se SIM, escreva UMA mensagem curta de WhatsApp começando ' +
             'com o nome da área entre colchetes. Se NÃO houver nada que valha a pena, responda ' +
-            'exatamente "NADA".',
+            'exatamente "NADA".\n' +
+            'IMPORTANTE: nesta verificação você NÃO tem ferramentas — você não consegue criar ' +
+            'lembrete, agendar nem alterar nada. Por isso, NUNCA prometa ação ("vou te lembrar", ' +
+            '"agendei", "deixei marcado"): apenas AVISE ou SUGIRA; quem decide e pede é o Igor.',
         },
         {
           role: 'user',
@@ -168,6 +191,15 @@ export async function runProactiveCheck(): Promise<void> {
       ];
       const out = (await chat(messages, { temperature: 0.4 })).trim();
       if (out && !/^nada\.?$/i.test(out)) {
+        // Rede de segurança: aqui NÃO há ferramentas, então qualquer promessa
+        // de ação ("vou te lembrar", "agendei") é falsa por construção. Nesse
+        // caso a mensagem é descartada — melhor silêncio do que mentira.
+        if (CLAIMS_ACTION_REGEX.test(out)) {
+          console.warn(
+            `[reports] proatividade de ${sub.name} descartada: prometia ação sem ter ferramentas.`
+          );
+          continue;
+        }
         await sendText(config.ownerPhone, `🔔 ${out}`);
         console.log(`[reports] proatividade enviada (${sub.name}).`);
       }
