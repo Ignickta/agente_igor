@@ -54,9 +54,68 @@ export async function rememberFact(
   await saveSharedFact({ contact, text: text.trim(), embedding, subagentId, createdAt: Date.now() });
 }
 
+// ===================== Trocas recentes GLOBAIS (entre subagentes) =====================
+
+/**
+ * Buffer em memória das últimas trocas do contato com QUALQUER subagente.
+ * Resolve a memória fragmentada: cada subagente tem seu histórico próprio, mas
+ * a conversa no WhatsApp é uma só — sem isso, um "ajusta os horários" que cai
+ * em outro subagente não sabe o que acabou de ser combinado na área vizinha.
+ * Após restart, é semeado (uma vez por contato) do log de conversas no Firestore.
+ */
+export interface RecentExchange {
+  subagentId: string;
+  subagentName: string;
+  user: string;
+  assistant: string;
+  timestamp: number;
+}
+
+const RECENT_BUFFER_MAX = 10;
+const recentBuffer = new Map<string, RecentExchange[]>();
+const seededContacts = new Set<string>();
+
+function pushRecent(contact: string, entry: RecentExchange): void {
+  const buf = recentBuffer.get(contact) ?? [];
+  buf.push(entry);
+  recentBuffer.set(contact, buf.slice(-RECENT_BUFFER_MAX));
+}
+
+/** Semeia o buffer do contato a partir do log persistido (uma vez por restart). */
+async function seedRecent(contact: string): Promise<void> {
+  if (seededContacts.has(contact)) return;
+  seededContacts.add(contact);
+  try {
+    const log = await getConversationLog(contact, RECENT_BUFFER_MAX);
+    const fromLog: RecentExchange[] = log
+      .map((e) => ({
+        subagentId: e.subagentId,
+        subagentName: e.subagentName,
+        user: e.user,
+        assistant: e.assistant,
+        timestamp: e.timestamp,
+      }))
+      .reverse(); // getConversationLog vem mais recente primeiro; buffer é cronológico
+    const existing = recentBuffer.get(contact) ?? [];
+    recentBuffer.set(contact, [...fromLog, ...existing].slice(-RECENT_BUFFER_MAX));
+  } catch (err) {
+    console.error('[memory] falha ao semear trocas recentes:', err);
+  }
+}
+
+/**
+ * Últimas `n` trocas do contato com qualquer subagente, em ordem cronológica.
+ * Nunca lança (best-effort).
+ */
+export async function recentExchanges(contact: string, n = 4): Promise<RecentExchange[]> {
+  await seedRecent(contact);
+  return (recentBuffer.get(contact) ?? []).slice(-n);
+}
+
 /**
  * Registra uma TROCA (mensagem do Igor + resposta) no log pesquisável, com um
- * único embedding por troca (barato). Best-effort: nunca lança.
+ * único embedding por troca (barato). Também alimenta o buffer global de trocas
+ * recentes. Best-effort: nunca lança.
  */
 export async function logExchange(
   contact: string,
@@ -66,6 +125,13 @@ export async function logExchange(
   reply: string,
   timestamp: number
 ): Promise<void> {
+  pushRecent(contact, {
+    subagentId,
+    subagentName,
+    user: userText.slice(0, 1500),
+    assistant: reply.slice(0, 1500),
+    timestamp,
+  });
   try {
     let embedding: number[] = [];
     try {

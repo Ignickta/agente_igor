@@ -85,6 +85,12 @@ export interface AgendaItem {
    * propagar a conclusão do item de volta para a Task (markTaskDone).
    */
   taskId?: string;
+  /**
+   * Epoch ms de quando o agente perguntou "você concluiu?" após o fim do slot.
+   * Itens NÃO são concluídos automaticamente por horário — só com confirmação
+   * do Igor; este campo garante que a pergunta seja feita uma única vez.
+   */
+  nudgedAt?: number;
 }
 
 /**

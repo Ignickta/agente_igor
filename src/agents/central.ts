@@ -6,11 +6,16 @@ import {
   getRecentMemory,
   appendMemory,
   recordMessage,
+  updateAgendaItem,
+  getTask,
+  updateTask,
 } from '../services/firebase';
-import { runSubagent } from './subagents';
+import { runSubagent, ORCHESTRATOR_NAME } from './subagents';
 import { tryHandleCommand } from './commands';
-import { logExchange } from '../services/memory';
+import { logExchange, recentExchanges } from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
+import { beginUndoGroup, recordUndo } from './undo';
+import { dayKey, timeKey } from '../services/datetime';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
 const DONE_PHRASES = [
@@ -98,7 +103,7 @@ function leftoverContentWords(lower: string): string[] {
  * um item em andamento na agenda. Evita falsos positivos como "tá pronto pra
  * começar". Retorna a resposta a enviar, ou null se não se aplica.
  */
-async function tryAdvanceAgenda(text: string): Promise<string | null> {
+async function tryAdvanceAgenda(contact: string, text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
   // Só dispara para mensagens curtas, evitando falsos positivos em textos longos.
   if (lower.length > 40) return null;
@@ -112,7 +117,19 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
   const active = await getActiveItem();
   if (!active || active.status !== 'in_progress') return null;
 
+  // Captura o estado anterior (item + task vinculada) para o "desfaz" funcionar
+  // se o "feito" tiver sido confirmação de outra coisa e concluído item errado.
+  let taskPrev: { remindAt: string; done: boolean; completedAt: number | null } | null = null;
+  if (active.taskId) {
+    const t = await getTask(active.taskId);
+    if (t) taskPrev = { remindAt: t.remindAt, done: t.done, completedAt: t.completedAt ?? null };
+  }
+
   await advanceTask(active);
+  recordUndo(contact, `a conclusão de "${active.title}" (atalho "feito")`, async () => {
+    await updateAgendaItem(active.id, { status: active.status });
+    if (active.taskId && taskPrev) await updateTask(active.taskId, taskPrev);
+  });
   // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.
   return '';
 }
@@ -124,6 +141,16 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
  */
 const CORRECTION_REGEX =
   /\b(errado|errada|errou|não era isso|nao era isso|não foi isso|nao foi isso|não é isso|nao é isso|entendeu errado|corrige isso|corrigindo|não pedi isso|nao pedi isso|você tinha dito|voce tinha dito)\b/i;
+
+/**
+ * Pedidos claramente de AGENDA (organizar o dia, horários, lembretes, remarcar).
+ * Vão direto para o subagente orquestrador, que é o ÚNICO com as ferramentas de
+ * agenda (criar_evento, realocar_agenda...). Sem isso, "organiza minha tarde"
+ * pode cair num subagente de negócio que não tem como criar nada — e responde
+ * texto bonito sem persistir (foi o bug do bloco da tarde de 10/06/2026).
+ */
+const AGENDA_REGEX =
+  /\b(agenda|agendar?|agende|cronograma|compromissos?|lembretes?|me lembra|remarcar?|remarque|reagendar?|reagende|adiar?|adia|hor[áa]rios?|encaixar?|encaixe|reorganizar?|reorganize|planeja(r)? (o |meu )?dia|minha (tarde|manh[ãa]|semana|noite)|meu (dia|m[êe]s))\b/i;
 
 /**
  * Última rota por contato, para dar continuidade a mensagens curtas/ambíguas
@@ -166,7 +193,9 @@ async function routeByLLM(
   subagents: Subagent[],
   recentContext: string,
   lastSubagentName?: string,
-  keywordHint?: string
+  keywordHint?: string,
+  /** Para onde cair se o LLM responder algo inválido (continuidade > arbitrário). */
+  fallback?: Subagent
 ): Promise<Subagent> {
   const list = subagents
     .map((s, i) => `${i + 1}. ${s.name} — temas: ${s.keywords.join(', ')}`)
@@ -199,9 +228,12 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
   ];
 
   const answer = await chat(messages, { temperature: 0, model: config.openai.utilityModel });
-  const idx = parseInt(answer.replace(/\D/g, ''), 10) - 1;
+  // Primeiro número da resposta ("2", "Subagente 2"). Concatenar todos os
+  // dígitos era frágil: "1 ou 2" virava 12 e caía no fallback errado.
+  const m = answer.match(/\d+/);
+  const idx = m ? parseInt(m[0], 10) - 1 : -1;
   if (idx >= 0 && idx < subagents.length) return subagents[idx];
-  return subagents[0];
+  return fallback ?? subagents[0];
 }
 
 /**
@@ -223,10 +255,14 @@ export async function handleMessage(
     return command.reply || '';
   }
 
+  // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
+  // mensagem causar (ex: 4 lembretes criados de uma vez), não só a última escrita.
+  beginUndoGroup(contact);
+
   // 0.5) Atalho de conclusão da tarefa atual ("terminei", "pronto", ...).
   //      Só do dono e quando há item em andamento na agenda.
   if (contact === config.ownerPhone || !config.ownerPhone) {
-    const advanced = await tryAdvanceAgenda(text);
+    const advanced = await tryAdvanceAgenda(contact, text);
     if (advanced !== null) return advanced;
   }
 
@@ -235,33 +271,74 @@ export async function handleMessage(
     return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
   }
 
-  // 1) Roteamento: keyword só decide sozinha com match forte (>= 2); caso
-  //    contrário o LLM decide com o contexto da última conversa, para que
-  //    continuações curtas ("e amanhã?") fiquem no mesmo assunto.
-  const kw = routeByKeywords(text, subagents);
-  let target = kw && kw.score >= 2 ? kw.sub : null;
+  // 1) Roteamento. Pedidos claramente de agenda vão DIRETO para o orquestrador
+  //    (único subagente com as ferramentas de agenda); keyword só decide sozinha
+  //    com match forte (>= 2); caso contrário o LLM decide com o contexto da
+  //    última conversa, para que continuações curtas ("e amanhã?") fiquem no
+  //    mesmo assunto.
+  let target: Subagent | null = null;
+  if (AGENDA_REGEX.test(text)) {
+    target =
+      subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
+      subagents.find((s) => /agenda/i.test(s.name)) ??
+      null;
+  }
+
+  const kw = target ? null : routeByKeywords(text, subagents);
+  if (!target && kw && kw.score >= 2) target = kw.sub;
 
   if (!target) {
     const last = lastRouteByContact.get(contact);
-    const lastSub =
+    let lastSub =
       last && Date.now() - last.at < LAST_ROUTE_TTL_MS
         ? subagents.find((s) => s.id === last.subagentId) ?? null
         : null;
+    // Pós-restart o Map está vazio; recupera a continuidade da última troca
+    // persistida no log (mesma janela de 30 min), para um "muda pra 15h" logo
+    // após um deploy não cair em subagente aleatório.
+    if (!lastSub) {
+      const [lastEx] = (await recentExchanges(contact, 1)).slice(-1);
+      if (lastEx && Date.now() - lastEx.timestamp < LAST_ROUTE_TTL_MS) {
+        lastSub = subagents.find((s) => s.id === lastEx.subagentId) ?? null;
+      }
+    }
     const recent = lastSub ? await getRecentMemory(contact, lastSub.id, 6) : [];
     const recentContext = recent
       .map((m) => `${m.role === 'user' ? 'Igor' : 'Agente'}: ${m.content.slice(0, 200)}`)
       .join('\n');
-    target = await routeByLLM(text, subagents, recentContext, lastSub?.name, kw?.sub.name);
+    target = await routeByLLM(
+      text,
+      subagents,
+      recentContext,
+      lastSub?.name,
+      kw?.sub.name,
+      // Se o LLM falhar/responder lixo, continuidade > keyword > primeiro da lista.
+      lastSub ?? kw?.sub
+    );
   }
   lastRouteByContact.set(contact, { subagentId: target.id, at: Date.now() });
 
   console.log(`[central] roteado para: ${target.name}`);
 
-  // 2) Carrega a memória DESTE subagente e executa.
+  // 2) Carrega a memória DESTE subagente + as trocas recentes GLOBAIS (qualquer
+  //    subagente). As globais entram como contexto para o alvo não perder o fio
+  //    quando a mensagem anterior foi atendida por outra área.
   const memory = await getRecentMemory(contact, target.id, 12);
+  const globalRecent = await recentExchanges(contact, 4);
+  const crossContext = globalRecent
+    .filter((e) => e.subagentId !== target!.id)
+    .map((e) => {
+      const d = new Date(e.timestamp);
+      return (
+        `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\n` +
+        `Igor: ${e.user.slice(0, 300)}\nAgente: ${e.assistant.slice(0, 300)}`
+      );
+    })
+    .join('\n');
   const isCorrection = CORRECTION_REGEX.test(text);
   const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
     isCorrection,
+    ...(crossContext ? { crossContext } : {}),
   });
 
   // 3) Persiste memória da conversa nesse subagente (usuário + resposta).

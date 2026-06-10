@@ -142,27 +142,40 @@ export async function learnUserPatterns(days = 28): Promise<string> {
  * `agenda`, com prioridade calculada pelo agente.
  *
  * Itens fixos do usuário (priority 1) entram como restrição imutável no prompt;
- * o modelo encaixa os demais (priority 2–5) em volta. Idempotente: se já houver
- * itens gerados pelo agente para o dia, não regenera (a menos que `force`).
+ * o modelo encaixa os demais (priority 2–5) em volta. INCREMENTAL: chamadas
+ * repetidas no mesmo dia encaixam apenas as tarefas que ainda não viraram bloco
+ * (antes, uma vez gerado, tarefas novas nunca entravam e o "gera de novo"
+ * devolvia o cronograma velho como se fosse novo).
  */
 export async function generateDailySchedule(
   date = dayKey(),
   force = false
 ): Promise<AgendaItem[]> {
   const existing = await getAgendaForDay(date);
-  const agentGenerated = existing.filter((i) => i.createdBy === 'agent');
-  if (agentGenerated.length > 0 && !force) {
-    return existing;
-  }
 
   // Tarefas pendentes cujo lembrete cai no dia alvo (data LOCAL: remindAt é
   // ISO UTC, e cortar a string colocaria lembretes após as 21h no dia seguinte).
-  const tasks = (await listTasks()).filter(
+  const allDayTasks = (await listTasks()).filter(
     (t) => !t.done && dayKey(new Date(t.remindAt)) === date
   );
 
-  // Itens fixos do usuário (não serão movidos).
-  const fixed = existing.filter((i) => i.priority === 1 || i.createdBy === 'user');
+  // Só encaixa o que ainda NÃO está representado na agenda (por taskId ou
+  // título igual) — é isso que torna a geração incremental e idempotente.
+  const normTitle = (s: string) => s.trim().toLowerCase();
+  const linkedTaskIds = new Set(existing.map((i) => i.taskId).filter(Boolean));
+  const existingTitleSet = new Set(existing.map((i) => normTitle(i.title)));
+  const tasks = allDayTasks.filter(
+    (t) => !linkedTaskIds.has(t.id) && !existingTitleSet.has(normTitle(t.text))
+  );
+
+  const agentGenerated = existing.filter((i) => i.createdBy === 'agent');
+  if (agentGenerated.length > 0 && !force && tasks.length === 0) {
+    return existing; // nada novo a encaixar
+  }
+
+  // Restrições do encaixe: TUDO que já está na agenda não pode ser sobreposto
+  // (itens fixos do usuário e blocos já gerados).
+  const fixed = existing;
 
   if (tasks.length === 0 && existing.length === 0) {
     return [];
@@ -193,7 +206,12 @@ export async function generateDailySchedule(
 
   const fixedDesc = fixed.length
     ? fixed
-        .map((i) => `- ${i.startTime}–${i.endTime} "${i.title}" (FIXO, priority 1)`)
+        .map(
+          (i) =>
+            `- ${i.startTime}–${i.endTime} "${i.title}" (JÁ NA AGENDA${
+              i.priority === 1 || i.createdBy === 'user' ? ', FIXO do usuário' : ''
+            } — não sobrepor)`
+        )
         .join('\n')
     : '(nenhum item fixo)';
 
@@ -367,6 +385,8 @@ interface ScheduleEntry {
   priority?: number;
   type: AgendaItem['type'] | 'reminder';
   status?: AgendaItem['status'];
+  /** Lembrete que JÁ TOCOU mas o Igor ainda não confirmou ter feito. */
+  fired?: boolean;
 }
 
 const STATUS_EMOJI: Record<AgendaItem['status'], string> = {
@@ -393,13 +413,16 @@ async function collectEntries(start: string, end: string): Promise<Map<string, S
   }));
 
   for (const t of tasks) {
-    if (t.done) continue;
+    // CONCLUÍDO de verdade (confirmado) sai da visão; mas lembrete que apenas
+    // TOCOU (done sem completedAt) continua aparecendo — antes ele sumia da
+    // agenda na hora em que disparava, como se tivesse sido feito.
+    if (t.completedAt) continue;
     // Dia LOCAL do lembrete (remindAt é ISO UTC; cortar a string erraria o dia).
     const date = dayKey(new Date(t.remindAt));
     if (date < start || date > end) continue;
     // Horário local do lembrete (HH:mm) a partir do ISO em remindAt.
     const time = timeKey(new Date(t.remindAt));
-    entries.push({ date, time, title: t.text, type: 'reminder' });
+    entries.push({ date, time, title: t.text, type: 'reminder', fired: t.done });
   }
 
   const byDay = new Map<string, ScheduleEntry[]>();
@@ -417,7 +440,8 @@ async function collectEntries(start: string, end: string): Promise<Map<string, S
 /** Emoji/rótulo de uma entrada (item de agenda ou lembrete). */
 function entryLine(e: ScheduleEntry): string {
   if (e.type === 'reminder') {
-    return `   ⏰ *${e.time}* ${e.title} _(lembrete)_`;
+    const marca = e.fired ? '_(tocou — sem confirmação)_' : '_(lembrete)_';
+    return `   ⏰ *${e.time}* ${e.title} ${marca}`;
   }
   const prio = e.priority ? PRIORITY_EMOJI[e.priority] || '⚪' : '⚪';
   const typ = TYPE_EMOJI[e.type as AgendaItem['type']] || '';
@@ -575,27 +599,40 @@ export async function advanceTask(item: AgendaItem): Promise<void> {
 }
 
 /**
- * Transições por horário (modo horário do híbrido), pensado para rodar a cada
- * minuto. Conclui silenciosamente TODOS os itens cujo `endTime` já passou (sem
- * uma mensagem por item) e, no fim, faz UM único anúncio do item atual — assim
- * um backlog (ex: app reiniciado no meio do dia) não dispara uma rajada de
- * mensagens nem promove itens fora de ordem.
+ * Transições por horário, pensado para rodar a cada minuto. NÃO conclui nada
+ * sozinho — concluir é do Igor (era exatamente o bug: itens viravam "✔️ feito"
+ * só porque o horário passou, e a cobrança das 20:30 os ignorava). Em vez
+ * disso, quando o slot de um item termina sem confirmação, pergunta UMA única
+ * vez (marca `nudgedAt`) se ele foi feito, agrupando os atrasados numa só
+ * mensagem — um backlog (ex: app reiniciado no meio do dia) não dispara rajada.
+ * O que ficar sem resposta continua pendente e entra no follow-up das 20:30.
  */
 export async function processTimeBasedTransitions(): Promise<void> {
   const date = dayKey();
   const now = timeKey();
   const items = await getAgendaForDay(date);
 
-  const overdue = items.filter((i) => i.status !== 'done' && i.endTime <= now);
+  const overdue = items.filter((i) => i.status !== 'done' && i.endTime <= now && !i.nudgedAt);
   if (overdue.length === 0) return;
 
+  // Marca ANTES de enviar: se o envio falhar, melhor não perguntar do que
+  // perguntar em loop a cada minuto.
   for (const item of overdue) {
-    await completeItem(item);
+    await updateAgendaItem(item.id, { nudgedAt: Date.now() });
   }
 
-  // Um único anúncio, citando o último item concluído por horário.
-  const lastDone = overdue.sort((a, b) => a.endTime.localeCompare(b.endTime)).pop()!;
-  await announceNext(date, lastDone.title);
+  if (!config.ownerPhone) return;
+  const linhas = overdue
+    .sort((a, b) => a.startTime.localeCompare(b.startTime))
+    .map((i) => `• *${i.title}* (${i.startTime}–${i.endTime})`)
+    .join('\n');
+  const plural = overdue.length > 1;
+  await sendText(
+    config.ownerPhone,
+    `⏰ O horário ${plural ? 'destes itens' : 'deste item'} da agenda terminou:\n${linhas}\n\n` +
+      `Conseguiu fazer? Me diga o que concluiu que eu marco ✅. ` +
+      `O que ficar sem resposta continua pendente e eu te lembro à noite.`
+  );
 }
 
 /**
@@ -680,7 +717,19 @@ Novo cronograma em JSON:`;
   );
 
   const updates = parseJsonArray<{ id: string; startTime: string; endTime: string }>(answer);
+
+  // Honestidade antes de tudo: se o modelo não devolveu um plano utilizável,
+  // NADA mudou — dizer "reorganizei" aqui seria mentira (mesma classe do bug
+  // de prometer agendamento sem criar).
+  if (updates.length === 0) {
+    return (
+      'Não consegui montar a reorganização a partir desse pedido — *nada foi alterado* na agenda. ' +
+      'Pode repetir dizendo qual item e para que horário? (ex: "joga o boleto pra 16h")'
+    );
+  }
+
   const byId = new Map(items.map((i) => [i.id, i]));
+  let applied = 0;
 
   for (const u of updates) {
     const item = byId.get(u.id);
@@ -690,8 +739,15 @@ Novo cronograma em JSON:`;
     if (!u.startTime || !u.endTime) continue;
     if (u.startTime === item.startTime && u.endTime === item.endTime) continue;
     await updateAgendaItem(item.id, { startTime: u.startTime, endTime: u.endTime });
+    applied++;
   }
 
   const updated = await getAgendaForDay(date);
-  return `Pronto, reorganizei! ✨\n\n${formatSchedule(updated, date)}`;
+  if (applied === 0) {
+    return (
+      'Nenhum horário foi alterado — os itens envolvidos são fixos (criados por você) ' +
+      `ou já estavam nos horários pedidos.\n\n${formatSchedule(updated, date)}`
+    );
+  }
+  return `Pronto, reorganizei (${applied} ${applied === 1 ? 'item' : 'itens'})! ✨\n\n${formatSchedule(updated, date)}`;
 }
