@@ -1,4 +1,4 @@
-import { Subagent, MemoryMessage, Task } from '../../types';
+import { Subagent, MemoryMessage, Task, AgendaItem } from '../../types';
 import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
@@ -12,6 +12,9 @@ import {
   getRecentMemory,
   getAgendaForDay,
   updateAgendaItem,
+  createAgendaItem,
+  getAgendaItem,
+  deleteAgendaItem,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
 import { rememberFact, recallFacts } from '../../services/memory';
@@ -283,6 +286,85 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           },
         },
         required: ['instrucao'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'criar_evento',
+      description:
+        'Cria um EVENTO com horário de início e fim na agenda (ex: "reunião amanhã 15h às 16h"). ' +
+        'Por padrão o evento é FIXO (prioridade 1, nunca movido pelo reorganizador). Use para ' +
+        'compromissos com hora marcada; para um simples "me lembra de X", use criar_lembrete.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título do evento.' },
+          data: {
+            type: 'string',
+            description: 'Dia local YYYY-MM-DD. Opcional; padrão = hoje.',
+          },
+          inicio: { type: 'string', description: 'Início HH:mm (ex: 15:00).' },
+          fim: { type: 'string', description: 'Fim HH:mm (ex: 16:00).' },
+          fixo: {
+            type: 'boolean',
+            description: 'Se false, o evento pode ser remanejado pelo agente. Padrão true.',
+          },
+        },
+        required: ['titulo', 'inicio', 'fim'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'listar_itens_agenda',
+      description:
+        'Lista os itens da agenda de um dia COM os ids, para poder editar/remover. Use antes ' +
+        'de editar_item_agenda/remover_item_agenda quando não souber o id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: { type: 'string', description: 'Dia local YYYY-MM-DD. Opcional; padrão = hoje.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'editar_item_agenda',
+      description:
+        'Altera um item da agenda: título, horários e/ou dia. Se não souber o id, chame ' +
+        'listar_itens_agenda primeiro.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do item (de listar_itens_agenda).' },
+          titulo: { type: 'string', description: 'Novo título. Opcional.' },
+          inicio: { type: 'string', description: 'Novo início HH:mm. Opcional.' },
+          fim: { type: 'string', description: 'Novo fim HH:mm. Opcional.' },
+          data: { type: 'string', description: 'Novo dia YYYY-MM-DD (mover de dia). Opcional.' },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remover_item_agenda',
+      description:
+        'Remove um item da agenda (evento cancelado). Se não souber o id, use ' +
+        'listar_itens_agenda primeiro.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do item (de listar_itens_agenda).' },
+        },
+        required: ['id'],
       },
     },
   },
@@ -671,6 +753,104 @@ async function executeTool(
         }
       });
       return result;
+    }
+
+    if (call.function.name === 'criar_evento') {
+      const titulo = String(args.titulo || '').trim();
+      const data = String(args.data || '').trim() || dayKey();
+      const inicio = String(args.inicio || '').trim();
+      const fim = String(args.fim || '').trim();
+      const fixo = args.fixo !== false;
+      if (!titulo) return 'Informe o título do evento.';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
+      if (!/^\d{2}:\d{2}$/.test(inicio) || !/^\d{2}:\d{2}$/.test(fim)) {
+        return 'Horários inválidos; use HH:mm (ex: 15:00).';
+      }
+      if (fim <= inicio) return 'O fim deve ser depois do início.';
+      const item = await createAgendaItem({
+        title: titulo,
+        date: data,
+        startTime: inicio,
+        endTime: fim,
+        priority: fixo ? 1 : 3,
+        type: 'event',
+        createdBy: 'user',
+      });
+      recordUndo(contact, `a criação do evento "${titulo}"`, () => deleteAgendaItem(item.id));
+      return `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}.`;
+    }
+
+    if (call.function.name === 'listar_itens_agenda') {
+      const data = String(args.data || '').trim() || dayKey();
+      const items = await getAgendaForDay(data);
+      if (items.length === 0) return `Sem itens na agenda de ${data}.`;
+      return items
+        .map(
+          (i) =>
+            `- id: ${i.id} | ${i.startTime}–${i.endTime} | ${i.title} | prio ${i.priority}` +
+            `${i.priority === 1 ? ' (fixo)' : ''} | ${i.status}`
+        )
+        .join('\n');
+    }
+
+    if (call.function.name === 'editar_item_agenda') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do item.';
+      const item = await getAgendaItem(id);
+      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+
+      const titulo = String(args.titulo || '').trim();
+      const inicio = String(args.inicio || '').trim();
+      const fim = String(args.fim || '').trim();
+      const data = String(args.data || '').trim();
+      if (inicio && !/^\d{2}:\d{2}$/.test(inicio)) return 'Início inválido; use HH:mm.';
+      if (fim && !/^\d{2}:\d{2}$/.test(fim)) return 'Fim inválido; use HH:mm.';
+      if (data && !/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
+
+      const updates: Partial<Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date'>> = {};
+      if (titulo) updates.title = titulo;
+      if (inicio) updates.startTime = inicio;
+      if (fim) updates.endTime = fim;
+      if (data) updates.date = data;
+      if (Object.keys(updates).length === 0) {
+        return 'Nada para alterar: informe título, horários e/ou data.';
+      }
+      await updateAgendaItem(id, updates);
+      recordUndo(contact, `a edição do item "${item.title}"`, () =>
+        updateAgendaItem(id, {
+          title: item.title,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          date: item.date,
+        })
+      );
+      const after = { ...item, ...updates };
+      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.`;
+    }
+
+    if (call.function.name === 'remover_item_agenda') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do item.';
+      const item = await getAgendaItem(id);
+      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+      await deleteAgendaItem(id);
+      recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
+        await createAgendaItem({
+          title: item.title,
+          date: item.date,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          priority: item.priority,
+          type: item.type,
+          createdBy: item.createdBy,
+          status: item.status,
+          ...(item.notes ? { notes: item.notes } : {}),
+          ...(item.subagentId ? { subagentId: item.subagentId } : {}),
+          ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
+          ...(item.taskId ? { taskId: item.taskId } : {}),
+        });
+      });
+      return `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime}).`;
     }
 
     if (call.function.name === 'concluir_tarefa_atual') {
