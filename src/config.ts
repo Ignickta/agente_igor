@@ -54,6 +54,8 @@ export const config = {
     model: process.env.OPENAI_MODEL || 'gpt-5.1',
     // Modelo barato/rápido para tarefas utilitárias (roteamento, JSON curto).
     utilityModel: process.env.OPENAI_UTILITY_MODEL || 'gpt-5-mini',
+    // Modelo de embeddings da memória semântica compartilhada.
+    embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
     // Modelo usado pelo ResearchAgent com a tool nativa web_search_preview.
     researchModel: process.env.OPENAI_RESEARCH_MODEL || process.env.OPENAI_MODEL || 'gpt-5.1',
     transcriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1',

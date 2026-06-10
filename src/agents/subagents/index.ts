@@ -7,11 +7,11 @@ import {
   getTask,
   updateTask,
   deleteTask,
-  saveFact,
   getFacts,
   listSubagents,
   getRecentMemory,
 } from '../../services/firebase';
+import { rememberFact, recallFacts } from '../../services/memory';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
 import {
@@ -312,7 +312,16 @@ export async function runSubagent(
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
   depth = 0
 ): Promise<string> {
-  const facts = contact ? await getFacts(contact, subagent.id) : [];
+  // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
+  // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
+  let facts: string[] = [];
+  if (contact) {
+    const [shared, legacy] = await Promise.all([
+      recallFacts(contact, userText, 8).catch(() => [] as string[]),
+      getFacts(contact, subagent.id, 8),
+    ]);
+    facts = [...new Set([...shared, ...legacy])].slice(0, 12);
+  }
   const now = new Date();
   const nowStr = now.toLocaleString('pt-BR', { timeZone: config.timezone });
   // Âncoras de data explícitas (dia da semana + hoje/amanhã em ISO) para o
@@ -354,7 +363,7 @@ Regras gerais:
   "${subagent.name}", sem colar o texto da pesquisa cru e sem dizer "segundo a pesquisa".
   Cite as fontes brevemente só quando fizer sentido.${
     facts.length
-      ? `\n\nFatos que você já sabe sobre este projeto/usuário:\n${facts
+      ? `\n\nFatos que você sabe sobre o Igor e os projetos dele (memória compartilhada entre as áreas):\n${facts
           .map((f) => `- ${f}`)
           .join('\n')}`
       : ''
@@ -504,7 +513,8 @@ async function executeTool(
     if (call.function.name === 'salvar_fato') {
       const fato = String(args.fato || '').trim();
       if (!fato || !contact) return 'Nada para salvar.';
-      await saveFact(contact, subagentId, fato);
+      // Pool compartilhado com embedding: todas as áreas enxergam o fato.
+      await rememberFact(contact, subagentId, fato);
       return `Fato memorizado: "${fato}".`;
     }
 
