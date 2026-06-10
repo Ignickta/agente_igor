@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { Recurrence } from '../types';
 
 /**
  * Helpers de data/hora centralizados, todos no timezone configurado
@@ -79,6 +80,42 @@ export function parseLocalIso(iso: string): Date {
   );
   // Local = UTC + offset ⇒ UTC = local - offset.
   return new Date(utcMs - tzOffsetMinutes(dateKey, config.timezone) * 60000);
+}
+
+/** Soma 1 mês a um dia local YYYY-MM-DD, fixando no último dia se não existir (31→30/28). */
+function addMonthClamped(dateKey: string): string {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  // Último dia do mês seguinte (dia 0 do mês +2).
+  const lastDay = new Date(Date.UTC(y, m + 1, 0, 12)).getUTCDate();
+  const target = new Date(Date.UTC(y, m, Math.min(d, lastDay), 12));
+  return target.toISOString().slice(0, 10);
+}
+
+/**
+ * Próxima ocorrência de um lembrete recorrente, sempre no FUTURO, preservando o
+ * horário local (um lembrete das 08:00 continua às 08:00 locais, mesmo que o
+ * processo rode em UTC ou o lembrete esteja atrasado há dias).
+ */
+export function nextOccurrence(remindAtIso: string, recurrence: Recurrence): string {
+  const at = new Date(remindAtIso);
+  const time = timeKey(at);
+  const advance = (d: string): string => {
+    if (recurrence === 'diaria') return addDays(d, 1);
+    if (recurrence === 'semanal') return addDays(d, 7);
+    if (recurrence === 'mensal') return addMonthClamped(d);
+    // dias_uteis: o próximo dia que não cai em sábado/domingo.
+    let n = addDays(d, 1);
+    while (weekdayOf(n) === 0 || weekdayOf(n) === 6) n = addDays(n, 1);
+    return n;
+  };
+
+  let day = advance(dayKey(at));
+  let next = parseLocalIso(`${day}T${time}:00`);
+  for (let i = 0; i < 400 && next.getTime() <= Date.now(); i++) {
+    day = advance(day);
+    next = parseLocalIso(`${day}T${time}:00`);
+  }
+  return next.toISOString();
 }
 
 /**

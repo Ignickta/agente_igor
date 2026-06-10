@@ -1,7 +1,8 @@
 import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
-import { getDueTasks, markReminderSent } from './services/firebase';
+import { getDueTasks, markReminderSent, updateTask } from './services/firebase';
+import { nextOccurrence } from './services/datetime';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 import { processFocusExpirations } from './agents/focus';
 import {
@@ -108,8 +109,15 @@ export function startScheduler(): void {
         const due = await getDueTasks();
         for (const task of due) {
           await sendText(task.to || config.ownerPhone, `⏰ Lembrete: ${task.text}`);
-          await markReminderSent(task.id);
-          console.log(`[scheduler] lembrete enviado: ${task.id}`);
+          if (task.recurrence) {
+            // Recorrente: reagenda para a próxima ocorrência em vez de morrer.
+            const next = nextOccurrence(task.remindAt, task.recurrence);
+            await updateTask(task.id, { remindAt: next });
+            console.log(`[scheduler] lembrete recorrente reagendado: ${task.id} → ${next}`);
+          } else {
+            await markReminderSent(task.id);
+            console.log(`[scheduler] lembrete enviado: ${task.id}`);
+          }
         }
       } catch (err) {
         console.error('[scheduler] falha ao processar lembretes:', err);

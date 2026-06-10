@@ -11,9 +11,11 @@ import {
   updateAgendaItem,
   getCompletedTasksBetween,
   markTaskDone,
+  getTask,
+  updateTask,
 } from '../services/firebase';
 import { AgendaItem } from '../types';
-import { dayKey, timeKey, addDays, weekdayOf } from '../services/datetime';
+import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence } from '../services/datetime';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
 export { dayKey, addDays, weekdayOf };
@@ -507,11 +509,21 @@ async function completeItem(item: AgendaItem): Promise<void> {
     await updateAgendaItem(item.id, { status: 'done' });
   }
   if (item.taskId) {
-    // Propaga a conclusão para a Task (lembrete) que originou o item, para que
-    // os relatórios não a contem como pendente para sempre.
-    await markTaskDone(item.taskId).catch((err) =>
-      console.error('[orchestrator] falha ao propagar conclusão para a task:', err)
-    );
+    // Propaga a conclusão para a Task (lembrete) que originou o item. Se for
+    // RECORRENTE, concluir a ocorrência de hoje só reagenda a próxima — não
+    // mata a recorrência.
+    try {
+      const task = await getTask(item.taskId);
+      if (task?.recurrence) {
+        await updateTask(task.id, {
+          remindAt: nextOccurrence(task.remindAt, task.recurrence),
+        });
+      } else {
+        await markTaskDone(item.taskId);
+      }
+    } catch (err) {
+      console.error('[orchestrator] falha ao propagar conclusão para a task:', err);
+    }
   }
 }
 

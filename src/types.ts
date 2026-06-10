@@ -20,6 +20,9 @@ export interface MemoryMessage {
   timestamp: number;
 }
 
+/** Recorrência de um lembrete: ao disparar/concluir, reagenda a próxima. */
+export type Recurrence = 'diaria' | 'semanal' | 'mensal' | 'dias_uteis';
+
 /** Tarefa / lembrete agendável. */
 export interface Task {
   id: string;
@@ -36,6 +39,8 @@ export interface Task {
   estimatedMinutes?: number;
   /** Quando foi concluída (epoch ms), para relatórios/aprendizado. */
   completedAt?: number;
+  /** Recorrência: o lembrete se reagenda em vez de morrer ao disparar. null = sem. */
+  recurrence?: Recurrence | null;
 }
 
 /** Tipo de item da agenda. */

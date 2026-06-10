@@ -61,6 +61,13 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               '(ex: 2026-06-10T14:00:00). Use as datas de "hoje" e "amanhã" fornecidas ' +
               'no contexto — não calcule dias de cabeça.',
           },
+          recorrencia: {
+            type: 'string',
+            enum: ['diaria', 'semanal', 'mensal', 'dias_uteis'],
+            description:
+              'Se o lembrete se repete ("todo dia", "toda segunda", "todo mês", "dias úteis"). ' +
+              'Omita para lembrete único.',
+          },
         },
         required: ['texto', 'quando_iso'],
       },
@@ -103,6 +110,12 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             type: 'string',
             description:
               'Novo horário LOCAL em ISO 8601 sem offset (ex: 2026-06-10T08:30:00). Opcional.',
+          },
+          recorrencia: {
+            type: 'string',
+            enum: ['diaria', 'semanal', 'mensal', 'dias_uteis', 'nenhuma'],
+            description:
+              'Muda a recorrência; "nenhuma" transforma em lembrete único. Opcional.',
           },
         },
         required: ['id'],
@@ -578,6 +591,11 @@ async function executeTool(
       if (!texto || isNaN(when.getTime())) {
         return 'Não foi possível criar: texto ou data inválidos.';
       }
+      const recorrencia = String(args.recorrencia || '').trim() as Task['recurrence'];
+      const recValida =
+        recorrencia && ['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recorrencia)
+          ? recorrencia
+          : null;
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
       const created = await createTask({
@@ -586,13 +604,15 @@ async function executeTool(
         to: contact || config.ownerPhone,
         subagentId,
         ...(estimatedMinutes ? { estimatedMinutes } : {}),
+        ...(recValida ? { recurrence: recValida } : {}),
       });
       recordUndo(contact, `a criação do lembrete "${texto}"`, () => deleteTask(created.id));
       const quandoBr = when.toLocaleString('pt-BR', { timeZone: config.timezone });
       const dur = estimatedMinutes
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
         : '';
-      return `Lembrete criado para ${quandoBr}: "${texto}".${dur}`;
+      const rec = recValida ? ` Recorrência: ${recValida.replace('_', ' ')}.` : '';
+      return `Lembrete criado para ${quandoBr}: "${texto}".${rec}${dur}`;
     }
 
     if (call.function.name === 'listar_lembretes') {
@@ -608,7 +628,8 @@ async function executeTool(
         .slice(0, 30)
         .map((t) => {
           const d = new Date(t.remindAt);
-          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}`;
+          const rec = t.recurrence ? ` (${t.recurrence.replace('_', ' ')})` : '';
+          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}${rec}`;
         })
         .join('\n');
     }
@@ -617,13 +638,24 @@ async function executeTool(
       const id = String(args.id || '').trim();
       const texto = String(args.texto || '').trim();
       const quando = String(args.quando_iso || '').trim();
+      const recRaw = String(args.recorrencia || '').trim();
       if (!id) return 'Informe o id do lembrete.';
-      if (!texto && !quando) return 'Nada para alterar: informe texto e/ou quando_iso.';
+      if (!texto && !quando && !recRaw) {
+        return 'Nada para alterar: informe texto, quando_iso e/ou recorrencia.';
+      }
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
 
       const updates: Partial<Omit<Task, 'id' | 'createdAt'>> = {};
       if (texto) updates.text = texto;
+      if (recRaw) {
+        if (recRaw === 'nenhuma') updates.recurrence = null;
+        else if (['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recRaw)) {
+          updates.recurrence = recRaw as Task['recurrence'];
+        } else {
+          return 'Recorrência inválida: use diaria, semanal, mensal, dias_uteis ou nenhuma.';
+        }
+      }
       if (quando) {
         const when = parseLocalIso(quando);
         if (isNaN(when.getTime())) return 'Horário inválido; use ISO 8601 (2026-06-10T08:30:00).';
@@ -633,7 +665,12 @@ async function executeTool(
         if (!task.completedAt) updates.done = false;
       }
       await updateTask(id, updates);
-      const prev = { text: task.text, remindAt: task.remindAt, done: task.done };
+      const prev = {
+        text: task.text,
+        remindAt: task.remindAt,
+        done: task.done,
+        recurrence: task.recurrence ?? null,
+      };
       recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
 
       const after = { ...task, ...updates };
