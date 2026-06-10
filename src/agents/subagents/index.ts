@@ -1,8 +1,12 @@
-import { Subagent, MemoryMessage } from '../../types';
+import { Subagent, MemoryMessage, Task } from '../../types';
 import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
   createTask,
+  listTasks,
+  getTask,
+  updateTask,
+  deleteTask,
   saveFact,
   getFacts,
   listSubagents,
@@ -24,7 +28,7 @@ import {
   dayKey,
   addDays,
 } from '../orchestrator';
-import { parseLocalIso } from '../../services/datetime';
+import { parseLocalIso, timeKey } from '../../services/datetime';
 import type OpenAI from 'openai';
 
 /** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
@@ -52,6 +56,65 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           },
         },
         required: ['texto', 'quando_iso'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'listar_lembretes',
+      description:
+        'Lista os lembretes/tarefas PENDENTES com id, data e hora locais. Use para descobrir ' +
+        'o id antes de editar_lembrete/remover_lembrete, ou quando o usuário perguntar quais ' +
+        'lembretes existem.',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'string',
+            description: 'Filtra por um dia local YYYY-MM-DD. Opcional; sem filtro, lista todos.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'editar_lembrete',
+      description:
+        'Altera um lembrete existente: o texto, o horário ou ambos. Use quando o usuário pedir ' +
+        'para mudar/adiar/renomear um compromisso que é um lembrete. Se não souber o id, chame ' +
+        'listar_lembretes primeiro — NUNCA diga que não há o que alterar sem listar antes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do lembrete (obtido em listar_lembretes).' },
+          texto: { type: 'string', description: 'Novo texto. Opcional.' },
+          quando_iso: {
+            type: 'string',
+            description:
+              'Novo horário LOCAL em ISO 8601 sem offset (ex: 2026-06-10T08:30:00). Opcional.',
+          },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remover_lembrete',
+      description:
+        'Apaga um lembrete de vez (quando o usuário cancelar o compromisso). Se não souber o ' +
+        'id, use listar_lembretes primeiro.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do lembrete (obtido em listar_lembretes).' },
+        },
+        required: ['id'],
       },
     },
   },
@@ -160,8 +223,10 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'realocar_agenda',
       description:
-        'Reorganiza a agenda de hoje conforme um pedido em linguagem natural (ex: "adia o ' +
-        'dentista pra depois do almoço"). Itens fixos do usuário (prioridade 1) nunca são movidos.',
+        'Reorganiza os BLOCOS do cronograma de hoje conforme um pedido em linguagem natural ' +
+        '(ex: "adia o dentista pra depois do almoço"). Itens fixos do usuário (prioridade 1) ' +
+        'nunca são movidos. Para mudar horário/texto de um LEMBRETE avulso, prefira ' +
+        'listar_lembretes + editar_lembrete.',
       parameters: {
         type: 'object',
         properties: {
@@ -379,6 +444,61 @@ async function executeTool(
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
         : '';
       return `Lembrete criado para ${quandoBr}: "${texto}".${dur}`;
+    }
+
+    if (call.function.name === 'listar_lembretes') {
+      const data = String(args.data || '').trim();
+      const pending = (await listTasks()).filter((t) => !t.done);
+      const filtered = data
+        ? pending.filter((t) => dayKey(new Date(t.remindAt)) === data)
+        : pending;
+      if (filtered.length === 0) {
+        return data ? `Sem lembretes pendentes em ${data}.` : 'Sem lembretes pendentes.';
+      }
+      return filtered
+        .slice(0, 30)
+        .map((t) => {
+          const d = new Date(t.remindAt);
+          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}`;
+        })
+        .join('\n');
+    }
+
+    if (call.function.name === 'editar_lembrete') {
+      const id = String(args.id || '').trim();
+      const texto = String(args.texto || '').trim();
+      const quando = String(args.quando_iso || '').trim();
+      if (!id) return 'Informe o id do lembrete.';
+      if (!texto && !quando) return 'Nada para alterar: informe texto e/ou quando_iso.';
+      const task = await getTask(id);
+      if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
+
+      const updates: Partial<Omit<Task, 'id' | 'createdAt'>> = {};
+      if (texto) updates.text = texto;
+      if (quando) {
+        const when = parseLocalIso(quando);
+        if (isNaN(when.getTime())) return 'Horário inválido; use ISO 8601 (2026-06-10T08:30:00).';
+        updates.remindAt = when.toISOString();
+        // Rearma o disparo: se o lembrete antigo já tinha tocado (done=true sem
+        // completedAt), o novo horário deve tocar de novo.
+        if (!task.completedAt) updates.done = false;
+      }
+      await updateTask(id, updates);
+
+      const after = { ...task, ...updates };
+      const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
+        timeZone: config.timezone,
+      });
+      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.`;
+    }
+
+    if (call.function.name === 'remover_lembrete') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do lembrete.';
+      const task = await getTask(id);
+      if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
+      await deleteTask(id);
+      return `Lembrete removido: "${task.text}".`;
     }
 
     if (call.function.name === 'salvar_fato') {

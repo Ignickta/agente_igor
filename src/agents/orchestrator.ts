@@ -612,6 +612,24 @@ export async function getActiveItem(date = dayKey()): Promise<AgendaItem | null>
 export async function reorganize(instruction: string, date = dayKey()): Promise<string> {
   const items = await getAgendaForDay(date);
   if (items.length === 0) {
+    // A agenda (blocos de cronograma) pode estar vazia e ainda assim haver
+    // LEMBRETES no dia — caso comum: "muda o compromisso das 8h30", que é uma
+    // task. Devolve a lista com ids para o modelo agir via editar_lembrete,
+    // em vez de dizer (errado) que não há nada no dia.
+    const dayTasks = (await listTasks()).filter(
+      (t) => !t.done && dayKey(new Date(t.remindAt)) === date
+    );
+    if (dayTasks.length > 0) {
+      const linhas = dayTasks
+        .map((t) => `- id: ${t.id} | ${timeKey(new Date(t.remindAt))} | ${t.text}`)
+        .join('\n');
+      return (
+        `A agenda de ${date} não tem blocos de cronograma, mas existem LEMBRETES no dia:\n` +
+        `${linhas}\n\n` +
+        `Para alterar horário ou texto de um deles, use a ferramenta editar_lembrete com o id. ` +
+        `Para apagar, remover_lembrete.`
+      );
+    }
     return 'Sua agenda de hoje está vazia — não há o que reorganizar. Quer que eu gere o cronograma?';
   }
 
