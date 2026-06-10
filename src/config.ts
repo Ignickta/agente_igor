@@ -20,7 +20,7 @@ function required(name: string): string {
  *  - com `\r\n` (CRLF) se o arquivo foi salvo no Windows.
  * Esta função cobre todos esses casos e valida o resultado.
  */
-function normalizePrivateKey(raw: string): string {
+export function normalizePrivateKey(raw: string): string {
   let key = raw.trim();
 
   // Remove aspas externas que o --env-file pode ter mantido no valor.
@@ -71,6 +71,17 @@ export const config = {
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
   },
+  /**
+   * Apps externos conectados (leitura): lista de nomes em CONNECTED_APPS
+   * (ex: "crm,odonto"). Cada app define suas credenciais Firebase em envs
+   * APP_<NOME>_FIREBASE_PROJECT_ID / _CLIENT_EMAIL / _PRIVATE_KEY, e
+   * opcionalmente APP_<NOME>_DESCRIPTION e APP_<NOME>_COLLECTIONS
+   * ("clientes=Clientes do CRM;negocios=Funil de vendas").
+   */
+  connectedApps: (process.env.CONNECTED_APPS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
   /**
    * Automações n8n acionáveis pelo agente, via webhook. Formato:
    * N8N_WEBHOOKS="enviar-planilha=https://n8n.../webhook/abc;cobranca=https://..."

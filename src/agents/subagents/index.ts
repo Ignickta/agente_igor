@@ -20,6 +20,7 @@ import {
 import { recordUndo, undoLast } from '../undo';
 import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
+import { listConnectedApps, describeApp, queryApp } from '../../services/apps';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
 import {
@@ -299,6 +300,61 @@ function n8nTool(): OpenAI.Chat.Completions.ChatCompletionTool {
 }
 
 /**
+ * Tools de apps conectados (CRM, SaaS...) — só entram quando há apps em
+ * CONNECTED_APPS. Leitura apenas; a lista de apps vai na descrição.
+ */
+function appsTools(): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  const resumo = listConnectedApps()
+    .map((a) => `"${a.name}" (${a.description})`)
+    .join(', ');
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'explorar_app',
+        description:
+          'Mostra o mapa de um app conectado do Igor: as collections do banco e o que contêm. ' +
+          `Use antes de consultar_app quando não souber onde está o dado. Apps: ${resumo}.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            app: { type: 'string', description: 'Nome do app (ex: "crm").' },
+          },
+          required: ['app'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'consultar_app',
+        description:
+          'Consulta (SOMENTE leitura) dados reais de um app conectado do Igor — clientes, ' +
+          'negócios, agendamentos etc. Use para responder perguntas sobre os negócios dele ' +
+          `com dados de verdade. Apps: ${resumo}. Filtros são igualdade exata em até 3 campos.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            app: { type: 'string', description: 'Nome do app (ex: "crm").' },
+            colecao: { type: 'string', description: 'Collection a consultar.' },
+            filtros: {
+              type: 'string',
+              description:
+                'JSON de filtros por igualdade, ex: {"empresaId":"abc","status":"aberto"}. Opcional.',
+            },
+            limite: {
+              type: 'number',
+              description: 'Máximo de documentos (padrão 10, teto 20).',
+            },
+          },
+          required: ['app', 'colecao'],
+        },
+      },
+    },
+  ];
+}
+
+/**
  * Ferramentas exclusivas do subagente orquestrador (Agenda). Só são oferecidas
  * quando o subagente em execução é o de agenda — os demais seguem com o conjunto
  * base, mantendo compatibilidade.
@@ -482,9 +538,11 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
-/** Conjunto de tools efetivo para um subagente (base + n8n + orquestrador). */
+/** Conjunto de tools efetivo para um subagente (base + n8n + apps + orquestrador). */
 function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  const base = listAutomations().length > 0 ? [...TOOLS, n8nTool()] : [...TOOLS];
+  const base = [...TOOLS];
+  if (listAutomations().length > 0) base.push(n8nTool());
+  if (listConnectedApps().length > 0) base.push(...appsTools());
   return subagent.name === ORCHESTRATOR_NAME ? [...base, ...ORCHESTRATOR_TOOLS] : base;
 }
 
@@ -802,6 +860,29 @@ async function executeTool(
         }
       }
       return await triggerAutomation(nome, dados);
+    }
+
+    if (call.function.name === 'explorar_app') {
+      return await describeApp(String(args.app || '').trim());
+    }
+
+    if (call.function.name === 'consultar_app') {
+      const app = String(args.app || '').trim();
+      const colecao = String(args.colecao || '').trim();
+      const limite = Number(args.limite) || 10;
+      let filtros: Record<string, unknown> = {};
+      const filtrosRaw = String(args.filtros || '').trim();
+      if (filtrosRaw) {
+        try {
+          const parsed = JSON.parse(filtrosRaw);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            filtros = parsed as Record<string, unknown>;
+          }
+        } catch {
+          return 'Filtros inválidos: envie um JSON de igualdades, ex: {"status":"aberto"}.';
+        }
+      }
+      return await queryApp(app, colecao, filtros, limite);
     }
 
     if (call.function.name === 'pesquisar') {
