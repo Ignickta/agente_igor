@@ -1,5 +1,5 @@
 import { Subagent, MemoryMessage } from '../../types';
-import { openai, ChatMessage } from '../../services/openai';
+import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
   createTask,
@@ -22,7 +22,9 @@ import {
   upcomingView,
   detectOverload,
   dayKey,
+  addDays,
 } from '../orchestrator';
+import { parseLocalIso } from '../../services/datetime';
 import type OpenAI from 'openai';
 
 /** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
@@ -44,8 +46,9 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           quando_iso: {
             type: 'string',
             description:
-              'Data e hora do lembrete em ISO 8601 (ex: 2026-06-10T14:00:00). ' +
-              'Calcule a partir da data/hora atual fornecida no contexto.',
+              'Data e hora LOCAIS do lembrete (fuso do Igor), em ISO 8601 sem offset ' +
+              '(ex: 2026-06-10T14:00:00). Use as datas de "hoje" e "amanhã" fornecidas ' +
+              'no contexto — não calcule dias de cabeça.',
           },
         },
         required: ['texto', 'quando_iso'],
@@ -247,6 +250,14 @@ export async function runSubagent(
   const facts = contact ? await getFacts(contact, subagent.id) : [];
   const now = new Date();
   const nowStr = now.toLocaleString('pt-BR', { timeZone: config.timezone });
+  // Âncoras de data explícitas (dia da semana + hoje/amanhã em ISO) para o
+  // modelo não errar aritmética de datas ao interpretar "hoje", "amanhã", etc.
+  const hoje = dayKey(now);
+  const amanha = addDays(hoje, 1);
+  const diaSemana = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: config.timezone,
+    weekday: 'long',
+  }).format(now);
 
   const system = `${subagent.prompt}
 
@@ -259,7 +270,10 @@ Regras gerais:
   mensagens normais. NUNCA diga que não consegue ouvir ou processar áudios.${
     fromAudio ? '\n- A mensagem atual foi enviada por áudio (já transcrita).' : ''
   }
-- Data e hora atuais: ${nowStr} (fuso ${config.timezone}). Use isto para calcular lembretes.
+- Data e hora atuais: ${diaSemana}, ${nowStr} (fuso ${config.timezone}).
+  HOJE é ${hoje} e AMANHÃ é ${amanha} (formato YYYY-MM-DD). Ao interpretar "hoje",
+  "amanhã" ou dias da semana, parta SEMPRE destas datas — nunca calcule de cabeça.
+  Um compromisso de hoje à noite continua sendo HOJE (${hoje}), mesmo tarde.
 - Você PODE criar lembretes e salvar fatos usando as ferramentas disponíveis.
 - Memória ativa: sempre que o Igor revelar uma DECISÃO importante, uma PREFERÊNCIA, ou um
   PADRÃO de comportamento relevante para a sua área, salve com a ferramenta "salvar_fato"
@@ -288,12 +302,15 @@ Regras gerais:
   ];
 
   const tools = toolsFor(subagent);
+  // Temperature baixa: agente que chama ferramentas precisa de consistência,
+  // não de criatividade. Modelos gpt-5*/o* só aceitam a padrão — omitimos.
+  const temp = supportsCustomTemperature(config.openai.model) ? { temperature: 0.3 } : {};
 
   // Loop de tool-calling: o modelo pode chamar ferramentas antes da resposta final.
   for (let step = 0; step < 4; step++) {
     const completion = await openai.chat.completions.create({
       model: config.openai.model,
-      temperature: 0.7,
+      ...temp,
       messages,
       tools,
     });
@@ -319,7 +336,7 @@ Regras gerais:
   // Salvaguarda: se estourou o limite de passos, faz uma última geração sem tools.
   const finalCompletion = await openai.chat.completions.create({
     model: config.openai.model,
-    temperature: 0.7,
+    ...temp,
     messages,
   });
   return finalCompletion.choices[0].message.content?.trim() || '';
@@ -343,7 +360,8 @@ async function executeTool(
     if (call.function.name === 'criar_lembrete') {
       const texto = String(args.texto || '').trim();
       const quando = String(args.quando_iso || '').trim();
-      const when = new Date(quando);
+      // ISO sem offset é hora LOCAL do usuário, não do servidor (UTC no container).
+      const when = parseLocalIso(quando);
       if (!texto || isNaN(when.getTime())) {
         return 'Não foi possível criar: texto ou data inválidos.';
       }

@@ -117,10 +117,23 @@ async function tryAdvanceAgenda(text: string): Promise<string | null> {
 }
 
 /**
- * Tenta um roteamento rápido por palavras-chave antes de gastar uma
- * chamada de LLM. Retorna o subagente com mais matches, ou null.
+ * Última rota por contato, para dar continuidade a mensagens curtas/ambíguas
+ * ("e amanhã?", "muda pra 15h") sem perder o assunto da conversa anterior.
+ * Em memória: sobrevive entre mensagens, zera num restart (aceitável).
  */
-function routeByKeywords(text: string, subagents: Subagent[]): Subagent | null {
+const lastRouteByContact = new Map<string, { subagentId: string; at: number }>();
+const LAST_ROUTE_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Tenta um roteamento rápido por palavras-chave antes de gastar uma
+ * chamada de LLM. Retorna o melhor candidato com seu score, ou null.
+ * Só o caller decide se o score basta — 1 keyword solta ("hoje", "agenda")
+ * é fraca demais para decidir sozinha e ia parar no subagente errado.
+ */
+function routeByKeywords(
+  text: string,
+  subagents: Subagent[]
+): { sub: Subagent; score: number } | null {
   const lower = text.toLowerCase();
   let best: { sub: Subagent; score: number } | null = null;
   for (const sub of subagents) {
@@ -132,7 +145,7 @@ function routeByKeywords(text: string, subagents: Subagent[]): Subagent | null {
       best = { sub, score };
     }
   }
-  return best?.sub ?? null;
+  return best;
 }
 
 /**
@@ -142,11 +155,21 @@ function routeByKeywords(text: string, subagents: Subagent[]): Subagent | null {
 async function routeByLLM(
   text: string,
   subagents: Subagent[],
-  recentContext: string
+  recentContext: string,
+  lastSubagentName?: string,
+  keywordHint?: string
 ): Promise<Subagent> {
   const list = subagents
     .map((s, i) => `${i + 1}. ${s.name} — temas: ${s.keywords.join(', ')}`)
     .join('\n');
+
+  const continuidade = lastSubagentName
+    ? `\nA última conversa foi com o subagente "${lastSubagentName}". Se a mensagem for curta,
+ambígua ou continuação do mesmo assunto (ex: "e amanhã?", "muda pra 15h"), MANTENHA esse subagente.`
+    : '';
+  const hint = keywordHint
+    ? `\nPalavras-chave sugerem "${keywordHint}", mas o contexto vale mais que a sugestão.`
+    : '';
 
   const messages: ChatMessage[] = [
     {
@@ -156,6 +179,7 @@ recente, escolha o subagente mais adequado. Responda APENAS com o número da op�
 
 Subagentes disponíveis:
 ${list}
+${continuidade}${hint}
 
 Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
     },
@@ -165,7 +189,7 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
     },
   ];
 
-  const answer = await chat(messages, { temperature: 0 });
+  const answer = await chat(messages, { temperature: 0, model: config.openai.utilityModel });
   const idx = parseInt(answer.replace(/\D/g, ''), 10) - 1;
   if (idx >= 0 && idx < subagents.length) return subagents[idx];
   return subagents[0];
@@ -202,12 +226,25 @@ export async function handleMessage(
     return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
   }
 
-  // 1) Roteamento barato por keyword, com fallback para LLM.
-  //    (A memória agora é por subagente, então roteamos antes de carregá-la.)
-  let target = routeByKeywords(text, subagents);
+  // 1) Roteamento: keyword só decide sozinha com match forte (>= 2); caso
+  //    contrário o LLM decide com o contexto da última conversa, para que
+  //    continuações curtas ("e amanhã?") fiquem no mesmo assunto.
+  const kw = routeByKeywords(text, subagents);
+  let target = kw && kw.score >= 2 ? kw.sub : null;
+
   if (!target) {
-    target = await routeByLLM(text, subagents, '');
+    const last = lastRouteByContact.get(contact);
+    const lastSub =
+      last && Date.now() - last.at < LAST_ROUTE_TTL_MS
+        ? subagents.find((s) => s.id === last.subagentId) ?? null
+        : null;
+    const recent = lastSub ? await getRecentMemory(contact, lastSub.id, 6) : [];
+    const recentContext = recent
+      .map((m) => `${m.role === 'user' ? 'Igor' : 'Agente'}: ${m.content.slice(0, 200)}`)
+      .join('\n');
+    target = await routeByLLM(text, subagents, recentContext, lastSub?.name, kw?.sub.name);
   }
+  lastRouteByContact.set(contact, { subagentId: target.id, at: Date.now() });
 
   console.log(`[central] roteado para: ${target.name}`);
 

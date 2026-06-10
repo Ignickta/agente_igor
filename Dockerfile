@@ -16,6 +16,10 @@ FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Commit do build, exposto em /health para conferir qual versão está no ar.
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
+
 # Apenas dependencias de producao
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
