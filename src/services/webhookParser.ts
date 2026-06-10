@@ -56,6 +56,47 @@ export async function parseWebhook(body: any): Promise<IncomingMessage | null> {
     };
   }
 
+  // Imagem (foto, print): o conteúdo é extraído depois via modelo de visão.
+  const image = message.imageMessage;
+  if (image) {
+    let mediaBase64: string = data.base64 || message.base64 || image.base64 || '';
+    if (!mediaBase64) {
+      console.log('[webhookParser] imagem sem base64 no webhook, baixando via API...');
+      mediaBase64 = await getBase64FromMediaMessage(data);
+    }
+    return {
+      from,
+      pushName,
+      isAudio: false,
+      mediaType: 'image',
+      mediaBase64,
+      mimeType: image.mimetype || 'image/jpeg',
+      caption: image.caption || '',
+    };
+  }
+
+  // Documento (PDF e afins) — pode vir embrulhado em documentWithCaptionMessage.
+  const doc =
+    message.documentMessage ||
+    message.documentWithCaptionMessage?.message?.documentMessage;
+  if (doc) {
+    let mediaBase64: string = data.base64 || message.base64 || doc.base64 || '';
+    if (!mediaBase64) {
+      console.log('[webhookParser] documento sem base64 no webhook, baixando via API...');
+      mediaBase64 = await getBase64FromMediaMessage(data);
+    }
+    return {
+      from,
+      pushName,
+      isAudio: false,
+      mediaType: 'document',
+      mediaBase64,
+      mimeType: doc.mimetype || 'application/pdf',
+      fileName: doc.fileName || 'documento.pdf',
+      caption: doc.caption || '',
+    };
+  }
+
   if (text) {
     return { from, pushName, text, isAudio: false };
   }

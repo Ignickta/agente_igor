@@ -104,4 +104,11 @@ export interface IncomingMessage {
   audioBase64?: string;
   audioUrl?: string;
   isAudio: boolean;
+  /** Mídia além de áudio: imagem (foto/print) ou documento (PDF). */
+  mediaType?: 'image' | 'document';
+  mediaBase64?: string;
+  mimeType?: string;
+  fileName?: string;
+  /** Legenda enviada junto com a mídia. */
+  caption?: string;
 }

@@ -3,6 +3,7 @@ import { config, isAllowed } from './config';
 import { adminRouter } from './routes/admin';
 import { parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
+import { extractFromImage, extractFromPdf } from './services/vision';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
@@ -78,6 +79,46 @@ async function processIncoming(body: unknown): Promise<void> {
         err instanceof Error ? err.message : err
       );
       await sendText(msg.from, 'Tive um problema para transcrever seu áudio. Pode escrever?');
+      return;
+    }
+  }
+
+  // Imagem ou documento (PDF): extrai o conteúdo via visão e injeta no fluxo
+  // como texto — foto de boleto vira dados de pagamento, print vira pedido.
+  if (msg.mediaType) {
+    if (!msg.mediaBase64) {
+      await sendText(msg.from, 'Não consegui baixar sua mídia 😕. Pode reenviar?');
+      return;
+    }
+    if (msg.mediaType === 'document' && !(msg.mimeType || '').includes('pdf')) {
+      await sendText(
+        msg.from,
+        'Por enquanto só consigo ler documentos em PDF 😕. Pode mandar em PDF ou me contar por texto?'
+      );
+      return;
+    }
+    try {
+      console.log(`[webhook] lendo ${msg.mediaType} de ${msg.from}...`);
+      const extracted =
+        msg.mediaType === 'image'
+          ? await extractFromImage(msg.mediaBase64, msg.mimeType || 'image/jpeg')
+          : await extractFromPdf(msg.mediaBase64, msg.fileName || 'documento.pdf');
+      if (!extracted) throw new Error('extração vazia');
+      const tipo =
+        msg.mediaType === 'image' ? 'uma imagem' : `um documento (${msg.fileName || 'PDF'})`;
+      const pedido =
+        msg.caption?.trim() ||
+        '(sem legenda — interprete o conteúdo, resuma o essencial e sugira a ação mais útil; ' +
+          'se for boleto/cobrança, ofereça criar o lembrete de pagamento no vencimento)';
+      text =
+        `[O Igor enviou ${tipo} pelo WhatsApp. Conteúdo extraído:]\n${extracted}\n\n` +
+        `[Pedido do Igor na legenda:] ${pedido}`;
+    } catch (err) {
+      console.error('[webhook] falha ao ler mídia:', err instanceof Error ? err.message : err);
+      await sendText(
+        msg.from,
+        'Recebi sua mídia, mas não consegui ler o conteúdo 😕. Pode me dizer por texto?'
+      );
       return;
     }
   }
