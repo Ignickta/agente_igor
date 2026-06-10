@@ -12,6 +12,7 @@ import {
   getRecentMemory,
 } from '../../services/firebase';
 import { rememberFact, recallFacts } from '../../services/memory';
+import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { research } from '../research';
 import { estimateDurationMinutes } from '../estimate';
 import {
@@ -189,6 +190,38 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
 ];
 
 /**
+ * Tool de automações n8n — só entra no conjunto quando há webhooks configurados
+ * (N8N_WEBHOOKS). A lista de nomes vai na descrição para o modelo escolher.
+ */
+function n8nTool(): OpenAI.Chat.Completions.ChatCompletionTool {
+  return {
+    type: 'function',
+    function: {
+      name: 'acionar_automacao',
+      description:
+        'Dispara um workflow do n8n do Igor. Use quando ele pedir para executar uma automação ' +
+        `(ex: "dispara a automação X", "manda a planilha pro cliente"). Disponíveis: ` +
+        `${listAutomations().join(', ')}. Em "dados", passe as informações úteis ao workflow.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          nome: {
+            type: 'string',
+            description: 'Nome exato da automação (uma das disponíveis).',
+          },
+          dados: {
+            type: 'string',
+            description:
+              'Informações para o workflow, em texto livre ou JSON. Opcional.',
+          },
+        },
+        required: ['nome'],
+      },
+    },
+  };
+}
+
+/**
  * Ferramentas exclusivas do subagente orquestrador (Agenda). Só são oferecidas
  * quando o subagente em execução é o de agenda — os demais seguem com o conjunto
  * base, mantendo compatibilidade.
@@ -293,9 +326,10 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
-/** Conjunto de tools efetivo para um subagente (base + orquestrador, se for o caso). */
+/** Conjunto de tools efetivo para um subagente (base + n8n + orquestrador). */
 function toolsFor(subagent: Subagent): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  return subagent.name === ORCHESTRATOR_NAME ? [...TOOLS, ...ORCHESTRATOR_TOOLS] : TOOLS;
+  const base = listAutomations().length > 0 ? [...TOOLS, n8nTool()] : [...TOOLS];
+  return subagent.name === ORCHESTRATOR_NAME ? [...base, ...ORCHESTRATOR_TOOLS] : base;
 }
 
 /**
@@ -525,6 +559,22 @@ async function executeTool(
       // Pool compartilhado com embedding: todas as áreas enxergam o fato.
       await rememberFact(contact, subagentId, fato);
       return `Fato memorizado: "${fato}".`;
+    }
+
+    if (call.function.name === 'acionar_automacao') {
+      const nome = String(args.nome || '').trim();
+      if (!nome) return 'Informe o nome da automação.';
+      const dadosRaw = String(args.dados || '').trim();
+      // Aceita JSON ou texto livre nos dados.
+      let dados: unknown = dadosRaw || undefined;
+      if (dadosRaw.startsWith('{') || dadosRaw.startsWith('[')) {
+        try {
+          dados = JSON.parse(dadosRaw);
+        } catch {
+          /* mantém como texto */
+        }
+      }
+      return await triggerAutomation(nome, dados);
     }
 
     if (call.function.name === 'pesquisar') {

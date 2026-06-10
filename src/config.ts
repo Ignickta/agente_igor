@@ -71,6 +71,27 @@ export const config = {
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
   },
+  /**
+   * Automações n8n acionáveis pelo agente, via webhook. Formato:
+   * N8N_WEBHOOKS="enviar-planilha=https://n8n.../webhook/abc;cobranca=https://..."
+   * Token opcional (N8N_WEBHOOK_TOKEN) vai como Bearer no header Authorization.
+   */
+  n8n: {
+    webhooks: Object.fromEntries(
+      (process.env.N8N_WEBHOOKS || '')
+        .split(';')
+        .map((pair) => pair.trim())
+        .filter(Boolean)
+        .map((pair) => {
+          const idx = pair.indexOf('=');
+          return idx > 0
+            ? [pair.slice(0, idx).trim(), pair.slice(idx + 1).trim()]
+            : ['', ''];
+        })
+        .filter(([name, url]) => name && url)
+    ) as Record<string, string>,
+    token: process.env.N8N_WEBHOOK_TOKEN || '',
+  },
   ownerPhone: process.env.OWNER_PHONE || '',
   timezone: process.env.TZ || 'America/Sao_Paulo',
   adminToken: process.env.ADMIN_TOKEN || '',
