@@ -7,6 +7,7 @@ import {
   getTask,
   updateTask,
   deleteTask,
+  markTaskDone,
   getFacts,
   listSubagents,
   getRecentMemory,
@@ -78,15 +79,22 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'listar_lembretes',
       description:
-        'Lista os lembretes/tarefas PENDENTES com id, data e hora locais. Use para descobrir ' +
-        'o id antes de editar_lembrete/remover_lembrete, ou quando o usuário perguntar quais ' +
-        'lembretes existem.',
+        'Lista lembretes/tarefas com id, data e hora locais. Use para descobrir o id antes de ' +
+        'editar_lembrete/remover_lembrete/concluir_lembrete, ou quando o usuário perguntar ' +
+        'quais lembretes existem.',
       parameters: {
         type: 'object',
         properties: {
           data: {
             type: 'string',
             description: 'Filtra por um dia local YYYY-MM-DD. Opcional; sem filtro, lista todos.',
+          },
+          status: {
+            type: 'string',
+            enum: ['pendentes', 'disparados_hoje'],
+            description:
+              '"pendentes" (padrão) ou "disparados_hoje": lembretes que tocaram hoje e ainda ' +
+              'não foram confirmados como feitos (para o acompanhamento do dia).',
           },
         },
         required: [],
@@ -117,6 +125,24 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             description:
               'Muda a recorrência; "nenhuma" transforma em lembrete único. Opcional.',
           },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'concluir_lembrete',
+      description:
+        'Marca um lembrete como realmente FEITO (confirmado pelo Igor) — usado no acompanhamento ' +
+        'do dia, quando ele disser que concluiu algo que tinha tocado. Se não souber o id, use ' +
+        'listar_lembretes com status "disparados_hoje". Para a tarefa atual da AGENDA, prefira ' +
+        'concluir_tarefa_atual.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID do lembrete.' },
         },
         required: ['id'],
       },
@@ -638,11 +664,19 @@ async function executeTool(
 
     if (call.function.name === 'listar_lembretes') {
       const data = String(args.data || '').trim();
-      const pending = (await listTasks()).filter((t) => !t.done);
+      const status = String(args.status || 'pendentes').trim();
+      const all = await listTasks();
+      const byStatus =
+        status === 'disparados_hoje'
+          ? all.filter(
+              (t) => t.done && !t.completedAt && dayKey(new Date(t.remindAt)) === dayKey()
+            )
+          : all.filter((t) => !t.done);
       const filtered = data
-        ? pending.filter((t) => dayKey(new Date(t.remindAt)) === data)
-        : pending;
+        ? byStatus.filter((t) => dayKey(new Date(t.remindAt)) === data)
+        : byStatus;
       if (filtered.length === 0) {
+        if (status === 'disparados_hoje') return 'Nenhum lembrete disparado hoje sem confirmação.';
         return data ? `Sem lembretes pendentes em ${data}.` : 'Sem lembretes pendentes.';
       }
       return filtered
@@ -699,6 +733,19 @@ async function executeTool(
         timeZone: config.timezone,
       });
       return `Lembrete atualizado: "${after.text}" — ${quandoBr}.`;
+    }
+
+    if (call.function.name === 'concluir_lembrete') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id do lembrete.';
+      const task = await getTask(id);
+      if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
+      if (task.completedAt) return `O lembrete "${task.text}" já estava concluído.`;
+      await markTaskDone(id);
+      recordUndo(contact, `a conclusão do lembrete "${task.text}"`, () =>
+        updateTask(id, { done: task.done, completedAt: null })
+      );
+      return `Concluído ✅: "${task.text}".`;
     }
 
     if (call.function.name === 'remover_lembrete') {
