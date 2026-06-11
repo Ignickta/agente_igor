@@ -648,6 +648,12 @@ Regras gerais:
 - Você vê apenas as ÚLTIMAS mensagens desta conversa. Se o Igor citar algo combinado antes
   que não esteja no histórico acima, use buscar_no_historico ANTES de dizer que não sabe ou
   de assumir que não existe.
+- As mensagens do histórico começam com um carimbo [YYYY-MM-DD HH:mm] de quando foram ditas.
+  É metadado para a sua leitura: NUNCA inclua carimbos assim nas suas respostas.
+- O histórico pode conter planos e horários que JÁ PASSARAM. Antes de repetir, propor ou
+  confirmar qualquer horário vindo do histórico, compare o carimbo dele com a data e hora
+  atuais: nunca proponha um bloco que começa antes de agora — reancore a partir da hora atual
+  e dos lembretes/agenda reais (listar_lembretes / agenda), não do que foi dito antes.
 - REGRA INEGOCIÁVEL: NUNCA afirme que criou, agendou, alterou ou removeu lembrete/evento/
   agenda sem ter chamado a ferramenta correspondente NESTA conversa e visto a confirmação.
   Frases como "agendei", "organizei seu dia", "vou te mandar lembrete às X" só podem aparecer
@@ -689,9 +695,22 @@ que existe):\n${opts.crossContext}`
       : ''
   }`;
 
+  // Cada mensagem do histórico leva um carimbo [data hora] de quando foi dita.
+  // Sem isso, um plano montado às 13:50 parece recém-combinado às 15:12 e o
+  // modelo repete horários que já passaram.
+  const stamp = (ts: number): string => {
+    const d = new Date(ts);
+    return `[${dayKey(d)} ${timeKey(d)}]`;
+  };
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
-    ...memory.map((m) => ({ role: m.role, content: m.content } as ChatMessage)),
+    ...memory.map(
+      (m) =>
+        ({
+          role: m.role,
+          content: m.timestamp ? `${stamp(m.timestamp)} ${m.content}` : m.content,
+        } as ChatMessage)
+    ),
     { role: 'user', content: userText },
   ];
 
@@ -781,6 +800,24 @@ async function executeTool(
         recorrencia && ['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recorrencia)
           ? recorrencia
           : null;
+      // Idempotência: mesma proteção do criar_evento — texto igual no mesmo
+      // minuto é chamada repetida do modelo, não um lembrete novo.
+      const normLem = (s: string) => s.trim().toLowerCase();
+      const duplicado = (await listTasks()).find(
+        (t) =>
+          !t.done &&
+          normLem(t.text) === normLem(texto) &&
+          Math.abs(new Date(t.remindAt).getTime() - when.getTime()) < 60000
+      );
+      if (duplicado) {
+        const quandoDup = new Date(duplicado.remindAt).toLocaleString('pt-BR', {
+          timeZone: config.timezone,
+        });
+        return (
+          `Esse lembrete JÁ EXISTE para ${quandoDup}: "${duplicado.text}" (id: ${duplicado.id}). ` +
+          `Nada foi criado de novo. Para alterar, use editar_lembrete com esse id.`
+        );
+      }
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
       const created = await createTask({
@@ -1045,6 +1082,21 @@ async function executeTool(
         return 'Horários inválidos; use HH:mm (ex: 15:00).';
       }
       if (fim <= inicio) return 'O fim deve ser depois do início.';
+      // Idempotência: com plano de muitos itens, o modelo às vezes repete a
+      // chamada para um evento que já criou em rodada anterior do tool-calling
+      // (foi assim que a agenda ganhou itens duplicados). Mesmo título no mesmo
+      // dia com horário sobreposto = já existe; não cria de novo.
+      const normEv = (s: string) => s.trim().toLowerCase();
+      const jaExiste = (await getAgendaForDay(data)).find(
+        (i) => normEv(i.title) === normEv(titulo) && i.startTime < fim && inicio < i.endTime
+      );
+      if (jaExiste) {
+        return (
+          `Esse evento JÁ ESTÁ na agenda: "${jaExiste.title}" em ${data}, ` +
+          `${jaExiste.startTime}–${jaExiste.endTime} (id: ${jaExiste.id}). Nada foi criado de novo. ` +
+          `Para mudar horário ou título, use editar_item_agenda com esse id.`
+        );
+      }
       const item = await createAgendaItem({
         title: titulo,
         date: data,

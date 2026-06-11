@@ -256,8 +256,9 @@ Gere o cronograma dos itens NÃO-fixos em JSON:`;
   const planned = parseJsonArray<PlannedItem>(answer);
 
   // Defesa: o modelo pode reemitir um item fixo (que foi passado só como
-  // contexto). Não persistimos planejados que dupliquem um fixo — por título
-  // normalizado ou pelo mesmo slot de horário — para não criar cópias.
+  // contexto) ou repetir um mesmo item dentro do próprio JSON. Não persistimos
+  // planejados que dupliquem um fixo NEM um planejado já criado nesta rodada —
+  // por título normalizado ou pelo mesmo slot de horário.
   const norm = (s: string) => s.trim().toLowerCase();
   const fixedTitles = new Set(fixed.map((i) => norm(i.title)));
   const fixedSlots = new Set(fixed.map((i) => `${i.startTime}-${i.endTime}`));
@@ -288,6 +289,8 @@ Gere o cronograma dos itens NÃO-fixos em JSON:`;
       ...(taskId ? { taskId } : {}),
     });
     created.push(item);
+    fixedTitles.add(norm(p.title));
+    fixedSlots.add(`${p.startTime}-${p.endTime}`);
   }
 
   return getAgendaForDay(date);

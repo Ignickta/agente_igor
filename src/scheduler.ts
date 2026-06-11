@@ -1,8 +1,8 @@
 import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
-import { getDueTasks, markReminderSent, updateTask } from './services/firebase';
-import { nextOccurrence } from './services/datetime';
+import { getDueTasks, claimDueTask, acquireJobLock, cleanupJobLocks } from './services/firebase';
+import { dayKey, timeKey } from './services/datetime';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 import { processFocusExpirations } from './agents/focus';
 import {
@@ -12,6 +12,20 @@ import {
   sendSubagentWeeklyReports,
   sendPendingFollowUp,
 } from './agents/reports';
+
+/**
+ * Executa `fn` somente se esta instância vencer a trava distribuída do job no
+ * período — proteção contra mensagens duplicadas quando há mais de uma
+ * instância do app rodando contra o mesmo Firestore (ex: container antigo que
+ * não morreu no deploy).
+ */
+async function withJobLock(job: string, periodKey: string, fn: () => Promise<void>): Promise<void> {
+  if (!(await acquireJobLock(job, periodKey))) {
+    console.log(`[scheduler] job "${job}" (${periodKey}) já executado por outra instância — pulando.`);
+    return;
+  }
+  await fn();
+}
 
 /**
  * Inicia os jobs proativos:
@@ -49,8 +63,10 @@ export function startScheduler(): void {
     '0 7 * * *',
     async () => {
       try {
-        await sendDailySchedule();
-        console.log('[scheduler] cronograma do dia enviado.');
+        await withJobLock('daily_schedule', dayKey(), async () => {
+          await sendDailySchedule();
+          console.log('[scheduler] cronograma do dia enviado.');
+        });
       } catch (err) {
         console.error('[scheduler] falha ao enviar cronograma do dia:', err);
       }
@@ -63,7 +79,7 @@ export function startScheduler(): void {
   cron.schedule(
     '30 20 * * *',
     () => {
-      sendPendingFollowUp().catch((err) =>
+      withJobLock('pending_followup', dayKey(), sendPendingFollowUp).catch((err) =>
         console.error('[scheduler] falha no follow-up de pendências:', err)
       );
     },
@@ -74,8 +90,12 @@ export function startScheduler(): void {
   cron.schedule(
     '0 22 * * *',
     () => {
-      sendNightlySummary().catch((err) =>
+      withJobLock('nightly_summary', dayKey(), sendNightlySummary).catch((err) =>
         console.error('[scheduler] falha no resumo noturno:', err)
+      );
+      // Aproveita o job noturno para limpar travas antigas (best-effort).
+      cleanupJobLocks().catch((err) =>
+        console.error('[scheduler] falha na limpeza de travas:', err)
       );
     },
     opts
@@ -85,7 +105,7 @@ export function startScheduler(): void {
   cron.schedule(
     '0 18 * * 5',
     () => {
-      sendWeeklyReview().catch((err) =>
+      withJobLock('weekly_review', dayKey(), sendWeeklyReview).catch((err) =>
         console.error('[scheduler] falha na revisão semanal:', err)
       );
     },
@@ -96,7 +116,7 @@ export function startScheduler(): void {
   cron.schedule(
     '0 8 * * 1',
     () => {
-      sendSubagentWeeklyReports().catch((err) =>
+      withJobLock('subagent_reports', dayKey(), sendSubagentWeeklyReports).catch((err) =>
         console.error('[scheduler] falha nos relatórios por subagente:', err)
       );
     },
@@ -107,30 +127,33 @@ export function startScheduler(): void {
   cron.schedule(
     '30 9 * * *',
     () => {
-      runProactiveCheck().catch((err) =>
+      withJobLock('proactive_check', dayKey(), runProactiveCheck).catch((err) =>
         console.error('[scheduler] falha na verificação proativa:', err)
       );
     },
     opts
   );
 
-  // Lembretes/tarefas — a cada minuto
+  // Lembretes/tarefas — a cada minuto. A trava por minuto garante que só uma
+  // instância processe o tick (lembretes, transições e fim de foco enviam
+  // mensagens); o claim por tarefa é a segunda camada contra duplicatas.
   cron.schedule(
     '* * * * *',
     async () => {
+      const minuteKey = `${dayKey()}T${timeKey()}`;
+      if (!(await acquireJobLock('minute_tick', minuteKey))) return;
+
       try {
         const due = await getDueTasks();
         for (const task of due) {
+          // Reivindica ANTES de enviar: marca como enviado (ou reagenda, se
+          // recorrente) de forma atômica. Se outra instância chegou primeiro,
+          // não envia — é isso que evita o lembrete em dobro.
+          if (!(await claimDueTask(task))) continue;
           await sendText(task.to || config.ownerPhone, `⏰ Lembrete: ${task.text}`);
-          if (task.recurrence) {
-            // Recorrente: reagenda para a próxima ocorrência em vez de morrer.
-            const next = nextOccurrence(task.remindAt, task.recurrence);
-            await updateTask(task.id, { remindAt: next });
-            console.log(`[scheduler] lembrete recorrente reagendado: ${task.id} → ${next}`);
-          } else {
-            await markReminderSent(task.id);
-            console.log(`[scheduler] lembrete enviado: ${task.id}`);
-          }
+          console.log(
+            `[scheduler] lembrete enviado: ${task.id}${task.recurrence ? ' (recorrente, reagendado)' : ''}`
+          );
         }
       } catch (err) {
         console.error('[scheduler] falha ao processar lembretes:', err);
