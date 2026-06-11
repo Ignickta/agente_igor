@@ -800,6 +800,24 @@ async function executeTool(
         recorrencia && ['diaria', 'semanal', 'mensal', 'dias_uteis'].includes(recorrencia)
           ? recorrencia
           : null;
+      // Idempotência: mesma proteção do criar_evento — texto igual no mesmo
+      // minuto é chamada repetida do modelo, não um lembrete novo.
+      const normLem = (s: string) => s.trim().toLowerCase();
+      const duplicado = (await listTasks()).find(
+        (t) =>
+          !t.done &&
+          normLem(t.text) === normLem(texto) &&
+          Math.abs(new Date(t.remindAt).getTime() - when.getTime()) < 60000
+      );
+      if (duplicado) {
+        const quandoDup = new Date(duplicado.remindAt).toLocaleString('pt-BR', {
+          timeZone: config.timezone,
+        });
+        return (
+          `Esse lembrete JÁ EXISTE para ${quandoDup}: "${duplicado.text}" (id: ${duplicado.id}). ` +
+          `Nada foi criado de novo. Para alterar, use editar_lembrete com esse id.`
+        );
+      }
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
       const created = await createTask({
@@ -1064,6 +1082,21 @@ async function executeTool(
         return 'Horários inválidos; use HH:mm (ex: 15:00).';
       }
       if (fim <= inicio) return 'O fim deve ser depois do início.';
+      // Idempotência: com plano de muitos itens, o modelo às vezes repete a
+      // chamada para um evento que já criou em rodada anterior do tool-calling
+      // (foi assim que a agenda ganhou itens duplicados). Mesmo título no mesmo
+      // dia com horário sobreposto = já existe; não cria de novo.
+      const normEv = (s: string) => s.trim().toLowerCase();
+      const jaExiste = (await getAgendaForDay(data)).find(
+        (i) => normEv(i.title) === normEv(titulo) && i.startTime < fim && inicio < i.endTime
+      );
+      if (jaExiste) {
+        return (
+          `Esse evento JÁ ESTÁ na agenda: "${jaExiste.title}" em ${data}, ` +
+          `${jaExiste.startTime}–${jaExiste.endTime} (id: ${jaExiste.id}). Nada foi criado de novo. ` +
+          `Para mudar horário ou título, use editar_item_agenda com esse id.`
+        );
+      }
       const item = await createAgendaItem({
         title: titulo,
         date: data,
