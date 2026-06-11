@@ -1,6 +1,6 @@
 import admin from 'firebase-admin';
 import { config } from '../config';
-import { dayKey } from './datetime';
+import { dayKey, nextOccurrence } from './datetime';
 import { Subagent, MemoryMessage, Task, AgendaItem, FocusSession } from '../types';
 
 if (!admin.apps.length) {
@@ -23,6 +23,7 @@ const agendaCol = db.collection('agenda');
 const focusCol = db.collection('focus');
 const sharedFactsCol = db.collection('shared_facts');
 const conversationLogCol = db.collection('conversation_log');
+const jobLocksCol = db.collection('job_locks');
 
 // ===================== Subagentes =====================
 
@@ -199,6 +200,65 @@ export async function markTaskDone(id: string): Promise<void> {
  */
 export async function markReminderSent(id: string): Promise<void> {
   await tasksCol.doc(id).set({ done: true }, { merge: true });
+}
+
+/**
+ * Reivindica um lembrete vencido ANTES do envio, de forma atômica: numa
+ * transação, marca como enviado (ou reagenda, se recorrente) e só retorna true
+ * para quem chegou primeiro. Se houver mais de uma instância do app rodando
+ * contra o mesmo Firestore (deploy duplicado, container antigo vivo), apenas
+ * uma envia — as outras veem o estado já alterado e desistem.
+ */
+export async function claimDueTask(task: Task): Promise<boolean> {
+  const ref = tasksCol.doc(task.id);
+  try {
+    return await db.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      if (!doc.exists) return false;
+      const current = doc.data() as Task;
+      if (task.recurrence) {
+        // Outra instância já reagendou esta ocorrência.
+        if (current.remindAt !== task.remindAt) return false;
+        tx.update(ref, { remindAt: nextOccurrence(task.remindAt, task.recurrence) });
+      } else {
+        if (current.done) return false;
+        tx.update(ref, { done: true });
+      }
+      return true;
+    });
+  } catch (err) {
+    console.error(`[firebase] falha ao reivindicar lembrete ${task.id}:`, err);
+    return false; // na dúvida, não envia — a tarefa continua vencida e o próximo tick tenta de novo
+  }
+}
+
+// ===================== Travas de jobs proativos =====================
+
+/**
+ * Trava distribuída de job proativo (cronograma, follow-up, resumo noturno...).
+ * Usa `create()`, que falha se o documento já existir — assim, mesmo com várias
+ * instâncias do app, só a primeira a chegar dispara o job naquele período.
+ */
+export async function acquireJobLock(job: string, periodKey: string): Promise<boolean> {
+  try {
+    await jobLocksCol.doc(`${job}_${periodKey}`).create({ job, periodKey, at: Date.now() });
+    return true;
+  } catch {
+    return false; // já existe (outra instância venceu) ou Firestore indisponível
+  }
+}
+
+/** Apaga travas com mais de 48h para a coleção não crescer sem limite. */
+export async function cleanupJobLocks(): Promise<void> {
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+  // Em lotes, com teto de iterações — o tick por minuto gera ~1440 travas/dia.
+  for (let i = 0; i < 10; i++) {
+    const snap = await jobLocksCol.where('at', '<', cutoff).limit(500).get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+  }
 }
 
 /**

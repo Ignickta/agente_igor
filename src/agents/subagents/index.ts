@@ -648,6 +648,12 @@ Regras gerais:
 - Você vê apenas as ÚLTIMAS mensagens desta conversa. Se o Igor citar algo combinado antes
   que não esteja no histórico acima, use buscar_no_historico ANTES de dizer que não sabe ou
   de assumir que não existe.
+- As mensagens do histórico começam com um carimbo [YYYY-MM-DD HH:mm] de quando foram ditas.
+  É metadado para a sua leitura: NUNCA inclua carimbos assim nas suas respostas.
+- O histórico pode conter planos e horários que JÁ PASSARAM. Antes de repetir, propor ou
+  confirmar qualquer horário vindo do histórico, compare o carimbo dele com a data e hora
+  atuais: nunca proponha um bloco que começa antes de agora — reancore a partir da hora atual
+  e dos lembretes/agenda reais (listar_lembretes / agenda), não do que foi dito antes.
 - REGRA INEGOCIÁVEL: NUNCA afirme que criou, agendou, alterou ou removeu lembrete/evento/
   agenda sem ter chamado a ferramenta correspondente NESTA conversa e visto a confirmação.
   Frases como "agendei", "organizei seu dia", "vou te mandar lembrete às X" só podem aparecer
@@ -689,9 +695,22 @@ que existe):\n${opts.crossContext}`
       : ''
   }`;
 
+  // Cada mensagem do histórico leva um carimbo [data hora] de quando foi dita.
+  // Sem isso, um plano montado às 13:50 parece recém-combinado às 15:12 e o
+  // modelo repete horários que já passaram.
+  const stamp = (ts: number): string => {
+    const d = new Date(ts);
+    return `[${dayKey(d)} ${timeKey(d)}]`;
+  };
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
-    ...memory.map((m) => ({ role: m.role, content: m.content } as ChatMessage)),
+    ...memory.map(
+      (m) =>
+        ({
+          role: m.role,
+          content: m.timestamp ? `${stamp(m.timestamp)} ${m.content}` : m.content,
+        } as ChatMessage)
+    ),
     { role: 'user', content: userText },
   ];
 
