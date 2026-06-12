@@ -623,6 +623,12 @@ const HALLUCINATION_NUDGE =
  * + fatos memorizados), injeta o histórico e deixa o modelo usar ferramentas
  * (criar lembrete, salvar fato) antes de produzir a resposta final.
  */
+export interface ToolCallMetadata {
+  name: string;
+  args: string;
+  result: string;
+}
+
 export async function runSubagent(
   subagent: Subagent,
   userText: string,
@@ -632,7 +638,7 @@ export async function runSubagent(
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
   depth = 0,
   opts: { isCorrection?: boolean; crossContext?: string; ragContext?: string } = {}
-): Promise<string> {
+): Promise<{ reply: string; toolCalls: ToolCallMetadata[] }> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
   // O perfil vivo (resumo consolidado pela manutenção noturna) entra sempre,
@@ -762,6 +768,7 @@ não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferr
   // Guarda anti-alucinação: rastreia se alguma ferramenta de ESCRITA rodou.
   let usedWriteTool = false;
   let nudged = false;
+  const toolCalls: ToolCallMetadata[] = [];
 
   // Loop de tool-calling: o modelo pode chamar ferramentas antes da resposta final.
   // (6 passos: até 4 de ferramentas + 1 possível correção anti-alucinação + resposta.)
@@ -787,7 +794,7 @@ não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferr
         messages.push({ role: 'system', content: HALLUCINATION_NUDGE });
         continue;
       }
-      return content;
+      return { reply: content, toolCalls };
     }
 
     // Registra a intenção do assistente e executa cada ferramenta.
@@ -795,6 +802,13 @@ não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferr
     for (const call of choice.tool_calls) {
       if (WRITE_TOOLS.has(call.function.name)) usedWriteTool = true;
       const result = await executeTool(call, subagent.id, contact, depth);
+      
+      toolCalls.push({
+        name: call.function.name,
+        args: call.function.arguments || '{}',
+        result,
+      });
+
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -809,7 +823,7 @@ não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferr
     ...temp,
     messages,
   });
-  return finalCompletion.choices[0].message.content?.trim() || '';
+  return { reply: finalCompletion.choices[0].message.content?.trim() || '', toolCalls };
 }
 
 /** Executa uma ferramenta chamada pelo modelo e retorna um resumo textual. */
@@ -1112,8 +1126,8 @@ async function executeTool(
       if (target.id === subagentId) return 'Essa área é a sua própria; responda diretamente.';
 
       const mem = contact ? await getRecentMemory(contact, target.id, 6) : [];
-      const resposta = await runSubagent(target, pergunta, mem, false, contact, depth + 1);
-      return `Resposta do subagente "${target.name}":\n${resposta}`;
+      const resSub = await runSubagent(target, pergunta, mem, false, contact, depth + 1);
+      return `Resposta do subagente "${target.name}":\n${resSub.reply}`;
     }
 
     if (call.function.name === 'gerar_cronograma') {

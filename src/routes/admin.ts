@@ -25,6 +25,7 @@ import { generateDailySchedule, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
 import { getConnectionState } from '../services/evolution';
 import { getUptimeSeconds, getRecentErrors, getLastMessageProcessedAt } from '../services/status';
+import { handleMessage } from '../agents/central';
 
 export const adminRouter = Router();
 
@@ -168,6 +169,26 @@ adminRouter.get('/conversations', async (req, res) => {
   } catch (err) {
     console.error('[conversations] erro ao obter logs de conversas:', err);
     res.status(500).json({ error: 'Erro ao carregar histórico de conversas' });
+  }
+});
+
+adminRouter.post('/chat', async (req, res) => {
+  try {
+    const { text, sandbox } = req.body;
+    if (!text) {
+      return res.status(400).json({ error: 'O parâmetro text é obrigatório.' });
+    }
+
+    const contact = sandbox === true ? 'web:sandbox' : config.ownerPhone;
+    if (!contact) {
+      return res.status(400).json({ error: 'ownerPhone não configurado no servidor' });
+    }
+
+    const result = await handleMessage(contact, text, false);
+    res.json(result);
+  } catch (err) {
+    console.error('[chat] erro ao processar mensagem no playground:', err);
+    res.status(500).json({ error: 'Erro ao processar mensagem' });
   }
 });
 

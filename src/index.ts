@@ -167,7 +167,7 @@ async function processIncoming(body: unknown): Promise<void> {
 
   // Roteia pelo agente central e responde
   try {
-    const reply = await handleMessage(msg.from, text, msg.isAudio);
+    const { reply } = await handleMessage(msg.from, text, msg.isAudio);
     if (!reply) return;
 
     // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que

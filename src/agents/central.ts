@@ -282,11 +282,25 @@ export async function handleMessage(
   contact: string,
   text: string,
   fromAudio = false
-): Promise<string> {
+): Promise<{
+  reply: string;
+  subagentId: string;
+  subagentName: string;
+  toolCalls: any[];
+  elapsedMs: number;
+  routedBy: string;
+}> {
   // 0) Comandos administrativos (/criar, /agentes, /remover, ...) têm prioridade.
   const command = await tryHandleCommand(contact, text);
   if (command.handled) {
-    return command.reply || '';
+    return {
+      reply: command.reply || '',
+      subagentId: 'admin',
+      subagentName: 'Comando Administrativo',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'command',
+    };
   }
 
   // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
@@ -297,12 +311,28 @@ export async function handleMessage(
   //      Só do dono e quando há item em andamento na agenda.
   if (contact === config.ownerPhone || !config.ownerPhone) {
     const advanced = await tryAdvanceAgenda(contact, text);
-    if (advanced !== null) return advanced;
+    if (advanced !== null) {
+      return {
+        reply: advanced,
+        subagentId: 'orchestrator',
+        subagentName: 'Orquestrador Geral',
+        toolCalls: [],
+        elapsedMs: 0,
+        routedBy: 'agenda-shortcut',
+      };
+    }
   }
 
   const subagents = await listSubagents();
   if (subagents.length === 0) {
-    return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
+    return {
+      reply: 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.',
+      subagentId: 'admin',
+      subagentName: 'Sistema',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'system',
+    };
   }
 
   // 1) Roteamento, do mais barato ao mais caro:
@@ -408,11 +438,14 @@ export async function handleMessage(
       at: Date.now(),
     }).catch((err) => console.error('[central] falha ao registrar route miss:', err));
   }
-  const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
+
+  const start = Date.now();
+  const { reply, toolCalls } = await runSubagent(target, text, memory, fromAudio, contact, 0, {
     isCorrection,
     ...(crossContext ? { crossContext } : {}),
     ...(ragHits.length ? { ragContext: ragHits.join('\n\n') } : {}),
   });
+  const elapsedMs = Date.now() - start;
 
   // 3) Persiste memória da conversa nesse subagente (usuário + resposta).
   const ts = Date.now();
@@ -427,9 +460,20 @@ export async function handleMessage(
   recordMessage(target.id, target.name).catch((err) =>
     console.error('[central] falha ao registrar métrica:', err)
   );
-  logExchange(contact, target.id, target.name, text, reply, ts).catch((err) =>
+  logExchange(contact, target.id, target.name, text, reply, ts, {
+    toolCalls,
+    elapsedMs,
+    routedBy: via,
+  }).catch((err) =>
     console.error('[central] falha ao registrar log de conversa:', err)
   );
 
-  return reply;
+  return {
+    reply,
+    subagentId: target.id,
+    subagentName: target.name,
+    toolCalls,
+    elapsedMs,
+    routedBy: via,
+  };
 }

@@ -397,6 +397,10 @@ export interface ConversationEntry {
   /** Embedding da troca (vazio se a API falhou na gravação). */
   embedding: number[];
   timestamp: number;
+  // Metadados de execução para Raio-X
+  toolCalls?: { name: string; args: string; result: string }[];
+  elapsedMs?: number;
+  routedBy?: string;
 }
 
 export async function saveConversationEntry(

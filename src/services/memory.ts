@@ -145,7 +145,12 @@ export async function logExchange(
   subagentName: string,
   userText: string,
   reply: string,
-  timestamp: number
+  timestamp: number,
+  metadata?: {
+    toolCalls?: { name: string; args: string; result: string }[];
+    elapsedMs?: number;
+    routedBy?: string;
+  }
 ): Promise<void> {
   pushRecent(contact, {
     subagentId,
@@ -169,6 +174,7 @@ export async function logExchange(
       assistant: reply.slice(0, 1500),
       embedding,
       timestamp,
+      ...(metadata || {}),
     });
     // Mantém o cache do RAG automático em dia sem esperar o TTL. O teto
     // espelha o limite do getConversationLog — sem ele, uma rajada de
