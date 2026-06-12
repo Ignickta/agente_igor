@@ -41,6 +41,8 @@ export interface Task {
   completedAt?: number | null;
   /** Recorrência: o lembrete se reagenda em vez de morrer ao disparar. null = sem. */
   recurrence?: Recurrence | null;
+  /** Quantas vezes foi adiado (detector de procrastinação). */
+  postponedCount?: number;
 }
 
 /** Tipo de item da agenda. */
@@ -93,6 +95,8 @@ export interface AgendaItem {
   nudgedAt?: number;
   /** Epoch ms de quando o item entrou em andamento (mede duração real). */
   startedAt?: number;
+  /** Quantas vezes foi empurrado para mais tarde (detector de procrastinação). */
+  postponedCount?: number;
   /**
    * Epoch ms da conclusão confirmada. O par startedAt→completedAt é a duração
    * REAL da tarefa, usada para calibrar as estimativas do agente. null = não.

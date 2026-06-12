@@ -19,6 +19,10 @@ proativas (bom dia, lembretes).
 - **Estimativas calibradas**: o agente mede a duração real das tarefas concluídas
   (início → conclusão confirmada) e usa as medições para estimar as próximas e
   dimensionar o cronograma pelo ritmo real do Igor.
+- **Detector de procrastinação**: a partir do 3º adiamento de uma tarefa, o agente
+  para de adiar em silêncio — pergunta o que está travando e propõe quebrar em
+  passos, fazer uma versão de 10 minutos agora, ou desistir conscientemente. No
+  cronograma, tarefas muito adiadas vão para o primeiro bloco do dia.
 
 ### Subagentes iniciais
 

@@ -227,6 +227,8 @@ export async function generateDailySchedule(
     deadline: t.remindAt,
     subagentId: t.subagentId,
     estimatedMinutes: t.estimatedMinutes,
+    // F8: o planejador vê quantas vezes a tarefa já foi adiada.
+    ...(t.postponedCount ? { postponedCount: t.postponedCount } : {}),
   }));
 
   // F10: padrões aprendidos do histórico, para otimizar ordem/horários.
@@ -254,6 +256,8 @@ Encaixe as tarefas pendentes em volta dos itens fixos, sem sobreposição de hor
 respeitando horário comercial (08:00–19:00) e deixando intervalos curtos quando fizer sentido.
 Se a tarefa trouxer "estimatedMinutes", use-o para dimensionar o bloco (start→end). Quando o
 histórico indicar um período mais produtivo, prefira alocar as tarefas mais importantes nele.
+Se a tarefa trouxer "postponedCount" >= ${PROCRASTINATION_THRESHOLD}, ela vem sendo adiada
+repetidamente: aloque-a no PRIMEIRO bloco produtivo do dia (engolir o sapo) com prioridade 2.
 
 Classifique cada item em type: "task", "event" ou "research". Responda com a lista de
 itens planejados no campo "itens" (priority de 2 a 5).`;
@@ -323,6 +327,37 @@ Gere o cronograma dos itens NÃO-fixos:`;
   }
 
   return getAgendaForDay(date);
+}
+
+// ===================== F8: detector de procrastinação =====================
+
+/** A partir de quantos adiamentos o agente para de adiar em silêncio. */
+export const PROCRASTINATION_THRESHOLD = 3;
+
+/** True se o novo slot (data + hora de início) é mais tarde que o antigo — um adiamento. */
+export function isLaterSlot(
+  oldDate: string,
+  oldStart: string,
+  newDate: string,
+  newStart: string
+): boolean {
+  return newDate > oldDate || (newDate === oldDate && newStart > oldStart);
+}
+
+/**
+ * Aviso anti-procrastinação injetado em tool results: instrui o MODELO a parar
+ * de adiar em silêncio e conversar com o Igor sobre o que está travando.
+ */
+export function procrastinationWarning(title: string, count: number): string {
+  return (
+    `⚠️ PROCRASTINAÇÃO DETECTADA: "${title}" já foi adiada ${count} vezes. ` +
+    `O adiamento foi aplicado, mas NÃO termine a resposta sem tocar nisso: pergunte ao Igor, ` +
+    `com leveza, o que está travando, e proponha escolher UMA saída — ` +
+    `(1) quebrar em passos menores e agendar só o primeiro; ` +
+    `(2) fazer AGORA uma versão de 10 minutos; ` +
+    `(3) desistir conscientemente e remover da lista, sem culpa. ` +
+    `Aplique a escolha dele usando as ferramentas.`
+  );
 }
 
 // ===================== F4: detecção de sobrecarga =====================
@@ -798,6 +833,7 @@ Novo cronograma:`;
 
   const byId = new Map(items.map((i) => [i.id, i]));
   let applied = 0;
+  const procrastinados: string[] = [];
 
   for (const u of updates) {
     const item = byId.get(u.id);
@@ -806,7 +842,17 @@ Novo cronograma:`;
     if (item.priority === 1 || item.createdBy === 'user') continue;
     if (!u.startTime || !u.endTime) continue;
     if (u.startTime === item.startTime && u.endTime === item.endTime) continue;
-    await updateAgendaItem(item.id, { startTime: u.startTime, endTime: u.endTime });
+    // F8: mover para MAIS TARDE conta como adiamento; antecipar zera nada.
+    const adiou = isLaterSlot(item.date, item.startTime, item.date, u.startTime);
+    const novoCount = adiou ? (item.postponedCount ?? 0) + 1 : item.postponedCount ?? 0;
+    await updateAgendaItem(item.id, {
+      startTime: u.startTime,
+      endTime: u.endTime,
+      ...(adiou ? { postponedCount: novoCount } : {}),
+    });
+    if (adiou && novoCount >= PROCRASTINATION_THRESHOLD) {
+      procrastinados.push(procrastinationWarning(item.title, novoCount));
+    }
     applied++;
   }
 
@@ -817,5 +863,6 @@ Novo cronograma:`;
       `ou já estavam nos horários pedidos.\n\n${formatSchedule(updated, date)}`
     );
   }
-  return `Pronto, reorganizei (${applied} ${applied === 1 ? 'item' : 'itens'})! ✨\n\n${formatSchedule(updated, date)}`;
+  const aviso = procrastinados.length ? `\n\n${procrastinados.join('\n\n')}` : '';
+  return `Pronto, reorganizei (${applied} ${applied === 1 ? 'item' : 'itens'})! ✨\n\n${formatSchedule(updated, date)}${aviso}`;
 }

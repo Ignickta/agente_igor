@@ -22,7 +22,13 @@ import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
 import { CLAIMS_ACTION_REGEX } from '../agents/subagents';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
-import { weekRange, monthRange } from '../agents/orchestrator';
+import {
+  weekRange,
+  monthRange,
+  isLaterSlot,
+  procrastinationWarning,
+  PROCRASTINATION_THRESHOLD,
+} from '../agents/orchestrator';
 import { parseLocalIso, addDays, weekdayOf, dayKey, timeKey, nextOccurrence } from '../services/datetime';
 import { Subagent } from '../types';
 
@@ -288,6 +294,23 @@ function suiteDurationCalibration(): void {
   check('calibração', 'sem completedAt → null', realDurationMinutes(t0, null) === null);
 }
 
+// ===================== Suíte F2: detector de procrastinação =====================
+
+function suiteProcrastination(): void {
+  suite('Detector de procrastinação — o que conta como adiamento');
+
+  check('procrastinação', 'mesmo dia, hora maior → adiou', isLaterSlot('2026-06-12', '09:00', '2026-06-12', '15:00'));
+  check('procrastinação', 'mesmo dia, hora menor → antecipou (não conta)', !isLaterSlot('2026-06-12', '15:00', '2026-06-12', '09:00'));
+  check('procrastinação', 'dia seguinte, hora menor → adiou', isLaterSlot('2026-06-12', '15:00', '2026-06-13', '08:00'));
+  check('procrastinação', 'mesmo slot → não conta', !isLaterSlot('2026-06-12', '09:00', '2026-06-12', '09:00'));
+  check(
+    'procrastinação',
+    'aviso cita o título e o número de adiamentos',
+    procrastinationWarning('Declarar imposto', PROCRASTINATION_THRESHOLD).includes('Declarar imposto') &&
+      procrastinationWarning('Declarar imposto', 4).includes('4 vezes')
+  );
+}
+
 // ===================== Suíte G (--live): roteador por embedding =====================
 
 async function suiteLiveEmbedding(): Promise<void> {
@@ -350,6 +373,7 @@ async function main(): Promise<void> {
   suiteKeywordRouting();
   suiteDatetime();
   suiteDurationCalibration();
+  suiteProcrastination();
   if (live) {
     await suiteLiveRouting();
     await suiteLiveEmbedding();

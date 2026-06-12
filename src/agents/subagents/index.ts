@@ -35,6 +35,9 @@ import {
   monthlyView,
   upcomingView,
   detectOverload,
+  isLaterSlot,
+  procrastinationWarning,
+  PROCRASTINATION_THRESHOLD,
   dayKey,
   addDays,
 } from '../orchestrator';
@@ -902,6 +905,7 @@ async function executeTool(
           return 'Recorrência inválida: use diaria, semanal, mensal, dias_uteis ou nenhuma.';
         }
       }
+      let adiamentos = 0;
       if (quando) {
         const when = parseLocalIso(quando);
         if (isNaN(when.getTime())) return 'Horário inválido; use ISO 8601 (2026-06-10T08:30:00).';
@@ -909,6 +913,12 @@ async function executeTool(
         // Rearma o disparo: se o lembrete antigo já tinha tocado (done=true sem
         // completedAt), o novo horário deve tocar de novo.
         if (!task.completedAt) updates.done = false;
+        // F8: empurrar para MAIS TARDE conta como adiamento (ISO UTC compara
+        // lexicograficamente); antecipar não conta.
+        if (updates.remindAt > task.remindAt) {
+          adiamentos = (task.postponedCount ?? 0) + 1;
+          updates.postponedCount = adiamentos;
+        }
       }
       await updateTask(id, updates);
       const prev = {
@@ -916,6 +926,7 @@ async function executeTool(
         remindAt: task.remindAt,
         done: task.done,
         recurrence: task.recurrence ?? null,
+        postponedCount: task.postponedCount ?? 0,
       };
       recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
 
@@ -923,7 +934,11 @@ async function executeTool(
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
         timeZone: config.timezone,
       });
-      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.`;
+      const alerta =
+        adiamentos >= PROCRASTINATION_THRESHOLD
+          ? `\n\n${procrastinationWarning(after.text, adiamentos)}`
+          : '';
+      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.${alerta}`;
     }
 
     if (call.function.name === 'concluir_lembrete') {
@@ -1068,11 +1083,13 @@ async function executeTool(
       if (!instrucao) return 'Diga o que devo reorganizar.';
       const data = String(args.data || '').trim() || dayKey();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
-      // Snapshot dos horários do dia para permitir desfazer a reorganização.
+      // Snapshot dos horários do dia para permitir desfazer a reorganização
+      // (inclui o contador de adiamentos, que a realocação pode incrementar).
       const before = (await getAgendaForDay(data)).map((i) => ({
         id: i.id,
         startTime: i.startTime,
         endTime: i.endTime,
+        postponedCount: i.postponedCount ?? 0,
       }));
       const result = await reorganize(instrucao, data);
       recordUndo(contact, `a reorganização da agenda de ${data}`, async () => {
@@ -1080,6 +1097,7 @@ async function executeTool(
           await updateAgendaItem(item.id, {
             startTime: item.startTime,
             endTime: item.endTime,
+            postponedCount: item.postponedCount,
           });
         }
       });
@@ -1153,13 +1171,24 @@ async function executeTool(
       if (fim && !/^\d{2}:\d{2}$/.test(fim)) return 'Fim inválido; use HH:mm.';
       if (data && !/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
 
-      const updates: Partial<Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date'>> = {};
+      const updates: Partial<
+        Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date' | 'postponedCount'>
+      > = {};
       if (titulo) updates.title = titulo;
       if (inicio) updates.startTime = inicio;
       if (fim) updates.endTime = fim;
       if (data) updates.date = data;
       if (Object.keys(updates).length === 0) {
         return 'Nada para alterar: informe título, horários e/ou data.';
+      }
+      // F8: mover para um slot MAIS TARDE (outro dia ou hora maior) é adiamento.
+      let adiamentosItem = 0;
+      if (
+        (inicio || data) &&
+        isLaterSlot(item.date, item.startTime, data || item.date, inicio || item.startTime)
+      ) {
+        adiamentosItem = (item.postponedCount ?? 0) + 1;
+        updates.postponedCount = adiamentosItem;
       }
       await updateAgendaItem(id, updates);
       recordUndo(contact, `a edição do item "${item.title}"`, () =>
@@ -1168,10 +1197,15 @@ async function executeTool(
           startTime: item.startTime,
           endTime: item.endTime,
           date: item.date,
+          postponedCount: item.postponedCount ?? 0,
         })
       );
       const after = { ...item, ...updates };
-      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.`;
+      const alertaItem =
+        adiamentosItem >= PROCRASTINATION_THRESHOLD
+          ? `\n\n${procrastinationWarning(after.title, adiamentosItem)}`
+          : '';
+      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.${alertaItem}`;
     }
 
     if (call.function.name === 'remover_item_agenda') {
