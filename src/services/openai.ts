@@ -39,3 +39,62 @@ export async function chat(
   });
   return completion.choices[0]?.message?.content?.trim() || '';
 }
+
+/**
+ * Chamada de chat com Structured Outputs (json_schema estrito): o modelo é
+ * OBRIGADO a devolver JSON no formato do schema — elimina a classe de bug
+ * "respondeu com texto em volta do JSON e o parse falhou silenciosamente".
+ *
+ * O schema segue as regras do modo estrito da OpenAI: raiz `object`, todo campo
+ * em `required`, `additionalProperties: false` (campos opcionais = união com
+ * null). Retorna null se o modelo recusar ou se tudo falhar — o caller trata
+ * null como "sem plano utilizável", igual fazia com o parse leniente.
+ *
+ * Resiliência: se a API rejeitar o response_format (ex: OPENAI_MODEL trocado
+ * por um modelo sem suporte), refaz a chamada sem schema e parseia o objeto
+ * de forma leniente — comportamento antigo como rede de segurança.
+ */
+export async function chatJson<T>(
+  messages: ChatMessage[],
+  options: {
+    /** Nome do schema (identificador exigido pela API, ex: "cronograma"). */
+    name: string;
+    schema: Record<string, unknown>;
+    model?: string;
+    temperature?: number;
+  }
+): Promise<T | null> {
+  const model = options.model || config.openai.model;
+  const temp = supportsCustomTemperature(model)
+    ? { temperature: options.temperature ?? 0 }
+    : {};
+  try {
+    const completion = await openai.chat.completions.create({
+      model,
+      ...temp,
+      messages,
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: options.name, strict: true, schema: options.schema },
+      },
+    });
+    const msg = completion.choices[0]?.message;
+    if (msg?.refusal || !msg?.content) return null;
+    return JSON.parse(msg.content) as T;
+  } catch (err) {
+    console.error(
+      `[openai] chatJson(${options.name}) com schema falhou; tentando sem schema:`,
+      err instanceof Error ? err.message : err
+    );
+    try {
+      const completion = await openai.chat.completions.create({ model, ...temp, messages });
+      const raw = completion.choices[0]?.message?.content || '';
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start === -1 || end === -1) return null;
+      return JSON.parse(raw.slice(start, end + 1)) as T;
+    } catch {
+      return null;
+    }
+  }
+}

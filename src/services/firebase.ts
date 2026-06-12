@@ -24,6 +24,8 @@ const focusCol = db.collection('focus');
 const sharedFactsCol = db.collection('shared_facts');
 const conversationLogCol = db.collection('conversation_log');
 const jobLocksCol = db.collection('job_locks');
+const routeMissesCol = db.collection('route_misses');
+const routeSuggestionsCol = db.collection('route_suggestions');
 
 // ===================== Subagentes =====================
 
@@ -320,26 +322,63 @@ export interface SharedFact {
   /** Subagente que registrou o fato (origem), para contexto. */
   subagentId?: string;
   createdAt: number;
+  /**
+   * Arquivado pela consolidação noturna (duplicado, corrigido ou expirado).
+   * Arquivar é reversível — fatos nunca são apagados de verdade.
+   */
+  archived?: boolean;
+  archivedAt?: number;
 }
 
-export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<void> {
-  if (!data.text.trim()) return;
+/**
+ * Salva um fato no pool compartilhado. Retorna true se salvou, false se um
+ * fato ATIVO idêntico já existia (dedupe). Fatos arquivados não bloqueiam:
+ * um fato que expirou e foi arquivado pode voltar se for dito de novo.
+ */
+export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<boolean> {
+  if (!data.text.trim()) return false;
   const dup = await sharedFactsCol
     .where('contact', '==', data.contact)
     .where('text', '==', data.text)
-    .limit(1)
     .get();
-  if (!dup.empty) return;
+  const activeDup = dup.docs.some((d) => !(d.data() as SharedFact).archived);
+  if (activeDup) return false;
   await sharedFactsCol.add(data);
+  return true;
 }
 
-/** Todos os fatos compartilhados do contato, mais recentes primeiro. */
+/** Fatos compartilhados ATIVOS do contato (não arquivados), mais recentes primeiro. */
 export async function getSharedFacts(contact: string, limit = 400): Promise<SharedFact[]> {
   const snap = await sharedFactsCol.where('contact', '==', contact).get();
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as SharedFact))
+    .filter((f) => !f.archived)
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit);
+}
+
+/** Arquiva um fato (sai do recall, mas continua no banco — reversível). */
+export async function archiveSharedFact(id: string): Promise<void> {
+  await sharedFactsCol.doc(id).set({ archived: true, archivedAt: Date.now() }, { merge: true });
+}
+
+// ===================== Perfil vivo (memória consolidada) =====================
+
+/**
+ * Perfil destilado do contato (rotina, projetos, preferências), reconstruído
+ * pela manutenção noturna e injetado no system prompt de todos os subagentes.
+ * Estrutura: profiles/{contato} = { text, updatedAt }.
+ */
+const profilesCol = db.collection('profiles');
+
+export async function saveProfile(contact: string, text: string): Promise<void> {
+  await profilesCol.doc(contact).set({ text, updatedAt: Date.now() });
+}
+
+export async function getProfile(contact: string): Promise<string | null> {
+  const doc = await profilesCol.doc(contact).get();
+  if (!doc.exists) return null;
+  return (doc.data() as { text?: string }).text || null;
 }
 
 // ===================== Log pesquisável de conversas =====================
@@ -376,6 +415,71 @@ export async function getConversationLog(
     .map((d) => ({ id: d.id, ...d.data() } as ConversationEntry))
     .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, limit);
+}
+
+// ===================== F9: aprendizado de roteamento =====================
+
+/**
+ * Possível erro de roteamento: o Igor corrigiu logo após uma troca. A detecção
+ * é generosa (correção pode ser de conteúdo); o job semanal usa o LLM para
+ * separar o joio e sugerir keywords.
+ */
+export interface RouteMiss {
+  id: string;
+  contact: string;
+  /** A mensagem que pode ter sido mal roteada. */
+  text: string;
+  routedToId: string;
+  routedToName: string;
+  /** A correção do Igor que disparou o registro. */
+  correction: string;
+  /** Para onde a correção foi roteada, quando DIFERENTE — palpite da rota certa. */
+  suggestedCorrectName?: string;
+  at: number;
+}
+
+export async function recordRouteMiss(data: Omit<RouteMiss, 'id'>): Promise<void> {
+  await routeMissesCol.add(data);
+}
+
+/** Misses desde `sinceMs`, em ordem cronológica (range num campo só — sem índice). */
+export async function getRouteMisses(sinceMs: number): Promise<RouteMiss[]> {
+  const snap = await routeMissesCol.where('at', '>=', sinceMs).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as RouteMiss))
+    .sort((a, b) => a.at - b.at);
+}
+
+/** Sugestão de keywords por subagente, aguardando confirmação do Igor. */
+export interface RouteSuggestion {
+  id: string;
+  createdAt: number;
+  applied: boolean;
+  items: { subagentId: string; subagentName: string; keywords: string[] }[];
+}
+
+export async function saveRouteSuggestion(
+  items: RouteSuggestion['items']
+): Promise<void> {
+  // Uma pendente por vez: a nova substitui (marca como aplicada) as antigas,
+  // senão um "aplica" tardio executaria sugestões de semanas atrás.
+  const old = await routeSuggestionsCol.where('applied', '==', false).get();
+  for (const d of old.docs) {
+    await d.ref.set({ applied: true }, { merge: true });
+  }
+  await routeSuggestionsCol.add({ items, createdAt: Date.now(), applied: false });
+}
+
+export async function getPendingRouteSuggestion(): Promise<RouteSuggestion | null> {
+  const snap = await routeSuggestionsCol.where('applied', '==', false).get();
+  const all = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as RouteSuggestion))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return all[0] ?? null;
+}
+
+export async function markRouteSuggestionApplied(id: string): Promise<void> {
+  await routeSuggestionsCol.doc(id).set({ applied: true }, { merge: true });
 }
 
 // ===================== Métricas de uso =====================
@@ -496,6 +600,23 @@ export async function updateAgendaItem(
 
 export async function deleteAgendaItem(id: string): Promise<void> {
   await agendaCol.doc(id).delete();
+}
+
+/**
+ * Itens concluídos COM duração medida (startedAt + completedAt), mais recentes
+ * primeiro — a matéria-prima da calibração de estimativas. Igualdade única
+ * (status == done) para não exigir índice composto; o resto filtra em memória.
+ */
+export async function getMeasuredAgendaItems(
+  sinceMs: number,
+  limit = 50
+): Promise<AgendaItem[]> {
+  const snap = await agendaCol.where('status', '==', 'done').get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as AgendaItem))
+    .filter((i) => i.startedAt != null && i.completedAt != null && i.completedAt >= sinceMs)
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+    .slice(0, limit);
 }
 
 // ===================== Modo foco =====================

@@ -41,6 +41,8 @@ export interface Task {
   completedAt?: number | null;
   /** Recorrência: o lembrete se reagenda em vez de morrer ao disparar. null = sem. */
   recurrence?: Recurrence | null;
+  /** Quantas vezes foi adiado (detector de procrastinação). */
+  postponedCount?: number;
 }
 
 /** Tipo de item da agenda. */
@@ -91,6 +93,21 @@ export interface AgendaItem {
    * do Igor; este campo garante que a pergunta seja feita uma única vez.
    */
   nudgedAt?: number;
+  /** Epoch ms de quando o item entrou em andamento (mede duração real). */
+  startedAt?: number;
+  /** Quantas vezes foi empurrado para mais tarde (detector de procrastinação). */
+  postponedCount?: number;
+  /**
+   * Epoch ms da conclusão confirmada. O par startedAt→completedAt é a duração
+   * REAL da tarefa, usada para calibrar as estimativas do agente. null = não.
+   */
+  completedAt?: number | null;
+  /**
+   * Id do evento no Google Calendar quando o item é espelhado (F10). Edições
+   * e remoções pelo agente propagam para o Google; o sync usa este id para
+   * deduplicar e seguir mudanças feitas direto no calendário.
+   */
+  gcalEventId?: string;
 }
 
 /**

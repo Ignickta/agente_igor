@@ -1,21 +1,27 @@
 import { Subagent } from '../types';
 import { config } from '../config';
-import { chat, ChatMessage } from '../services/openai';
+import { chatJson, ChatMessage } from '../services/openai';
 import {
   listSubagents,
   getRecentMemory,
   appendMemory,
   recordMessage,
+  recordRouteMiss,
   updateAgendaItem,
   getTask,
   updateTask,
 } from '../services/firebase';
 import { runSubagent, ORCHESTRATOR_NAME } from './subagents';
 import { tryHandleCommand } from './commands';
-import { logExchange, recentExchanges } from '../services/memory';
+import {
+  logExchange,
+  recentExchanges,
+  relevantPastExchanges,
+  formatEntry,
+} from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
+import { routeByEmbedding, hintFrom, EmbeddingRoute } from './embeddingRouter';
 import { beginUndoGroup, recordUndo } from './undo';
-import { dayKey, timeKey } from '../services/datetime';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
 const DONE_PHRASES = [
@@ -98,21 +104,30 @@ function leftoverContentWords(lower: string): string[] {
 }
 
 /**
- * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA
- * (somente frases de conclusão + fillers, sem outras palavras de conteúdo) e há
- * um item em andamento na agenda. Evita falsos positivos como "tá pronto pra
- * começar". Retorna a resposta a enviar, ou null se não se aplica.
+ * Decide se a mensagem é uma confirmação PURA de conclusão (somente frases de
+ * conclusão + fillers, sem outras palavras de conteúdo). Pura e exportada para
+ * os evals de regressão (npm run eval) — falso positivo aqui conclui tarefa
+ * errada, então cada mudança nas listas acima precisa passar pelos casos.
  */
-async function tryAdvanceAgenda(contact: string, text: string): Promise<string | null> {
+export function isPureDoneConfirmation(text: string): boolean {
   const lower = text.trim().toLowerCase();
   // Só dispara para mensagens curtas, evitando falsos positivos em textos longos.
-  if (lower.length > 40) return null;
+  if (lower.length > 40) return false;
   // Uma pergunta não é uma confirmação de conclusão (ex: "feito o quê?").
-  if (lower.includes('?')) return null;
-  if (!DONE_REGEX.test(lower)) return null;
+  if (lower.includes('?')) return false;
+  if (!DONE_REGEX.test(lower)) return false;
   // Blindagem: a mensagem precisa ser SÓ a confirmação. Se sobrar qualquer
   // palavra de conteúdo após remover frases de conclusão e fillers, não dispara.
-  if (leftoverContentWords(lower).length > 0) return null;
+  return leftoverContentWords(lower).length === 0;
+}
+
+/**
+ * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA e há
+ * um item em andamento na agenda. Retorna a resposta a enviar, ou null se não
+ * se aplica.
+ */
+async function tryAdvanceAgenda(contact: string, text: string): Promise<string | null> {
+  if (!isPureDoneConfirmation(text)) return null;
 
   const active = await getActiveItem();
   if (!active || active.status !== 'in_progress') return null;
@@ -127,7 +142,12 @@ async function tryAdvanceAgenda(contact: string, text: string): Promise<string |
 
   await advanceTask(active);
   recordUndo(contact, `a conclusão de "${active.title}" (atalho "feito")`, async () => {
-    await updateAgendaItem(active.id, { status: active.status });
+    // Restaura também o completedAt: desfazer a conclusão não pode deixar uma
+    // "duração medida" órfã contaminando a calibração de estimativas.
+    await updateAgendaItem(active.id, {
+      status: active.status,
+      completedAt: active.completedAt ?? null,
+    });
     if (active.taskId && taskPrev) await updateTask(active.taskId, taskPrev);
   });
   // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.
@@ -149,7 +169,7 @@ const CORRECTION_REGEX =
  * pode cair num subagente de negócio que não tem como criar nada — e responde
  * texto bonito sem persistir (foi o bug do bloco da tarde de 10/06/2026).
  */
-const AGENDA_REGEX =
+export const AGENDA_REGEX =
   /\b(agenda|agendar?|agende|cronograma|compromissos?|lembretes?|me lembra|remarcar?|remarque|reagendar?|reagende|adiar?|adia|hor[áa]rios?|encaixar?|encaixe|reorganizar?|reorganize|planeja(r)? (o |meu )?dia|minha (tarde|manh[ãa]|semana|noite)|meu (dia|m[êe]s))\b/i;
 
 /**
@@ -160,13 +180,16 @@ const AGENDA_REGEX =
 const lastRouteByContact = new Map<string, { subagentId: string; at: number }>();
 const LAST_ROUTE_TTL_MS = 30 * 60 * 1000;
 
+/** Janela em que uma correção ainda aponta para a troca anterior (F9). */
+const ROUTE_MISS_WINDOW_MS = 5 * 60 * 1000;
+
 /**
  * Tenta um roteamento rápido por palavras-chave antes de gastar uma
  * chamada de LLM. Retorna o melhor candidato com seu score, ou null.
  * Só o caller decide se o score basta — 1 keyword solta ("hoje", "agenda")
  * é fraca demais para decidir sozinha e ia parar no subagente errado.
  */
-function routeByKeywords(
+export function routeByKeywords(
   text: string,
   subagents: Subagent[]
 ): { sub: Subagent; score: number } | null {
@@ -188,7 +211,7 @@ function routeByKeywords(
  * Usa o LLM para escolher o subagente quando as palavras-chave não bastam.
  * Considera o histórico recente para manter continuidade de assunto.
  */
-async function routeByLLM(
+export async function routeByLLM(
   text: string,
   subagents: Subagent[],
   recentContext: string,
@@ -213,7 +236,7 @@ ambígua ou continuação do mesmo assunto (ex: "e amanhã?", "muda pra 15h"), M
     {
       role: 'system',
       content: `Você é o roteador de um agente pessoal. Dada a mensagem do usuário e o contexto
-recente, escolha o subagente mais adequado. Responda APENAS com o número da opção, nada mais.
+recente, escolha o subagente mais adequado e responda com o número da opção no campo "numero".
 
 Subagentes disponíveis:
 ${list}
@@ -227,11 +250,22 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
     },
   ];
 
-  const answer = await chat(messages, { temperature: 0, model: config.openai.utilityModel });
-  // Primeiro número da resposta ("2", "Subagente 2"). Concatenar todos os
-  // dígitos era frágil: "1 ou 2" virava 12 e caía no fallback errado.
-  const m = answer.match(/\d+/);
-  const idx = m ? parseInt(m[0], 10) - 1 : -1;
+  // Structured Output: o modelo é obrigado a devolver UM inteiro — acaba a era
+  // de extrair número de texto livre ("1 ou 2" já virou 12 e roteou errado).
+  const result = await chatJson<{ numero: number }>(messages, {
+    name: 'roteamento',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['numero'],
+      properties: {
+        numero: { type: 'integer', description: 'Número do subagente escolhido (1-based)' },
+      },
+    },
+    temperature: 0,
+    model: config.openai.utilityModel,
+  });
+  const idx = result ? result.numero - 1 : -1;
   if (idx >= 0 && idx < subagents.length) return subagents[idx];
   return fallback ?? subagents[0];
 }
@@ -271,12 +305,12 @@ export async function handleMessage(
     return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
   }
 
-  // 1) Roteamento. Pedidos claramente de agenda vão DIRETO para o orquestrador
-  //    (único subagente com as ferramentas de agenda); keyword só decide sozinha
-  //    com match forte (>= 2); caso contrário o LLM decide com o contexto da
-  //    última conversa, para que continuações curtas ("e amanhã?") fiquem no
-  //    mesmo assunto.
+  // 1) Roteamento, do mais barato ao mais caro:
+  //    regex de agenda → keywords (match forte >= 2) → EMBEDDING (decide quando
+  //    a similaridade é forte e com folga) → LLM com contexto de continuidade,
+  //    para que continuações curtas ("e amanhã?") fiquem no mesmo assunto.
   let target: Subagent | null = null;
+  let via = 'agenda-regex';
   if (AGENDA_REGEX.test(text)) {
     target =
       subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
@@ -285,9 +319,24 @@ export async function handleMessage(
   }
 
   const kw = target ? null : routeByKeywords(text, subagents);
-  if (!target && kw && kw.score >= 2) target = kw.sub;
+  if (!target && kw && kw.score >= 2) {
+    target = kw.sub;
+    via = 'keywords';
+  }
+
+  // 1.5) Embedding: o vetor da mensagem sai do mesmo cache usado pelo RAG e
+  //      pelo recall de fatos logo adiante — não custa chamada extra.
+  let embRoute: EmbeddingRoute | null = null;
+  if (!target) {
+    embRoute = await routeByEmbedding(text, subagents);
+    if (embRoute?.decided) {
+      target = embRoute.sub;
+      via = `embedding ${embRoute.score.toFixed(2)}/+${embRoute.margin.toFixed(2)}`;
+    }
+  }
 
   if (!target) {
+    via = 'llm';
     const last = lastRouteByContact.get(contact);
     let lastSub =
       last && Date.now() - last.at < LAST_ROUTE_TTL_MS
@@ -306,39 +355,63 @@ export async function handleMessage(
     const recentContext = recent
       .map((m) => `${m.role === 'user' ? 'Igor' : 'Agente'}: ${m.content.slice(0, 200)}`)
       .join('\n');
+    // Dica para o LLM: palpite do embedding só quando confiável (top-1 com
+    // margem mínima); senão keyword. Dica ruidosa vicia o LLM no rumo errado.
+    const embHint = hintFrom(embRoute);
     target = await routeByLLM(
       text,
       subagents,
       recentContext,
       lastSub?.name,
-      kw?.sub.name,
-      // Se o LLM falhar/responder lixo, continuidade > keyword > primeiro da lista.
-      lastSub ?? kw?.sub
+      embHint?.name ?? kw?.sub.name,
+      // Se o LLM falhar/responder lixo, continuidade > embedding > keyword > 1º da lista.
+      lastSub ?? embHint ?? kw?.sub
     );
   }
   lastRouteByContact.set(contact, { subagentId: target.id, at: Date.now() });
 
-  console.log(`[central] roteado para: ${target.name}`);
+  console.log(`[central] roteado para: ${target.name} (via ${via})`);
 
   // 2) Carrega a memória DESTE subagente + as trocas recentes GLOBAIS (qualquer
-  //    subagente). As globais entram como contexto para o alvo não perder o fio
-  //    quando a mensagem anterior foi atendida por outra área.
-  const memory = await getRecentMemory(contact, target.id, 12);
-  const globalRecent = await recentExchanges(contact, 4);
+  //    subagente) + RAG automático: as trocas ANTIGAS mais similares à mensagem,
+  //    para o agente "lembrar" sem precisar acertar a tool buscar_no_historico.
+  const [memory, globalRecent, ragHits] = await Promise.all([
+    getRecentMemory(contact, target.id, 12),
+    recentExchanges(contact, 4),
+    relevantPastExchanges(contact, text, 3),
+  ]);
   const crossContext = globalRecent
     .filter((e) => e.subagentId !== target!.id)
-    .map((e) => {
-      const d = new Date(e.timestamp);
-      return (
-        `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\n` +
-        `Igor: ${e.user.slice(0, 300)}\nAgente: ${e.assistant.slice(0, 300)}`
-      );
-    })
+    .map((e) => formatEntry(e, 300))
     .join('\n');
   const isCorrection = CORRECTION_REGEX.test(text);
+
+  // F9: correção rápida = possível erro de roteamento da TROCA ANTERIOR.
+  // Registro generoso (a correção pode ser de conteúdo); o job semanal usa o
+  // LLM para filtrar e sugerir keywords. Se a correção foi roteada para OUTRO
+  // subagente, guarda o palpite da rota certa. Best-effort: nunca bloqueia.
+  const prevExchange = globalRecent[globalRecent.length - 1];
+  if (
+    isCorrection &&
+    prevExchange &&
+    Date.now() - prevExchange.timestamp < ROUTE_MISS_WINDOW_MS
+  ) {
+    recordRouteMiss({
+      contact,
+      text: prevExchange.user.slice(0, 500),
+      routedToId: prevExchange.subagentId,
+      routedToName: prevExchange.subagentName,
+      correction: text.slice(0, 500),
+      ...(prevExchange.subagentId !== target.id
+        ? { suggestedCorrectName: target.name }
+        : {}),
+      at: Date.now(),
+    }).catch((err) => console.error('[central] falha ao registrar route miss:', err));
+  }
   const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
     isCorrection,
     ...(crossContext ? { crossContext } : {}),
+    ...(ragHits.length ? { ragContext: ragHits.join('\n\n') } : {}),
   });
 
   // 3) Persiste memória da conversa nesse subagente (usuário + resposta).

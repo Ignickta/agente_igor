@@ -16,8 +16,12 @@ import {
   createAgendaItem,
   getAgendaItem,
   deleteAgendaItem,
+  getPendingRouteSuggestion,
+  markRouteSuggestionApplied,
+  updateSubagent,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
+import { getProfileCached } from '../maintenance';
 import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { listConnectedApps, describeApp, queryApp } from '../../services/apps';
@@ -34,10 +38,19 @@ import {
   monthlyView,
   upcomingView,
   detectOverload,
+  isLaterSlot,
+  procrastinationWarning,
+  PROCRASTINATION_THRESHOLD,
   dayKey,
   addDays,
 } from '../orchestrator';
 import { parseLocalIso, timeKey } from '../../services/datetime';
+import {
+  calendarEnabled,
+  createCalendarEvent,
+  updateCalendarEvent,
+  deleteCalendarEvent,
+} from '../../services/googleCalendar';
 import type OpenAI from 'openai';
 
 /** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
@@ -213,6 +226,17 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         },
         required: ['fato'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'aplicar_sugestoes_roteamento',
+      description:
+        'Aplica as sugestões PENDENTES de palavras-chave de roteamento (geradas pelo ' +
+        'aprendizado semanal — relatório 🧭). Use SOMENTE quando o Igor confirmar que quer ' +
+        'aplicá-las (ex: "aplica as sugestões de roteamento", "pode aplicar").',
+      parameters: { type: 'object', properties: {}, required: [] },
     },
   },
   {
@@ -573,6 +597,7 @@ const WRITE_TOOLS = new Set([
   'desfazer_ultima_acao',
   'acionar_automacao',
   'salvar_fato',
+  'aplicar_sugestoes_roteamento',
 ]);
 
 /**
@@ -606,17 +631,22 @@ export async function runSubagent(
   contact = '',
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
   depth = 0,
-  opts: { isCorrection?: boolean; crossContext?: string } = {}
+  opts: { isCorrection?: boolean; crossContext?: string; ragContext?: string } = {}
 ): Promise<string> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
+  // O perfil vivo (resumo consolidado pela manutenção noturna) entra sempre,
+  // mesmo quando a mensagem não "puxa" nenhum fato por similaridade.
   let facts: string[] = [];
+  let profile = '';
   if (contact) {
-    const [shared, legacy] = await Promise.all([
+    const [shared, legacy, prof] = await Promise.all([
       recallFacts(contact, userText, 8).catch(() => [] as string[]),
       getFacts(contact, subagent.id, 8),
+      getProfileCached(contact),
     ]);
     facts = [...new Set([...shared, ...legacy])].slice(0, 12);
+    profile = prof;
   }
   const now = new Date();
   const nowStr = now.toLocaleString('pt-BR', { timeZone: config.timezone });
@@ -681,6 +711,10 @@ ${
   incorpore os achados naturalmente à sua resposta — falando como o subagente
   "${subagent.name}", sem colar o texto da pesquisa cru e sem dizer "segundo a pesquisa".
   Cite as fontes brevemente só quando fizer sentido.${
+    profile
+      ? `\n\nPerfil do Igor (resumo consolidado da memória — contexto de fundo, considere sempre):\n${profile}`
+      : ''
+  }${
     facts.length
       ? `\n\nFatos que você sabe sobre o Igor e os projetos dele (memória compartilhada entre as áreas):\n${facts
           .map((f) => `- ${f}`)
@@ -692,6 +726,12 @@ ${
 (use para manter o fio do assunto; mas a fonte da verdade sobre agenda/lembretes são SEMPRE as
 ferramentas — se outra área PROMETEU agendar algo, confirme com listar_lembretes antes de assumir
 que existe):\n${opts.crossContext}`
+      : ''
+  }${
+    opts.ragContext
+      ? `\n\nTrechos de conversas ANTIGAS possivelmente relevantes (recuperados automaticamente por
+similaridade — use se ajudarem a responder; podem estar DESATUALIZADOS: horários e planos antigos
+não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferramentas):\n${opts.ragContext}`
       : ''
   }`;
 
@@ -886,6 +926,7 @@ async function executeTool(
           return 'Recorrência inválida: use diaria, semanal, mensal, dias_uteis ou nenhuma.';
         }
       }
+      let adiamentos = 0;
       if (quando) {
         const when = parseLocalIso(quando);
         if (isNaN(when.getTime())) return 'Horário inválido; use ISO 8601 (2026-06-10T08:30:00).';
@@ -893,6 +934,12 @@ async function executeTool(
         // Rearma o disparo: se o lembrete antigo já tinha tocado (done=true sem
         // completedAt), o novo horário deve tocar de novo.
         if (!task.completedAt) updates.done = false;
+        // F8: empurrar para MAIS TARDE conta como adiamento (ISO UTC compara
+        // lexicograficamente); antecipar não conta.
+        if (updates.remindAt > task.remindAt) {
+          adiamentos = (task.postponedCount ?? 0) + 1;
+          updates.postponedCount = adiamentos;
+        }
       }
       await updateTask(id, updates);
       const prev = {
@@ -900,6 +947,7 @@ async function executeTool(
         remindAt: task.remindAt,
         done: task.done,
         recurrence: task.recurrence ?? null,
+        postponedCount: task.postponedCount ?? 0,
       };
       recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
 
@@ -907,7 +955,11 @@ async function executeTool(
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
         timeZone: config.timezone,
       });
-      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.`;
+      const alerta =
+        adiamentos >= PROCRASTINATION_THRESHOLD
+          ? `\n\n${procrastinationWarning(after.text, adiamentos)}`
+          : '';
+      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.${alerta}`;
     }
 
     if (call.function.name === 'concluir_lembrete') {
@@ -1002,6 +1054,36 @@ async function executeTool(
       return await queryApp(app, colecao, filtros, limite);
     }
 
+    if (call.function.name === 'aplicar_sugestoes_roteamento') {
+      const sug = await getPendingRouteSuggestion();
+      if (!sug) return 'Não há sugestões de roteamento pendentes para aplicar.';
+      const subs = await listSubagents(true);
+      const aplicadas: string[] = [];
+      const anteriores = new Map<string, string[]>();
+      for (const item of sug.items) {
+        const sub = subs.find((s) => s.id === item.subagentId);
+        if (!sub) continue;
+        const atuais = new Set(sub.keywords.map((k) => k.toLowerCase()));
+        const novas = item.keywords.filter((k) => !atuais.has(k.toLowerCase()));
+        if (novas.length === 0) continue;
+        anteriores.set(sub.id, sub.keywords);
+        await updateSubagent(sub.id, { keywords: [...sub.keywords, ...novas] });
+        aplicadas.push(`${sub.name}: +${novas.join(', +')}`);
+      }
+      await markRouteSuggestionApplied(sug.id);
+      if (aplicadas.length === 0) {
+        return 'As sugestões pendentes já estavam cobertas pelas keywords atuais — nada a aplicar.';
+      }
+      recordUndo(contact, 'a aplicação das sugestões de roteamento', async () => {
+        for (const [id, kw] of anteriores) {
+          await updateSubagent(id, { keywords: kw });
+        }
+      });
+      // O descritor do roteador por embedding inclui as keywords, então ele se
+      // recalibra sozinho na próxima mensagem (a chave do cache muda).
+      return `Sugestões aplicadas ✅:\n${aplicadas.join('\n')}`;
+    }
+
     if (call.function.name === 'pesquisar') {
       const tema = String(args.tema || '').trim();
       if (!tema) return 'Tema de pesquisa vazio.';
@@ -1052,11 +1134,13 @@ async function executeTool(
       if (!instrucao) return 'Diga o que devo reorganizar.';
       const data = String(args.data || '').trim() || dayKey();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
-      // Snapshot dos horários do dia para permitir desfazer a reorganização.
+      // Snapshot dos horários do dia para permitir desfazer a reorganização
+      // (inclui o contador de adiamentos, que a realocação pode incrementar).
       const before = (await getAgendaForDay(data)).map((i) => ({
         id: i.id,
         startTime: i.startTime,
         endTime: i.endTime,
+        postponedCount: i.postponedCount ?? 0,
       }));
       const result = await reorganize(instrucao, data);
       recordUndo(contact, `a reorganização da agenda de ${data}`, async () => {
@@ -1064,6 +1148,7 @@ async function executeTool(
           await updateAgendaItem(item.id, {
             startTime: item.startTime,
             endTime: item.endTime,
+            postponedCount: item.postponedCount,
           });
         }
       });
@@ -1106,8 +1191,26 @@ async function executeTool(
         type: 'event',
         createdBy: 'user',
       });
-      recordUndo(contact, `a criação do evento "${titulo}"`, () => deleteAgendaItem(item.id));
-      return `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}.`;
+      // F10: evento FIXO também vai para o Google Calendar (best-effort — a
+      // agenda local funciona igual se o Google falhar). Blocos não-fixos são
+      // planejamento interno e não poluem o calendário.
+      let gcalEventId: string | null = null;
+      if (fixo && calendarEnabled()) {
+        try {
+          gcalEventId = await createCalendarEvent({ title: titulo, date: data, startTime: inicio, endTime: fim });
+          if (gcalEventId) await updateAgendaItem(item.id, { gcalEventId });
+        } catch (err) {
+          console.error('[tool] criar_evento: falha ao criar no Google Calendar:', err);
+        }
+      }
+      recordUndo(contact, `a criação do evento "${titulo}"`, async () => {
+        await deleteAgendaItem(item.id);
+        if (gcalEventId) await deleteCalendarEvent(gcalEventId).catch(() => undefined);
+      });
+      return (
+        `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}` +
+        `${gcalEventId ? ' — também adicionado ao seu Google Calendar' : ''}.`
+      );
     }
 
     if (call.function.name === 'listar_itens_agenda') {
@@ -1137,7 +1240,9 @@ async function executeTool(
       if (fim && !/^\d{2}:\d{2}$/.test(fim)) return 'Fim inválido; use HH:mm.';
       if (data && !/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
 
-      const updates: Partial<Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date'>> = {};
+      const updates: Partial<
+        Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date' | 'postponedCount'>
+      > = {};
       if (titulo) updates.title = titulo;
       if (inicio) updates.startTime = inicio;
       if (fim) updates.endTime = fim;
@@ -1145,17 +1250,52 @@ async function executeTool(
       if (Object.keys(updates).length === 0) {
         return 'Nada para alterar: informe título, horários e/ou data.';
       }
+      // F8: mover para um slot MAIS TARDE (outro dia ou hora maior) é adiamento.
+      let adiamentosItem = 0;
+      if (
+        (inicio || data) &&
+        isLaterSlot(item.date, item.startTime, data || item.date, inicio || item.startTime)
+      ) {
+        adiamentosItem = (item.postponedCount ?? 0) + 1;
+        updates.postponedCount = adiamentosItem;
+      }
       await updateAgendaItem(id, updates);
-      recordUndo(contact, `a edição do item "${item.title}"`, () =>
-        updateAgendaItem(id, {
+      const after = { ...item, ...updates };
+      // F10: item espelhado → propaga a edição para o Google Calendar.
+      if (item.gcalEventId && calendarEnabled()) {
+        try {
+          await updateCalendarEvent(item.gcalEventId, {
+            ...(titulo ? { title: after.title } : {}),
+            date: after.date,
+            startTime: after.startTime,
+            endTime: after.endTime,
+          });
+        } catch (err) {
+          console.error('[tool] editar_item_agenda: falha ao propagar para o Google Calendar:', err);
+        }
+      }
+      recordUndo(contact, `a edição do item "${item.title}"`, async () => {
+        await updateAgendaItem(id, {
           title: item.title,
           startTime: item.startTime,
           endTime: item.endTime,
           date: item.date,
-        })
-      );
-      const after = { ...item, ...updates };
-      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.`;
+          postponedCount: item.postponedCount ?? 0,
+        });
+        if (item.gcalEventId && calendarEnabled()) {
+          await updateCalendarEvent(item.gcalEventId, {
+            title: item.title,
+            date: item.date,
+            startTime: item.startTime,
+            endTime: item.endTime,
+          }).catch(() => undefined);
+        }
+      });
+      const alertaItem =
+        adiamentosItem >= PROCRASTINATION_THRESHOLD
+          ? `\n\n${procrastinationWarning(after.title, adiamentosItem)}`
+          : '';
+      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.${alertaItem}`;
     }
 
     if (call.function.name === 'remover_item_agenda') {
@@ -1164,7 +1304,28 @@ async function executeTool(
       const item = await getAgendaItem(id);
       if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
       await deleteAgendaItem(id);
+      // F10: item espelhado → cancela o evento no Google Calendar também
+      // (senão o próximo sync recriaria o item aqui).
+      let gcalRemovido = false;
+      if (item.gcalEventId && calendarEnabled()) {
+        try {
+          await deleteCalendarEvent(item.gcalEventId);
+          gcalRemovido = true;
+        } catch (err) {
+          console.error('[tool] remover_item_agenda: falha ao remover do Google Calendar:', err);
+        }
+      }
       recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
+        // Recria no Google primeiro (id novo) para religar o espelho.
+        let novoGcalId: string | null = null;
+        if (gcalRemovido) {
+          novoGcalId = await createCalendarEvent({
+            title: item.title,
+            date: item.date,
+            startTime: item.startTime,
+            endTime: item.endTime,
+          }).catch(() => null);
+        }
         await createAgendaItem({
           title: item.title,
           date: item.date,
@@ -1178,9 +1339,13 @@ async function executeTool(
           ...(item.subagentId ? { subagentId: item.subagentId } : {}),
           ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
           ...(item.taskId ? { taskId: item.taskId } : {}),
+          ...(novoGcalId ? { gcalEventId: novoGcalId } : {}),
         });
       });
-      return `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime}).`;
+      return (
+        `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime})` +
+        `${gcalRemovido ? ' — removido também do Google Calendar' : ''}.`
+      );
     }
 
     if (call.function.name === 'concluir_tarefa_atual') {

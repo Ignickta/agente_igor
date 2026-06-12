@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
 import { getDueTasks, claimDueTask, acquireJobLock, cleanupJobLocks } from './services/firebase';
-import { dayKey, timeKey } from './services/datetime';
+import { dayKey, timeKey, addDays } from './services/datetime';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 import { processFocusExpirations } from './agents/focus';
 import {
@@ -12,6 +12,10 @@ import {
   sendSubagentWeeklyReports,
   sendPendingFollowUp,
 } from './agents/reports';
+import { runMemoryMaintenance, bootstrapProfile } from './agents/maintenance';
+import { sendRouteLearningReport } from './agents/routeLearning';
+import { syncCalendarRange } from './agents/calendarSync';
+import { calendarEnabled } from './services/googleCalendar';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -55,6 +59,48 @@ export function startScheduler(): void {
     console.warn('[scheduler] OWNER_PHONE não definido — mensagens proativas desativadas.');
     console.log('[scheduler] reconexão automática ativa (a cada 5 min).');
     return;
+  }
+
+  // Manutenção da memória — todo dia às 03:30 (madrugada, sem mensagens):
+  // consolida fatos (duplicados, correções, expirados) e reconstrói o perfil
+  // vivo do Igor que entra no system prompt de todos os subagentes.
+  cron.schedule(
+    '30 3 * * *',
+    () => {
+      withJobLock('memory_maintenance', dayKey(), runMemoryMaintenance).catch((err) =>
+        console.error('[scheduler] falha na manutenção da memória:', err)
+      );
+    },
+    opts
+  );
+
+  // Primeiro perfil: se o dono ainda não tem um, gera no boot sem esperar as
+  // 03:30. Checa a existência antes de gastar LLM — re-deploys não custam nada.
+  bootstrapProfile().catch((err) =>
+    console.error('[scheduler] falha no bootstrap do perfil:', err)
+  );
+
+  // F10: sync com o Google Calendar a cada 30 min (hoje + amanhã) — pega
+  // eventos criados/movidos direto no celular entre os horários dos outros
+  // jobs. Uma listagem por execução; só agendado com GOOGLE_CALENDAR_ID.
+  if (calendarEnabled()) {
+    cron.schedule(
+      '*/30 * * * *',
+      () => {
+        const periodKey = `${dayKey()}T${timeKey()}`;
+        withJobLock('gcal_sync', periodKey, () =>
+          syncCalendarRange(dayKey(), addDays(dayKey(), 1))
+        ).catch((err) => console.error('[scheduler] falha no sync do calendário:', err));
+      },
+      opts
+    );
+    // Uma vez no boot também, para a agenda já acordar espelhada. Com trava
+    // em janela de 10 min: num deploy, o container velho e o novo não rodam
+    // a reconciliação ao mesmo tempo (criaria espelhos duplicados).
+    const bootKey = `${dayKey()}T${timeKey().slice(0, 4)}0`;
+    withJobLock('gcal_sync_boot', bootKey, () =>
+      syncCalendarRange(dayKey(), addDays(dayKey(), 7))
+    ).catch((err) => console.error('[scheduler] falha no sync inicial do calendário:', err));
   }
 
   // Bom dia + cronograma do dia — todo dia às 07:00.
@@ -107,6 +153,19 @@ export function startScheduler(): void {
     () => {
       withJobLock('weekly_review', dayKey(), sendWeeklyReview).catch((err) =>
         console.error('[scheduler] falha na revisão semanal:', err)
+      );
+    },
+    opts
+  );
+
+  // Aprendizado de roteamento — todo domingo às 19:00: analisa as correções
+  // da semana, separa rota errada de correção de conteúdo e sugere keywords
+  // (aplicação só com confirmação do Igor). Silencioso quando não há nada.
+  cron.schedule(
+    '0 19 * * 0',
+    () => {
+      withJobLock('route_learning', dayKey(), sendRouteLearningReport).catch((err) =>
+        console.error('[scheduler] falha no aprendizado de roteamento:', err)
       );
     },
     opts

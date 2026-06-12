@@ -103,6 +103,26 @@ export const config = {
     ) as Record<string, string>,
     token: process.env.N8N_WEBHOOK_TOKEN || '',
   },
+  /**
+   * Limiares do roteamento por embedding (calibrados com a API real; ver
+   * suíte live dos evals). O embedding decide sozinho quando a similaridade
+   * com o 1º subagente >= minSim E a folga sobre o 2º >= minMargin; abaixo
+   * disso vira só dica para o roteador LLM.
+   */
+  embeddingRouting: {
+    minSim: parseFloat(process.env.EMB_ROUTE_MIN_SIM || '0.45'),
+    minMargin: parseFloat(process.env.EMB_ROUTE_MARGIN || '0.08'),
+  },
+  /**
+   * F10: integração com o Google Calendar via a MESMA service account do
+   * Firebase. Para ativar: habilite a Calendar API no projeto Google Cloud do
+   * Firebase, compartilhe a agenda com o e-mail da service account (permissão
+   * "Fazer alterações nos eventos") e defina GOOGLE_CALENDAR_ID (normalmente
+   * seu e-mail do Google). Vazio = integração desligada.
+   */
+  googleCalendar: {
+    calendarId: process.env.GOOGLE_CALENDAR_ID || '',
+  },
   ownerPhone: process.env.OWNER_PHONE || '',
   timezone: process.env.TZ || 'America/Sao_Paulo',
   adminToken: process.env.ADMIN_TOKEN || '',
