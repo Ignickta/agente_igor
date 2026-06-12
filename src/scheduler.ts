@@ -12,6 +12,7 @@ import {
   sendSubagentWeeklyReports,
   sendPendingFollowUp,
 } from './agents/reports';
+import { runMemoryMaintenance, bootstrapProfile } from './agents/maintenance';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -56,6 +57,25 @@ export function startScheduler(): void {
     console.log('[scheduler] reconexão automática ativa (a cada 5 min).');
     return;
   }
+
+  // Manutenção da memória — todo dia às 03:30 (madrugada, sem mensagens):
+  // consolida fatos (duplicados, correções, expirados) e reconstrói o perfil
+  // vivo do Igor que entra no system prompt de todos os subagentes.
+  cron.schedule(
+    '30 3 * * *',
+    () => {
+      withJobLock('memory_maintenance', dayKey(), runMemoryMaintenance).catch((err) =>
+        console.error('[scheduler] falha na manutenção da memória:', err)
+      );
+    },
+    opts
+  );
+
+  // Primeiro perfil: se o dono ainda não tem um, gera no boot sem esperar as
+  // 03:30. Checa a existência antes de gastar LLM — re-deploys não custam nada.
+  bootstrapProfile().catch((err) =>
+    console.error('[scheduler] falha no bootstrap do perfil:', err)
+  );
 
   // Bom dia + cronograma do dia — todo dia às 07:00.
   // O orquestrador gera a agenda a partir das tarefas pendentes e envia ao dono.

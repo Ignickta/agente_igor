@@ -320,6 +320,12 @@ export interface SharedFact {
   /** Subagente que registrou o fato (origem), para contexto. */
   subagentId?: string;
   createdAt: number;
+  /**
+   * Arquivado pela consolidação noturna (duplicado, corrigido ou expirado).
+   * Arquivar é reversível — fatos nunca são apagados de verdade.
+   */
+  archived?: boolean;
+  archivedAt?: number;
 }
 
 export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<void> {
@@ -333,13 +339,38 @@ export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<void
   await sharedFactsCol.add(data);
 }
 
-/** Todos os fatos compartilhados do contato, mais recentes primeiro. */
+/** Fatos compartilhados ATIVOS do contato (não arquivados), mais recentes primeiro. */
 export async function getSharedFacts(contact: string, limit = 400): Promise<SharedFact[]> {
   const snap = await sharedFactsCol.where('contact', '==', contact).get();
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as SharedFact))
+    .filter((f) => !f.archived)
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit);
+}
+
+/** Arquiva um fato (sai do recall, mas continua no banco — reversível). */
+export async function archiveSharedFact(id: string): Promise<void> {
+  await sharedFactsCol.doc(id).set({ archived: true, archivedAt: Date.now() }, { merge: true });
+}
+
+// ===================== Perfil vivo (memória consolidada) =====================
+
+/**
+ * Perfil destilado do contato (rotina, projetos, preferências), reconstruído
+ * pela manutenção noturna e injetado no system prompt de todos os subagentes.
+ * Estrutura: profiles/{contato} = { text, updatedAt }.
+ */
+const profilesCol = db.collection('profiles');
+
+export async function saveProfile(contact: string, text: string): Promise<void> {
+  await profilesCol.doc(contact).set({ text, updatedAt: Date.now() });
+}
+
+export async function getProfile(contact: string): Promise<string | null> {
+  const doc = await profilesCol.doc(contact).get();
+  if (!doc.exists) return null;
+  return (doc.data() as { text?: string }).text || null;
 }
 
 // ===================== Log pesquisável de conversas =====================

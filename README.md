@@ -174,6 +174,21 @@ Exemplo:
 - `subagents/{id}` — definições dos subagentes.
 - `memory/{contato}/messages/{id}` — histórico de conversa.
 - `tasks/{id}` — lembretes/tarefas agendadas.
+- `shared_facts/{id}` — fatos de longo prazo (pool compartilhado, com embedding).
+- `profiles/{contato}` — perfil vivo destilado da memória (injetado em todo prompt).
+
+## 🧹 Manutenção noturna da memória
+
+Todo dia às **03:30** um job silencioso cuida da memória de longo prazo:
+
+1. **Consolidação dos fatos** — funde duplicados, aplica correções (um fato
+   "Correção: ..." substitui o fato errado) e arquiva fatos pontuais já expirados.
+   Arquivar é reversível (flag `archived`); nada é apagado.
+2. **Perfil vivo** — destila dos fatos um resumo do Igor (rotina, projetos,
+   preferências, decisões vigentes) salvo em `profiles/{contato}` e injetado no
+   system prompt de **todos** os subagentes, em toda mensagem.
+
+No boot, se ainda não existir perfil, ele é gerado uma única vez automaticamente.
 
 ## 🚀 Deploy na VPS (Docker)
 

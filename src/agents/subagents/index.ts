@@ -18,6 +18,7 @@ import {
   deleteAgendaItem,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
+import { getProfileCached } from '../maintenance';
 import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { listConnectedApps, describeApp, queryApp } from '../../services/apps';
@@ -610,13 +611,18 @@ export async function runSubagent(
 ): Promise<string> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
+  // O perfil vivo (resumo consolidado pela manutenção noturna) entra sempre,
+  // mesmo quando a mensagem não "puxa" nenhum fato por similaridade.
   let facts: string[] = [];
+  let profile = '';
   if (contact) {
-    const [shared, legacy] = await Promise.all([
+    const [shared, legacy, prof] = await Promise.all([
       recallFacts(contact, userText, 8).catch(() => [] as string[]),
       getFacts(contact, subagent.id, 8),
+      getProfileCached(contact),
     ]);
     facts = [...new Set([...shared, ...legacy])].slice(0, 12);
+    profile = prof;
   }
   const now = new Date();
   const nowStr = now.toLocaleString('pt-BR', { timeZone: config.timezone });
@@ -681,6 +687,10 @@ ${
   incorpore os achados naturalmente à sua resposta — falando como o subagente
   "${subagent.name}", sem colar o texto da pesquisa cru e sem dizer "segundo a pesquisa".
   Cite as fontes brevemente só quando fizer sentido.${
+    profile
+      ? `\n\nPerfil do Igor (resumo consolidado da memória — contexto de fundo, considere sempre):\n${profile}`
+      : ''
+  }${
     facts.length
       ? `\n\nFatos que você sabe sobre o Igor e os projetos dele (memória compartilhada entre as áreas):\n${facts
           .map((f) => `- ${f}`)
