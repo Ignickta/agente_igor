@@ -1,6 +1,6 @@
 import { Subagent } from '../types';
 import { config } from '../config';
-import { chat, ChatMessage } from '../services/openai';
+import { chatJson, ChatMessage } from '../services/openai';
 import {
   listSubagents,
   getRecentMemory,
@@ -213,7 +213,7 @@ ambígua ou continuação do mesmo assunto (ex: "e amanhã?", "muda pra 15h"), M
     {
       role: 'system',
       content: `Você é o roteador de um agente pessoal. Dada a mensagem do usuário e o contexto
-recente, escolha o subagente mais adequado. Responda APENAS com o número da opção, nada mais.
+recente, escolha o subagente mais adequado e responda com o número da opção no campo "numero".
 
 Subagentes disponíveis:
 ${list}
@@ -227,11 +227,22 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
     },
   ];
 
-  const answer = await chat(messages, { temperature: 0, model: config.openai.utilityModel });
-  // Primeiro número da resposta ("2", "Subagente 2"). Concatenar todos os
-  // dígitos era frágil: "1 ou 2" virava 12 e caía no fallback errado.
-  const m = answer.match(/\d+/);
-  const idx = m ? parseInt(m[0], 10) - 1 : -1;
+  // Structured Output: o modelo é obrigado a devolver UM inteiro — acaba a era
+  // de extrair número de texto livre ("1 ou 2" já virou 12 e roteou errado).
+  const result = await chatJson<{ numero: number }>(messages, {
+    name: 'roteamento',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['numero'],
+      properties: {
+        numero: { type: 'integer', description: 'Número do subagente escolhido (1-based)' },
+      },
+    },
+    temperature: 0,
+    model: config.openai.utilityModel,
+  });
+  const idx = result ? result.numero - 1 : -1;
   if (idx >= 0 && idx < subagents.length) return subagents[idx];
   return fallback ?? subagents[0];
 }

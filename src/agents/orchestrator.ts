@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { chat, ChatMessage } from '../services/openai';
+import { chat, chatJson, ChatMessage } from '../services/openai';
 import { sendText } from '../services/evolution';
 import {
   listTasks,
@@ -62,34 +62,57 @@ const TYPE_EMOJI: Record<AgendaItem['type'], string> = {
 
 // ===================== Geração do cronograma =====================
 
-/** Resultado bruto que o LLM deve devolver para cada item planejado. */
+/**
+ * Resultado bruto que o LLM deve devolver para cada item planejado. Campos
+ * opcionais são `| null` por exigência do modo estrito de Structured Outputs
+ * (todo campo é required; opcional = união com null).
+ */
 interface PlannedItem {
   title: string;
   startTime: string;
   endTime: string;
   priority: number;
   type: AgendaItem['type'];
-  estimatedMinutes?: number;
-  notes?: string;
-  subagentId?: string;
+  estimatedMinutes?: number | null;
+  notes?: string | null;
+  subagentId?: string | null;
 }
 
-/**
- * Extrai um array JSON da resposta do modelo, tolerando cercas de código
- * (```json ... ```) e texto ao redor.
- */
-function parseJsonArray<T>(raw: string): T[] {
-  const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const start = cleaned.indexOf('[');
-  const end = cleaned.lastIndexOf(']');
-  if (start === -1 || end === -1) return [];
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
-}
+/** Schema estrito do cronograma gerado (raiz precisa ser objeto, não array). */
+const SCHEDULE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['itens'],
+  properties: {
+    itens: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'title',
+          'startTime',
+          'endTime',
+          'priority',
+          'type',
+          'estimatedMinutes',
+          'notes',
+          'subagentId',
+        ],
+        properties: {
+          title: { type: 'string' },
+          startTime: { type: 'string', description: 'HH:mm' },
+          endTime: { type: 'string', description: 'HH:mm' },
+          priority: { type: 'integer', description: '2 (mais urgente) a 5 (menos)' },
+          type: { type: 'string', enum: ['task', 'event', 'research'] },
+          estimatedMinutes: { type: ['integer', 'null'] },
+          notes: { type: ['string', 'null'] },
+          subagentId: { type: ['string', 'null'] },
+        },
+      },
+    },
+  },
+};
 
 // ===================== F10: aprendizado de padrões =====================
 
@@ -227,11 +250,8 @@ respeitando horário comercial (08:00–19:00) e deixando intervalos curtos quan
 Se a tarefa trouxer "estimatedMinutes", use-o para dimensionar o bloco (start→end). Quando o
 histórico indicar um período mais produtivo, prefira alocar as tarefas mais importantes nele.
 
-Classifique cada item em type: "task", "event" ou "research".
-
-Responda APENAS com um array JSON, sem texto fora dele. Cada elemento:
-{ "title": string, "startTime": "HH:mm", "endTime": "HH:mm", "priority": number (2-5),
-  "type": "task"|"event"|"research", "estimatedMinutes"?: number, "notes"?: string, "subagentId"?: string }`;
+Classifique cada item em type: "task", "event" ou "research". Responda com a lista de
+itens planejados no campo "itens" (priority de 2 a 5).`;
 
   const user = `Itens FIXOS (não mexer):
 ${fixedDesc}
@@ -245,15 +265,19 @@ ${memoryContext || '(sem contexto adicional)'}
 Padrões aprendidos do histórico:
 ${patterns || '(sem histórico suficiente)'}
 
-Gere o cronograma dos itens NÃO-fixos em JSON:`;
+Gere o cronograma dos itens NÃO-fixos:`;
 
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
     { role: 'user', content: user },
   ];
 
-  const answer = await chat(messages, { temperature: 0 });
-  const planned = parseJsonArray<PlannedItem>(answer);
+  const result = await chatJson<{ itens: PlannedItem[] }>(messages, {
+    name: 'cronograma',
+    schema: SCHEDULE_SCHEMA,
+    temperature: 0,
+  });
+  const planned = result?.itens ?? [];
 
   // Defesa: o modelo pode reemitir um item fixo (que foi passado só como
   // contexto) ou repetir um mesmo item dentro do próprio JSON. Não persistimos
@@ -336,20 +360,29 @@ export async function detectOverload(date = dayKey()): Promise<string | null> {
   const system =
     'Você ajuda a evitar sobrecarga. Dada a lista de tarefas realocáveis do dia (menos ' +
     'prioritárias primeiro), escolha as que devem ir para amanhã até a carga caber no limite. ' +
-    'Responda APENAS com um array JSON de títulos exatos a realocar: ["título 1", "título 2"].';
+    'Responda com os títulos EXATOS a realocar no campo "titulos".';
   const user = `Carga do dia: ${totalMin} min (limite ${cap}). Excesso a remover: ${totalMin - cap} min.
 Tarefas realocáveis:
 ${JSON.stringify(cand, null, 2)}
-Quais realocar para amanhã (JSON)?`;
+Quais realocar para amanhã?`;
 
-  const answer = await chat(
+  const result = await chatJson<{ titulos: string[] }>(
     [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    { temperature: 0 }
+    {
+      name: 'sobrecarga',
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['titulos'],
+        properties: { titulos: { type: 'array', items: { type: 'string' } } },
+      },
+      temperature: 0,
+    }
   );
-  const toMove = parseJsonArray<string>(answer);
+  const toMove = result?.titulos ?? [];
   const lista = (toMove.length ? toMove : cand.slice(0, 1).map((c) => c.title))
     .map((t) => `• ${t}`)
     .join('\n');
@@ -701,25 +734,47 @@ Regras:
 - Reencaixe os demais sem sobreposição, respeitando o pedido do usuário.
 - Não invente itens novos nem remova existentes; apenas ajuste startTime/endTime.
 
-Responda APENAS com um array JSON: [{ "id": string, "startTime": "HH:mm", "endTime": "HH:mm" }]
-incluindo TODOS os itens (mesmo os que não mudaram).`;
+Responda com TODOS os itens (mesmo os que não mudaram) no campo "itens".`;
 
   const user = `Agenda atual:
 ${JSON.stringify(current, null, 2)}
 
 Pedido do usuário: "${instruction}"
 
-Novo cronograma em JSON:`;
+Novo cronograma:`;
 
-  const answer = await chat(
+  const result = await chatJson<{ itens: { id: string; startTime: string; endTime: string }[] }>(
     [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    { temperature: 0 }
+    {
+      name: 'reorganizacao',
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['itens'],
+        properties: {
+          itens: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['id', 'startTime', 'endTime'],
+              properties: {
+                id: { type: 'string' },
+                startTime: { type: 'string', description: 'HH:mm' },
+                endTime: { type: 'string', description: 'HH:mm' },
+              },
+            },
+          },
+        },
+      },
+      temperature: 0,
+    }
   );
 
-  const updates = parseJsonArray<{ id: string; startTime: string; endTime: string }>(answer);
+  const updates = result?.itens ?? [];
 
   // Honestidade antes de tudo: se o modelo não devolveu um plano utilizável,
   // NADA mudou — dizer "reorganizei" aqui seria mentira (mesma classe do bug

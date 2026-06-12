@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { chat, embed } from '../services/openai';
+import { chat, chatJson, embed } from '../services/openai';
 import {
   getSharedFacts,
   archiveSharedFact,
@@ -23,24 +23,32 @@ import { learnUserPatterns } from './orchestrator';
  * Arquivar é reversível (flag `archived`); nada é apagado de verdade.
  */
 
-/** Extrai um objeto JSON da resposta do modelo, tolerando cercas e texto ao redor. */
-function parseJsonObject<T>(raw: string): T | null {
-  const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) return null;
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : null;
-  } catch {
-    return null;
-  }
-}
-
 interface ConsolidationPlan {
   remover?: number[];
   fundir?: { numeros: number[]; texto: string }[];
 }
+
+/** Schema estrito do plano de limpeza (Structured Outputs). */
+const CONSOLIDATION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['remover', 'fundir'],
+  properties: {
+    remover: { type: 'array', items: { type: 'integer' } },
+    fundir: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['numeros', 'texto'],
+        properties: {
+          numeros: { type: 'array', items: { type: 'integer' } },
+          texto: { type: 'string' },
+        },
+      },
+    },
+  },
+};
 
 /** Abaixo disso não vale uma chamada de LLM — o pool ainda é pequeno e limpo. */
 const MIN_FACTS_TO_CONSOLIDATE = 8;
@@ -74,19 +82,21 @@ Aponte APENAS limpezas seguras:
 - EXPIRADOS: fatos claramente pontuais cuja data já passou (ex: um compromisso de semanas
   atrás). Preferências, decisões, características e contexto do Igor NUNCA expiram sozinhos.
 Seja CONSERVADOR: na dúvida, NÃO mexa — manter um fato a mais é melhor que perder informação.
-Responda APENAS com JSON neste formato:
-{"remover": [numeros...], "fundir": [{"numeros": [n, n], "texto": "fato fundido"}]}
-Se não houver nada a fazer, responda {"remover": [], "fundir": []}.`;
+Em "remover" vão os números dos fatos a arquivar; em "fundir", grupos de números com o texto
+fundido. Sem nada a fazer, devolva as duas listas vazias.`;
 
-  const answer = await chat(
+  const plan = await chatJson<ConsolidationPlan>(
     [
       { role: 'system', content: system },
-      { role: 'user', content: `Fatos memorizados:\n${lista}\n\nJSON de limpeza:` },
+      { role: 'user', content: `Fatos memorizados:\n${lista}\n\nPlano de limpeza:` },
     ],
-    { temperature: 0, model: config.openai.utilityModel }
+    {
+      name: 'limpeza_memoria',
+      schema: CONSOLIDATION_SCHEMA,
+      temperature: 0,
+      model: config.openai.utilityModel,
+    }
   );
-
-  const plan = parseJsonObject<ConsolidationPlan>(answer);
   if (!plan) {
     console.warn('[maintenance] consolidação sem JSON utilizável — nada alterado.');
     return { archived: 0, merged: 0 };
