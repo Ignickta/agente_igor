@@ -362,6 +362,16 @@ export async function archiveSharedFact(id: string): Promise<void> {
   await sharedFactsCol.doc(id).set({ archived: true, archivedAt: Date.now() }, { merge: true });
 }
 
+/** Atualiza os dados de um fato (por exemplo, texto e embedding). */
+export async function updateSharedFact(id: string, data: Partial<SharedFact>): Promise<void> {
+  await sharedFactsCol.doc(id).set(data, { merge: true });
+}
+
+/** Remove permanentemente um fato do Firestore. */
+export async function deleteSharedFact(id: string): Promise<void> {
+  await sharedFactsCol.doc(id).delete();
+}
+
 // ===================== Perfil vivo (memória consolidada) =====================
 
 /**

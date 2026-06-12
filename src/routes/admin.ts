@@ -20,12 +20,17 @@ import {
   getCompletedTasksBetween,
   getPendingTasks,
   getConversationLog,
+  getSharedFacts,
+  updateSharedFact,
+  deleteSharedFact,
 } from '../services/firebase';
 import { generateDailySchedule, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
 import { getConnectionState } from '../services/evolution';
 import { getUptimeSeconds, getRecentErrors, getLastMessageProcessedAt } from '../services/status';
 import { handleMessage } from '../agents/central';
+import { embed } from '../services/openai';
+import { cosine } from '../services/memory';
 
 export const adminRouter = Router();
 
@@ -154,6 +159,7 @@ adminRouter.get('/conversations', async (req, res) => {
   try {
     const contact = (req.query.contact as string) || config.ownerPhone;
     const subagentId = req.query.subagentId as string;
+    const q = req.query.q as string;
 
     if (!contact) {
       return res.status(400).json({ error: 'ownerPhone não configurado no servidor' });
@@ -163,6 +169,26 @@ adminRouter.get('/conversations', async (req, res) => {
 
     if (subagentId) {
       logs = logs.filter((log) => log.subagentId === subagentId);
+    }
+
+    if (q && q.trim()) {
+      let queryVector: number[] = [];
+      try {
+        queryVector = await embed(q.trim());
+      } catch (err) {
+        console.error('[conversations] falha ao gerar embedding para busca:', err);
+      }
+
+      if (queryVector.length > 0) {
+        logs = logs
+          .map((log) => ({
+            log,
+            score: cosine(queryVector, log.embedding || []),
+          }))
+          .filter((item) => item.score >= 0.25)
+          .sort((a, b) => b.score - a.score)
+          .map((item) => item.log);
+      }
     }
 
     res.json(logs.slice(0, 100));
@@ -420,4 +446,80 @@ adminRouter.delete('/agenda/:id', async (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
   await deleteAgendaItem(req.params.id);
   res.json({ ok: true });
+});
+
+// ===================== Memórias / Fatos Compartilhados =====================
+
+adminRouter.get('/facts', async (req, res) => {
+  try {
+    const contact = (req.query.contact as string) || config.ownerPhone;
+    const q = req.query.q as string;
+
+    if (!contact) {
+      return res.status(400).json({ error: 'ownerPhone não configurado no servidor' });
+    }
+
+    let facts = await getSharedFacts(contact);
+
+    if (q && q.trim()) {
+      let queryVector: number[] = [];
+      try {
+        queryVector = await embed(q.trim());
+      } catch (err) {
+        console.error('[facts] falha ao gerar embedding para busca:', err);
+      }
+
+      if (queryVector.length > 0) {
+        facts = facts
+          .map((fact) => ({
+            fact,
+            score: cosine(queryVector, fact.embedding || []),
+          }))
+          .filter((item) => item.score >= 0.25)
+          .sort((a, b) => b.score - a.score)
+          .map((item) => item.fact);
+      }
+    }
+
+    res.json(facts);
+  } catch (err) {
+    console.error('[facts] erro ao obter fatos:', err);
+    res.status(500).json({ error: 'Erro ao carregar fatos' });
+  }
+});
+
+adminRouter.put('/facts/:id', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: 'O texto do fato é obrigatório' });
+    }
+
+    let embedding: number[] = [];
+    try {
+      embedding = await embed(text.trim());
+    } catch (err) {
+      console.error('[facts] erro ao gerar embedding para atualização:', err);
+    }
+
+    await updateSharedFact(req.params.id, {
+      text: text.trim(),
+      embedding,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[facts] erro ao atualizar fato:', err);
+    res.status(500).json({ error: 'Erro ao atualizar fato' });
+  }
+});
+
+adminRouter.delete('/facts/:id', async (req, res) => {
+  try {
+    await deleteSharedFact(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[facts] erro ao deletar fato:', err);
+    res.status(500).json({ error: 'Erro ao deletar fato' });
+  }
 });
