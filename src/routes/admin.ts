@@ -19,6 +19,7 @@ import {
   deleteAgendaItem,
   getCompletedTasksBetween,
   getPendingTasks,
+  getConversationLog,
 } from '../services/firebase';
 import { generateDailySchedule, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
@@ -145,6 +146,28 @@ adminRouter.get('/metrics', async (req, res) => {
   } catch (err) {
     console.error('[metrics] erro ao calcular métricas:', err);
     res.status(500).json({ error: 'Erro ao gerar métricas do sistema' });
+  }
+});
+
+adminRouter.get('/conversations', async (req, res) => {
+  try {
+    const contact = (req.query.contact as string) || config.ownerPhone;
+    const subagentId = req.query.subagentId as string;
+
+    if (!contact) {
+      return res.status(400).json({ error: 'ownerPhone não configurado no servidor' });
+    }
+
+    let logs = await getConversationLog(contact);
+
+    if (subagentId) {
+      logs = logs.filter((log) => log.subagentId === subagentId);
+    }
+
+    res.json(logs.slice(0, 100));
+  } catch (err) {
+    console.error('[conversations] erro ao obter logs de conversas:', err);
+    res.status(500).json({ error: 'Erro ao carregar histórico de conversas' });
   }
 });
 
