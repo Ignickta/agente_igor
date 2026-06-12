@@ -18,6 +18,7 @@ import {
   routeByLLM,
   isPureDoneConfirmation,
 } from '../agents/central';
+import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { CLAIMS_ACTION_REGEX } from '../agents/subagents';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import { weekRange, monthRange } from '../agents/orchestrator';
@@ -270,6 +271,56 @@ async function suiteLiveRouting(): Promise<void> {
   }
 }
 
+// ===================== Suíte G (--live): roteador por embedding =====================
+
+async function suiteLiveEmbedding(): Promise<void> {
+  suite('routeByEmbedding (LIVE) — decide nos casos fortes, nunca nos ambíguos');
+
+  // Casos fortes: medidos na calibração com scores 0.49–0.54 (limiar 0.45/0.08).
+  const decide: { texto: string; esperado: string }[] = [
+    { texto: 'o distribuidor pediu mais 200 fardos de arroz predileto', esperado: 'Vendas de Arroz' },
+    { texto: 'o webhook do fluxo de cobrança no n8n parou de funcionar', esperado: 'Automação / n8n' },
+  ];
+  for (const c of decide) {
+    const r = await routeByEmbedding(c.texto, SUBS);
+    check(
+      'live-embedding',
+      `decide: "${c.texto}" → ${c.esperado}`,
+      !!r && r.decided && r.sub.name === c.esperado,
+      r ? `${r.sub.name} score=${r.score.toFixed(3)} margem=${r.margin.toFixed(3)} decided=${r.decided}` : 'null'
+    );
+  }
+
+  // Ambíguas/transversais: nunca podem decidir sozinhas (calibração: máx 0.417).
+  const naoDecide = [
+    'como estão as coisas por aí?',
+    'preciso resolver aquilo que te falei ontem',
+    'faz um resumo do que combinamos',
+  ];
+  for (const t of naoDecide) {
+    const r = await routeByEmbedding(t, SUBS);
+    check(
+      'live-embedding',
+      `NÃO decide: "${t}"`,
+      !r || !r.decided,
+      r ? `decidiu ${r.sub.name} score=${r.score.toFixed(3)}` : ''
+    );
+  }
+
+  // Curta demais → nem tenta (continuidade manda).
+  const curto = await routeByEmbedding('e amanhã?', SUBS);
+  check('live-embedding', 'mensagem curta ("e amanhã?") retorna null', curto === null);
+
+  // Top-1 ruidoso (margem ~0.003 na calibração) não pode virar dica pro LLM.
+  const ruido = await routeByEmbedding('preciso comprar o remédio da minha mãe na farmácia', SUBS);
+  check(
+    'live-embedding',
+    'top-1 ruidoso não vira dica (hintFrom null)',
+    hintFrom(ruido) === null,
+    ruido ? `${ruido.sub.name} score=${ruido.score.toFixed(3)} margem=${ruido.margin.toFixed(3)}` : 'null'
+  );
+}
+
 // ===================== Main =====================
 
 async function main(): Promise<void> {
@@ -281,7 +332,10 @@ async function main(): Promise<void> {
   suiteClaimsRegex();
   suiteKeywordRouting();
   suiteDatetime();
-  if (live) await suiteLiveRouting();
+  if (live) {
+    await suiteLiveRouting();
+    await suiteLiveEmbedding();
+  }
 
   console.log(`\n${'='.repeat(50)}`);
   console.log(`Resultado: ${passed} ✅  ${failed} ❌`);

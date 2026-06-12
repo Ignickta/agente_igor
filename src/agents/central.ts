@@ -19,6 +19,7 @@ import {
   formatEntry,
 } from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
+import { routeByEmbedding, hintFrom, EmbeddingRoute } from './embeddingRouter';
 import { beginUndoGroup, recordUndo } from './undo';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
@@ -295,12 +296,12 @@ export async function handleMessage(
     return 'Nenhum subagente configurado ainda. Crie um pelo painel admin ou pelo WhatsApp.';
   }
 
-  // 1) Roteamento. Pedidos claramente de agenda vão DIRETO para o orquestrador
-  //    (único subagente com as ferramentas de agenda); keyword só decide sozinha
-  //    com match forte (>= 2); caso contrário o LLM decide com o contexto da
-  //    última conversa, para que continuações curtas ("e amanhã?") fiquem no
-  //    mesmo assunto.
+  // 1) Roteamento, do mais barato ao mais caro:
+  //    regex de agenda → keywords (match forte >= 2) → EMBEDDING (decide quando
+  //    a similaridade é forte e com folga) → LLM com contexto de continuidade,
+  //    para que continuações curtas ("e amanhã?") fiquem no mesmo assunto.
   let target: Subagent | null = null;
+  let via = 'agenda-regex';
   if (AGENDA_REGEX.test(text)) {
     target =
       subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
@@ -309,9 +310,24 @@ export async function handleMessage(
   }
 
   const kw = target ? null : routeByKeywords(text, subagents);
-  if (!target && kw && kw.score >= 2) target = kw.sub;
+  if (!target && kw && kw.score >= 2) {
+    target = kw.sub;
+    via = 'keywords';
+  }
+
+  // 1.5) Embedding: o vetor da mensagem sai do mesmo cache usado pelo RAG e
+  //      pelo recall de fatos logo adiante — não custa chamada extra.
+  let embRoute: EmbeddingRoute | null = null;
+  if (!target) {
+    embRoute = await routeByEmbedding(text, subagents);
+    if (embRoute?.decided) {
+      target = embRoute.sub;
+      via = `embedding ${embRoute.score.toFixed(2)}/+${embRoute.margin.toFixed(2)}`;
+    }
+  }
 
   if (!target) {
+    via = 'llm';
     const last = lastRouteByContact.get(contact);
     let lastSub =
       last && Date.now() - last.at < LAST_ROUTE_TTL_MS
@@ -330,19 +346,22 @@ export async function handleMessage(
     const recentContext = recent
       .map((m) => `${m.role === 'user' ? 'Igor' : 'Agente'}: ${m.content.slice(0, 200)}`)
       .join('\n');
+    // Dica para o LLM: palpite do embedding só quando confiável (top-1 com
+    // margem mínima); senão keyword. Dica ruidosa vicia o LLM no rumo errado.
+    const embHint = hintFrom(embRoute);
     target = await routeByLLM(
       text,
       subagents,
       recentContext,
       lastSub?.name,
-      kw?.sub.name,
-      // Se o LLM falhar/responder lixo, continuidade > keyword > primeiro da lista.
-      lastSub ?? kw?.sub
+      embHint?.name ?? kw?.sub.name,
+      // Se o LLM falhar/responder lixo, continuidade > embedding > keyword > 1º da lista.
+      lastSub ?? embHint ?? kw?.sub
     );
   }
   lastRouteByContact.set(contact, { subagentId: target.id, at: Date.now() });
 
-  console.log(`[central] roteado para: ${target.name}`);
+  console.log(`[central] roteado para: ${target.name} (via ${via})`);
 
   // 2) Carrega a memória DESTE subagente + as trocas recentes GLOBAIS (qualquer
   //    subagente) + RAG automático: as trocas ANTIGAS mais similares à mensagem,

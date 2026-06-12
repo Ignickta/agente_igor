@@ -17,7 +17,7 @@ import { dayKey, timeKey } from './datetime';
  */
 
 /** Similaridade de cosseno; 0 se algum vetor for vazio ou de dimensão diferente. */
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   if (!a.length || a.length !== b.length) return 0;
   let dot = 0;
   let na = 0;
@@ -45,7 +45,7 @@ const RECENT_ALWAYS = 3;
 const queryEmbCache = new Map<string, number[]>();
 const QUERY_EMB_CACHE_MAX = 30;
 
-async function embedQuery(text: string): Promise<number[]> {
+export async function embedQuery(text: string): Promise<number[]> {
   const key = text.slice(0, 2000);
   const hit = queryEmbCache.get(key);
   if (hit) return hit;

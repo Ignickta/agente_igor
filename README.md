@@ -161,10 +161,19 @@ Exemplo:
 
 ## 🧠 Como funciona o roteamento
 
-1. **Keyword match:** a mensagem é comparada com as `keywords` de cada subagente (barato, sem LLM).
-2. **Fallback LLM:** se nenhuma keyword bater, o GPT-4o escolhe o subagente usando a mensagem + contexto recente.
-3. O subagente escolhido responde com seu prompt/personalidade e o histórico do contato.
-4. A conversa é salva na **memória** (Firestore) para manter continuidade.
+Do mais barato ao mais caro — cada degrau só roda se o anterior não decidir:
+
+1. **Regex de agenda:** pedidos claramente de agenda vão direto ao orquestrador.
+2. **Keyword match:** a mensagem é comparada com as `keywords` de cada subagente
+   (grátis); decide sozinho com match forte (2+ keywords).
+3. **Embedding:** a mensagem é comparada por similaridade com o descritor de cada
+   subagente (o vetor sai do mesmo cache do RAG — sem chamada extra); decide quando
+   a semelhança é forte E com folga sobre o 2º lugar (`EMB_ROUTE_MIN_SIM` /
+   `EMB_ROUTE_MARGIN`, calibrados com a API real).
+4. **Fallback LLM:** o modelo utilitário escolhe usando a mensagem + contexto recente
+   + continuidade da última conversa, com o palpite do embedding como dica.
+5. O subagente escolhido responde com seu prompt/personalidade e o histórico do contato.
+6. A conversa é salva na **memória** (Firestore) para manter continuidade.
 
 ## ⏰ Mensagens proativas
 
