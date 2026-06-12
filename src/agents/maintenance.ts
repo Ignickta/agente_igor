@@ -10,6 +10,7 @@ import {
 } from '../services/firebase';
 import { dayKey } from '../services/datetime';
 import { learnUserPatterns } from './orchestrator';
+import { reflectOnRecentExchanges } from './reflection';
 
 /**
  * Manutenção noturna da memória:
@@ -230,13 +231,23 @@ export async function getProfileCached(contact: string): Promise<string> {
 
 // ===================== Entradas do scheduler =====================
 
-/** Job noturno: consolida os fatos do dono e reconstrói o perfil. */
+/**
+ * Job noturno, em três passos NESTA ordem: a reflexão extrai fatos/promessas do
+ * dia; a consolidação deduplica o que ela salvou contra o pool; o perfil é
+ * reconstruído já com a memória limpa da mesma noite.
+ */
 export async function runMemoryMaintenance(): Promise<void> {
   if (!config.ownerPhone) {
     console.warn('[maintenance] OWNER_PHONE ausente — manutenção de memória pulada.');
     return;
   }
   const contact = config.ownerPhone;
+  try {
+    const { facts, reminders } = await reflectOnRecentExchanges(contact);
+    console.log(`[maintenance] reflexão: ${facts} fatos novos, ${reminders} follow-ups criados.`);
+  } catch (err) {
+    console.error('[maintenance] falha na reflexão diária:', err);
+  }
   try {
     const { archived, merged } = await consolidateFacts(contact);
     console.log(`[maintenance] consolidação: ${merged} fusões, ${archived} fatos arquivados.`);

@@ -183,10 +183,14 @@ Exemplo:
 
 Todo dia às **03:30** um job silencioso cuida da memória de longo prazo:
 
-1. **Consolidação dos fatos** — funde duplicados, aplica correções (um fato
+1. **Reflexão diária** — relê as conversas das últimas 24h e extrai o que ficou
+   para trás: fatos duradouros que não foram salvos na hora e promessas com ação
+   futura ("amanhã ligo pro João") que não viraram lembrete — essas viram
+   follow-ups automáticos (respeitando o kill-switch `PROACTIVE_NOTIFICATIONS`).
+2. **Consolidação dos fatos** — funde duplicados, aplica correções (um fato
    "Correção: ..." substitui o fato errado) e arquiva fatos pontuais já expirados.
    Arquivar é reversível (flag `archived`); nada é apagado.
-2. **Perfil vivo** — destila dos fatos um resumo do Igor (rotina, projetos,
+3. **Perfil vivo** — destila dos fatos um resumo do Igor (rotina, projetos,
    preferências, decisões vigentes) salvo em `profiles/{contato}` e injetado no
    system prompt de **todos** os subagentes, em toda mensagem.
 
