@@ -12,6 +12,7 @@ import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGat
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
+import { recordMessageProcessed, recordError } from './services/status';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -59,6 +60,8 @@ async function processIncoming(body: unknown): Promise<void> {
     return;
   }
 
+  recordMessageProcessed();
+
   let text = msg.text || '';
 
   // Transcreve áudio se necessário
@@ -74,10 +77,12 @@ async function processIncoming(body: unknown): Promise<void> {
       text = await transcribeAudioBase64(msg.audioBase64);
       console.log(`[webhook] áudio transcrito de ${msg.from}: "${text}"`);
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       console.error(
         '[webhook] falha na transcrição:',
-        err instanceof Error ? err.message : err
+        errMsg
       );
+      recordError(`Falha na transcrição de áudio: ${errMsg}`);
       await sendText(msg.from, 'Tive um problema para transcrever seu áudio. Pode escrever?');
       return;
     }
@@ -114,7 +119,9 @@ async function processIncoming(body: unknown): Promise<void> {
         `[O Igor enviou ${tipo} pelo WhatsApp. Conteúdo extraído:]\n${extracted}\n\n` +
         `[Pedido do Igor na legenda:] ${pedido}`;
     } catch (err) {
-      console.error('[webhook] falha ao ler mídia:', err instanceof Error ? err.message : err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error('[webhook] falha ao ler mídia:', errMsg);
+      recordError(`Falha ao ler mídia (${msg.mediaType}): ${errMsg}`);
       await sendText(
         msg.from,
         'Recebi sua mídia, mas não consegui ler o conteúdo 😕. Pode me dizer por texto?'
@@ -149,7 +156,9 @@ async function processIncoming(body: unknown): Promise<void> {
       }
     }
   } catch (err) {
-    console.error('[webhook] erro no modo foco (seguindo fluxo normal):', err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('[webhook] erro no modo foco (seguindo fluxo normal):', errMsg);
+    recordError(`Erro no modo foco: ${errMsg}`);
   }
 
   // Pedido pontual de resposta em áudio (ex: "responde em áudio"). One-shot:
@@ -175,7 +184,9 @@ async function processIncoming(body: unknown): Promise<void> {
     // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
     await sendText(msg.from, reply, 1200);
   } catch (err) {
-    console.error('[webhook] falha ao gerar/enviar resposta:', err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('[webhook] falha ao gerar/enviar resposta:', errMsg);
+    recordError(`Falha ao gerar/enviar resposta: ${errMsg}`, 'Orquestrador Geral');
     await sendText(msg.from, 'Ops, algo deu errado aqui. Tenta de novo em instantes? 🙏');
   }
 }
