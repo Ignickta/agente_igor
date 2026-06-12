@@ -78,6 +78,16 @@ Fases 1, 2 e 3 implementadas, testadas e em produção (deploy feito). Backend e
 
 ## Próximos passos / pendências
 
+- [ ] **Ativar o Google Calendar (F10)** — o código está em produção desde 2026-06-12, mas
+  DESLIGADO (sem `GOOGLE_CALENDAR_ID` tudo é no-op). Para ativar (~5 min):
+  1. Habilitar a **Google Calendar API** no projeto Google Cloud do Firebase:
+     https://console.cloud.google.com/apis/library/calendar-json.googleapis.com (selecionar o projeto `agente-igor`).
+  2. No https://calendar.google.com → Configurações → agenda principal → *Compartilhar com
+     pessoas específicas* → adicionar o e-mail da service account (o `FIREBASE_CLIENT_EMAIL`
+     do `/opt/agente-igor.env`) com permissão **"Fazer alterações nos eventos"**.
+  3. Na VPS: adicionar `GOOGLE_CALENDAR_ID=igor.nta@gmail.com` em `/opt/agente-igor.env` e
+     rodar `docker restart agente-igor`. Conferir nos logs o `[calendarSync]` após o boot.
+  Detalhes na seção "📆 Google Calendar" do README.
 - [ ] **Segurança**: trocar `ADMIN_TOKEN` (estava `troque-este-token` em algum momento) e revogar a chave OpenAI antiga exposta no chat, gerando nova.
 - [ ] **Validar no WhatsApp** o fluxo real ponta a ponta: áudio→transcrição→resposta em áudio; lembrete por linguagem natural; reconexão após queda real do Baileys.
 - [ ] **Confirmar rota de áudio** (`sendWhatsAppAudio`) na Evolution — não foi possível validar com instância offline.
