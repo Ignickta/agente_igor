@@ -30,6 +30,8 @@ import {
   PROCRASTINATION_THRESHOLD,
 } from '../agents/orchestrator';
 import { parseLocalIso, addDays, weekdayOf, dayKey, timeKey, nextOccurrence } from '../services/datetime';
+import { parseEventWindow, CalendarEvent } from '../services/googleCalendar';
+import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent } from '../types';
 
 // ===================== Mini-framework =====================
@@ -311,6 +313,118 @@ function suiteProcrastination(): void {
   );
 }
 
+// ===================== Suíte F3: Google Calendar (F10) =====================
+
+function suiteCalendar(): void {
+  suite('Google Calendar — normalização de eventos (parseEventWindow)');
+
+  // Evento com offset explícito de São Paulo.
+  const w1 = parseEventWindow({
+    start: { dateTime: '2026-06-12T15:00:00-03:00' },
+    end: { dateTime: '2026-06-12T16:00:00-03:00' },
+  });
+  check(
+    'calendar',
+    'dateTime -03:00 → dia/horário locais',
+    !!w1 && w1.date === '2026-06-12' && w1.startTime === '15:00' && w1.endTime === '16:00' && !w1.allDay,
+    JSON.stringify(w1)
+  );
+
+  // Evento em UTC (Z): 18:00Z = 15:00 em São Paulo.
+  const w2 = parseEventWindow({
+    start: { dateTime: '2026-06-12T18:00:00Z' },
+    end: { dateTime: '2026-06-12T19:30:00Z' },
+  });
+  check(
+    'calendar',
+    'dateTime em UTC convertido para o fuso local',
+    !!w2 && w2.date === '2026-06-12' && w2.startTime === '15:00' && w2.endTime === '16:30',
+    JSON.stringify(w2)
+  );
+
+  // Dia inteiro (start.date, sem horário).
+  const w3 = parseEventWindow({ start: { date: '2026-06-12' }, end: { date: '2026-06-13' } });
+  check('calendar', 'evento de dia inteiro → allDay', !!w3 && w3.allDay && w3.date === '2026-06-12');
+
+  // Atravessa a meia-noite: bloco local termina às 23:59 do dia de início.
+  const w4 = parseEventWindow({
+    start: { dateTime: '2026-06-12T22:00:00-03:00' },
+    end: { dateTime: '2026-06-13T01:00:00-03:00' },
+  });
+  check(
+    'calendar',
+    'evento que vira a noite termina em 23:59',
+    !!w4 && w4.date === '2026-06-12' && w4.endTime === '23:59',
+    JSON.stringify(w4)
+  );
+
+  check('calendar', 'evento sem start → null', parseEventWindow({}) === null);
+
+  suite('Google Calendar — reconciliação (diffMirror)');
+
+  const ev = (id: string, over: Partial<CalendarEvent> = {}): CalendarEvent => ({
+    id,
+    title: 'Dentista',
+    date: '2026-06-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    allDay: false,
+    ...over,
+  });
+  const it = (id: string, over: Partial<MirrorItem> = {}): MirrorItem => ({
+    id,
+    title: 'Dentista',
+    date: '2026-06-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    status: 'pending',
+    ...over,
+  });
+
+  // Evento novo no Google → cria espelho local.
+  const p1 = diffMirror([ev('g1')], []);
+  check('calendar', 'evento novo entra em toCreate', p1.toCreate.length === 1 && p1.toCreate[0].id === 'g1');
+
+  // Espelhado sem mudança → plano vazio.
+  const p2 = diffMirror([ev('g1')], [it('a1', { gcalEventId: 'g1' })]);
+  check(
+    'calendar',
+    'espelhado idêntico não gera ação',
+    p2.toCreate.length + p2.toAdopt.length + p2.toUpdate.length + p2.toDeleteCheck.length === 0
+  );
+
+  // Horário mudou no Google → atualiza o espelho.
+  const p3 = diffMirror([ev('g1', { startTime: '17:00', endTime: '18:00' })], [it('a1', { gcalEventId: 'g1' })]);
+  check('calendar', 'mudança de horário entra em toUpdate', p3.toUpdate.length === 1 && p3.toUpdate[0].itemId === 'a1');
+
+  // Item já concluído nunca é mexido, mesmo com mudança no Google.
+  const p4 = diffMirror(
+    [ev('g1', { startTime: '17:00', endTime: '18:00' })],
+    [it('a1', { gcalEventId: 'g1', status: 'done' })]
+  );
+  check('calendar', 'item done não entra em toUpdate', p4.toUpdate.length === 0);
+
+  // Igor criou dos dois lados (sem link): adota em vez de duplicar.
+  const p5 = diffMirror([ev('g1')], [it('a1')]);
+  check(
+    'calendar',
+    'gêmeo local (título+horário) é adotado, não duplicado',
+    p5.toCreate.length === 0 && p5.toAdopt.length === 1 && p5.toAdopt[0].eventId === 'g1'
+  );
+
+  // Espelhado sumiu do intervalo → vai para verificação (cancelado OU movido).
+  const p6 = diffMirror([], [it('a1', { gcalEventId: 'g1' })]);
+  check('calendar', 'espelhado ausente entra em toDeleteCheck', p6.toDeleteCheck.length === 1);
+
+  // ...mas se já foi concluído, fica em paz.
+  const p7 = diffMirror([], [it('a1', { gcalEventId: 'g1', status: 'done' })]);
+  check('calendar', 'espelhado done ausente NÃO entra em toDeleteCheck', p7.toDeleteCheck.length === 0);
+
+  // Dia inteiro não vira bloco de cronograma.
+  const p8 = diffMirror([ev('g1', { allDay: true })], []);
+  check('calendar', 'evento de dia inteiro é ignorado', p8.toCreate.length === 0);
+}
+
 // ===================== Suíte G (--live): roteador por embedding =====================
 
 async function suiteLiveEmbedding(): Promise<void> {
@@ -374,6 +488,7 @@ async function main(): Promise<void> {
   suiteDatetime();
   suiteDurationCalibration();
   suiteProcrastination();
+  suiteCalendar();
   if (live) {
     await suiteLiveRouting();
     await suiteLiveEmbedding();

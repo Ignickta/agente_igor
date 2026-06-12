@@ -102,6 +102,12 @@ export interface AgendaItem {
    * REAL da tarefa, usada para calibrar as estimativas do agente. null = não.
    */
   completedAt?: number | null;
+  /**
+   * Id do evento no Google Calendar quando o item é espelhado (F10). Edições
+   * e remoções pelo agente propagam para o Google; o sync usa este id para
+   * deduplicar e seguir mudanças feitas direto no calendário.
+   */
+  gcalEventId?: string;
 }
 
 /**

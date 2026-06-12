@@ -27,6 +27,11 @@ proativas (bom dia, lembretes).
   possíveis erros de rota; todo domingo o agente analisa a semana, sugere
   palavras-chave novas por subagente e aplica quando o Igor confirmar
   ("aplica as sugestões de roteamento") — com desfazer.
+- **Google Calendar (opcional)**: espelhamento bidirecional. Eventos do
+  calendário viram itens fixos do cronograma (sync a cada 30 min + antes de
+  gerar agenda/visões); eventos criados, editados ou removidos pelo agente
+  propagam para o Google — tudo com desfazer. Sem OAuth: usa a mesma service
+  account do Firebase.
 
 ### Subagentes iniciais
 
@@ -99,6 +104,7 @@ Preencha o `.env`:
 | `OWNER_PHONE` *(opcional)* | Seu número para mensagens proativas (ex: `5511999999999`) |
 | `ADMIN_TOKEN` *(opcional)* | Token para proteger as rotas `/admin` |
 | `ALLOWED_NUMBERS` *(opcional)* | Números autorizados a falar com o agente (só dígitos, separados por vírgula). O dono já entra automático. |
+| `GOOGLE_CALENDAR_ID` *(opcional)* | ID da sua agenda Google (normalmente seu e-mail). Ativa o espelhamento com o Google Calendar. |
 
 > 🔒 **Segurança:** o agente só responde a números na allowlist (`ALLOWED_NUMBERS` + `OWNER_PHONE`). Mensagens de qualquer outro número são ignoradas. Mensagens proativas (bom dia/lembretes) vão **apenas** para o dono.
 
@@ -198,6 +204,37 @@ Do mais barato ao mais caro — cada degrau só roda se o anterior não decidir:
 - `tasks/{id}` — lembretes/tarefas agendadas.
 - `shared_facts/{id}` — fatos de longo prazo (pool compartilhado, com embedding).
 - `profiles/{contato}` — perfil vivo destilado da memória (injetado em todo prompt).
+
+## 📆 Google Calendar (opcional)
+
+O agente espelha sua agenda Google sem OAuth — a service account do Firebase
+acessa o calendário diretamente. Para ativar:
+
+1. **Habilite a API**: no [Google Cloud Console](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com),
+   selecione o MESMO projeto do seu Firebase e clique em **Ativar** na
+   "Google Calendar API".
+2. **Compartilhe a agenda**: no [Google Calendar](https://calendar.google.com),
+   vá em *Configurações → sua agenda → Compartilhar com pessoas específicas*,
+   adicione o e-mail da service account (o `FIREBASE_CLIENT_EMAIL` do seu .env)
+   com a permissão **"Fazer alterações nos eventos"**.
+3. **Configure o .env**: `GOOGLE_CALENDAR_ID=seu-email@gmail.com` (o ID da
+   agenda principal é o próprio e-mail).
+
+Como funciona:
+
+- **Google → agente**: eventos com horário viram itens FIXOS (prioridade 1) do
+  cronograma — aparecem no bom-dia das 07:00, nas visões de semana/mês e nas
+  transições de horário. Sync a cada 30 min (hoje + amanhã), no boot e antes de
+  gerar cronograma/visões. Mudou o evento no celular? O espelho segue. Cancelou?
+  O espelho some (itens já concluídos nunca são tocados).
+- **Agente → Google**: `criar_evento` (fixo), `editar_item_agenda` e
+  `remover_item_agenda` em itens espelhados propagam para o Google — com
+  desfazer dos dois lados. Blocos de planejamento (não-fixos) ficam só no agente.
+- **Sem duplicatas**: dedup por `gcalEventId`; se o mesmo evento existir dos
+  dois lados (mesmo título e horário), o agente "adota" o item local em vez de
+  duplicar. Eventos de dia inteiro são ignorados (não são blocos de tempo).
+- **Resiliente**: qualquer falha do Google é logada e o agente segue com a
+  agenda local. Sem `GOOGLE_CALENDAR_ID`, tudo é no-op.
 
 ## 🧹 Manutenção noturna da memória
 

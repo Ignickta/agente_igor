@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
 import { getDueTasks, claimDueTask, acquireJobLock, cleanupJobLocks } from './services/firebase';
-import { dayKey, timeKey } from './services/datetime';
+import { dayKey, timeKey, addDays } from './services/datetime';
 import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
 import { processFocusExpirations } from './agents/focus';
 import {
@@ -14,6 +14,8 @@ import {
 } from './agents/reports';
 import { runMemoryMaintenance, bootstrapProfile } from './agents/maintenance';
 import { sendRouteLearningReport } from './agents/routeLearning';
+import { syncCalendarRange } from './agents/calendarSync';
+import { calendarEnabled } from './services/googleCalendar';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -77,6 +79,29 @@ export function startScheduler(): void {
   bootstrapProfile().catch((err) =>
     console.error('[scheduler] falha no bootstrap do perfil:', err)
   );
+
+  // F10: sync com o Google Calendar a cada 30 min (hoje + amanhã) — pega
+  // eventos criados/movidos direto no celular entre os horários dos outros
+  // jobs. Uma listagem por execução; só agendado com GOOGLE_CALENDAR_ID.
+  if (calendarEnabled()) {
+    cron.schedule(
+      '*/30 * * * *',
+      () => {
+        const periodKey = `${dayKey()}T${timeKey()}`;
+        withJobLock('gcal_sync', periodKey, () =>
+          syncCalendarRange(dayKey(), addDays(dayKey(), 1))
+        ).catch((err) => console.error('[scheduler] falha no sync do calendário:', err));
+      },
+      opts
+    );
+    // Uma vez no boot também, para a agenda já acordar espelhada. Com trava
+    // em janela de 10 min: num deploy, o container velho e o novo não rodam
+    // a reconciliação ao mesmo tempo (criaria espelhos duplicados).
+    const bootKey = `${dayKey()}T${timeKey().slice(0, 4)}0`;
+    withJobLock('gcal_sync_boot', bootKey, () =>
+      syncCalendarRange(dayKey(), addDays(dayKey(), 7))
+    ).catch((err) => console.error('[scheduler] falha no sync inicial do calendário:', err));
+  }
 
   // Bom dia + cronograma do dia — todo dia às 07:00.
   // O orquestrador gera a agenda a partir das tarefas pendentes e envia ao dono.

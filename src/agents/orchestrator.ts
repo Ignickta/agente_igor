@@ -16,6 +16,7 @@ import {
 } from '../services/firebase';
 import { AgendaItem } from '../types';
 import { calibrationSummary } from './estimate';
+import { syncCalendarRange } from './calendarSync';
 import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence } from '../services/datetime';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
@@ -179,6 +180,10 @@ export async function generateDailySchedule(
   date = dayKey(),
   force = false
 ): Promise<AgendaItem[]> {
+  // F10: traz os eventos do Google Calendar ANTES de planejar — eles entram
+  // como itens fixos e o modelo encaixa as tarefas em volta. Best-effort.
+  await syncCalendarRange(date, date);
+
   const existing = await getAgendaForDay(date);
 
   // Tarefas pendentes cujo lembrete cai no dia alvo (data LOCAL: remindAt é
@@ -476,6 +481,10 @@ const STATUS_EMOJI: Record<AgendaItem['status'], string> = {
  * cujo `remindAt` cai no período — normalizados e agrupados por dia.
  */
 async function collectEntries(start: string, end: string): Promise<Map<string, ScheduleEntry[]>> {
+  // F10: garante que as visões reflitam o Google Calendar (uma listagem só
+  // para o intervalo inteiro). Best-effort: sem Google, segue com o local.
+  await syncCalendarRange(start, end);
+
   const [items, tasks] = await Promise.all([getAgendaInRange(start, end), listTasks()]);
 
   const entries: ScheduleEntry[] = items.map((i) => ({

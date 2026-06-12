@@ -113,6 +113,16 @@ export const config = {
     minSim: parseFloat(process.env.EMB_ROUTE_MIN_SIM || '0.45'),
     minMargin: parseFloat(process.env.EMB_ROUTE_MARGIN || '0.08'),
   },
+  /**
+   * F10: integração com o Google Calendar via a MESMA service account do
+   * Firebase. Para ativar: habilite a Calendar API no projeto Google Cloud do
+   * Firebase, compartilhe a agenda com o e-mail da service account (permissão
+   * "Fazer alterações nos eventos") e defina GOOGLE_CALENDAR_ID (normalmente
+   * seu e-mail do Google). Vazio = integração desligada.
+   */
+  googleCalendar: {
+    calendarId: process.env.GOOGLE_CALENDAR_ID || '',
+  },
   ownerPhone: process.env.OWNER_PHONE || '',
   timezone: process.env.TZ || 'America/Sao_Paulo',
   adminToken: process.env.ADMIN_TOKEN || '',

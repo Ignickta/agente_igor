@@ -45,6 +45,12 @@ import {
   addDays,
 } from '../orchestrator';
 import { parseLocalIso, timeKey } from '../../services/datetime';
+import {
+  calendarEnabled,
+  createCalendarEvent,
+  updateCalendarEvent,
+  deleteCalendarEvent,
+} from '../../services/googleCalendar';
 import type OpenAI from 'openai';
 
 /** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
@@ -1185,8 +1191,26 @@ async function executeTool(
         type: 'event',
         createdBy: 'user',
       });
-      recordUndo(contact, `a criação do evento "${titulo}"`, () => deleteAgendaItem(item.id));
-      return `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}.`;
+      // F10: evento FIXO também vai para o Google Calendar (best-effort — a
+      // agenda local funciona igual se o Google falhar). Blocos não-fixos são
+      // planejamento interno e não poluem o calendário.
+      let gcalEventId: string | null = null;
+      if (fixo && calendarEnabled()) {
+        try {
+          gcalEventId = await createCalendarEvent({ title: titulo, date: data, startTime: inicio, endTime: fim });
+          if (gcalEventId) await updateAgendaItem(item.id, { gcalEventId });
+        } catch (err) {
+          console.error('[tool] criar_evento: falha ao criar no Google Calendar:', err);
+        }
+      }
+      recordUndo(contact, `a criação do evento "${titulo}"`, async () => {
+        await deleteAgendaItem(item.id);
+        if (gcalEventId) await deleteCalendarEvent(gcalEventId).catch(() => undefined);
+      });
+      return (
+        `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}` +
+        `${gcalEventId ? ' — também adicionado ao seu Google Calendar' : ''}.`
+      );
     }
 
     if (call.function.name === 'listar_itens_agenda') {
@@ -1236,16 +1260,37 @@ async function executeTool(
         updates.postponedCount = adiamentosItem;
       }
       await updateAgendaItem(id, updates);
-      recordUndo(contact, `a edição do item "${item.title}"`, () =>
-        updateAgendaItem(id, {
+      const after = { ...item, ...updates };
+      // F10: item espelhado → propaga a edição para o Google Calendar.
+      if (item.gcalEventId && calendarEnabled()) {
+        try {
+          await updateCalendarEvent(item.gcalEventId, {
+            ...(titulo ? { title: after.title } : {}),
+            date: after.date,
+            startTime: after.startTime,
+            endTime: after.endTime,
+          });
+        } catch (err) {
+          console.error('[tool] editar_item_agenda: falha ao propagar para o Google Calendar:', err);
+        }
+      }
+      recordUndo(contact, `a edição do item "${item.title}"`, async () => {
+        await updateAgendaItem(id, {
           title: item.title,
           startTime: item.startTime,
           endTime: item.endTime,
           date: item.date,
           postponedCount: item.postponedCount ?? 0,
-        })
-      );
-      const after = { ...item, ...updates };
+        });
+        if (item.gcalEventId && calendarEnabled()) {
+          await updateCalendarEvent(item.gcalEventId, {
+            title: item.title,
+            date: item.date,
+            startTime: item.startTime,
+            endTime: item.endTime,
+          }).catch(() => undefined);
+        }
+      });
       const alertaItem =
         adiamentosItem >= PROCRASTINATION_THRESHOLD
           ? `\n\n${procrastinationWarning(after.title, adiamentosItem)}`
@@ -1259,7 +1304,28 @@ async function executeTool(
       const item = await getAgendaItem(id);
       if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
       await deleteAgendaItem(id);
+      // F10: item espelhado → cancela o evento no Google Calendar também
+      // (senão o próximo sync recriaria o item aqui).
+      let gcalRemovido = false;
+      if (item.gcalEventId && calendarEnabled()) {
+        try {
+          await deleteCalendarEvent(item.gcalEventId);
+          gcalRemovido = true;
+        } catch (err) {
+          console.error('[tool] remover_item_agenda: falha ao remover do Google Calendar:', err);
+        }
+      }
       recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
+        // Recria no Google primeiro (id novo) para religar o espelho.
+        let novoGcalId: string | null = null;
+        if (gcalRemovido) {
+          novoGcalId = await createCalendarEvent({
+            title: item.title,
+            date: item.date,
+            startTime: item.startTime,
+            endTime: item.endTime,
+          }).catch(() => null);
+        }
         await createAgendaItem({
           title: item.title,
           date: item.date,
@@ -1273,9 +1339,13 @@ async function executeTool(
           ...(item.subagentId ? { subagentId: item.subagentId } : {}),
           ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
           ...(item.taskId ? { taskId: item.taskId } : {}),
+          ...(novoGcalId ? { gcalEventId: novoGcalId } : {}),
         });
       });
-      return `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime}).`;
+      return (
+        `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime})` +
+        `${gcalRemovido ? ' — removido também do Google Calendar' : ''}.`
+      );
     }
 
     if (call.function.name === 'concluir_tarefa_atual') {
