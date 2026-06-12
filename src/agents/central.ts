@@ -98,21 +98,30 @@ function leftoverContentWords(lower: string): string[] {
 }
 
 /**
- * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA
- * (somente frases de conclusão + fillers, sem outras palavras de conteúdo) e há
- * um item em andamento na agenda. Evita falsos positivos como "tá pronto pra
- * começar". Retorna a resposta a enviar, ou null se não se aplica.
+ * Decide se a mensagem é uma confirmação PURA de conclusão (somente frases de
+ * conclusão + fillers, sem outras palavras de conteúdo). Pura e exportada para
+ * os evals de regressão (npm run eval) — falso positivo aqui conclui tarefa
+ * errada, então cada mudança nas listas acima precisa passar pelos casos.
  */
-async function tryAdvanceAgenda(contact: string, text: string): Promise<string | null> {
+export function isPureDoneConfirmation(text: string): boolean {
   const lower = text.trim().toLowerCase();
   // Só dispara para mensagens curtas, evitando falsos positivos em textos longos.
-  if (lower.length > 40) return null;
+  if (lower.length > 40) return false;
   // Uma pergunta não é uma confirmação de conclusão (ex: "feito o quê?").
-  if (lower.includes('?')) return null;
-  if (!DONE_REGEX.test(lower)) return null;
+  if (lower.includes('?')) return false;
+  if (!DONE_REGEX.test(lower)) return false;
   // Blindagem: a mensagem precisa ser SÓ a confirmação. Se sobrar qualquer
   // palavra de conteúdo após remover frases de conclusão e fillers, não dispara.
-  if (leftoverContentWords(lower).length > 0) return null;
+  return leftoverContentWords(lower).length === 0;
+}
+
+/**
+ * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA e há
+ * um item em andamento na agenda. Retorna a resposta a enviar, ou null se não
+ * se aplica.
+ */
+async function tryAdvanceAgenda(contact: string, text: string): Promise<string | null> {
+  if (!isPureDoneConfirmation(text)) return null;
 
   const active = await getActiveItem();
   if (!active || active.status !== 'in_progress') return null;
@@ -149,7 +158,7 @@ const CORRECTION_REGEX =
  * pode cair num subagente de negócio que não tem como criar nada — e responde
  * texto bonito sem persistir (foi o bug do bloco da tarde de 10/06/2026).
  */
-const AGENDA_REGEX =
+export const AGENDA_REGEX =
   /\b(agenda|agendar?|agende|cronograma|compromissos?|lembretes?|me lembra|remarcar?|remarque|reagendar?|reagende|adiar?|adia|hor[áa]rios?|encaixar?|encaixe|reorganizar?|reorganize|planeja(r)? (o |meu )?dia|minha (tarde|manh[ãa]|semana|noite)|meu (dia|m[êe]s))\b/i;
 
 /**
@@ -166,7 +175,7 @@ const LAST_ROUTE_TTL_MS = 30 * 60 * 1000;
  * Só o caller decide se o score basta — 1 keyword solta ("hoje", "agenda")
  * é fraca demais para decidir sozinha e ia parar no subagente errado.
  */
-function routeByKeywords(
+export function routeByKeywords(
   text: string,
   subagents: Subagent[]
 ): { sub: Subagent; score: number } | null {
@@ -188,7 +197,7 @@ function routeByKeywords(
  * Usa o LLM para escolher o subagente quando as palavras-chave não bastam.
  * Considera o histórico recente para manter continuidade de assunto.
  */
-async function routeByLLM(
+export async function routeByLLM(
   text: string,
   subagents: Subagent[],
   recentContext: string,

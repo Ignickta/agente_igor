@@ -196,6 +196,21 @@ Todo dia às **03:30** um job silencioso cuida da memória de longo prazo:
 
 No boot, se ainda não existir perfil, ele é gerado uma única vez automaticamente.
 
+## 🧪 Evals de regressão
+
+Casos reais que já quebraram (ou quase) viram testes: regex de agenda, atalho
+"feito", guarda anti-alucinação, roteamento por keywords e aritmética de datas/fuso.
+**Rode antes de qualquer deploy que mexa em prompts, regex ou roteamento:**
+
+```bash
+npm run eval            # suítes determinísticas (sem custo de API)
+npm run eval -- --live  # + roteador LLM real (algumas chamadas do utility model)
+```
+
+Requer o `.env` do projeto. Sai com código 1 se algum caso falhar. Ao mexer em
+`DONE_PHRASES`, `AGENDA_REGEX`, `CLAIMS_ACTION_REGEX` ou keywords de subagentes,
+adicione o caso novo em `src/eval/run.ts`.
+
 ## 🚀 Deploy na VPS (Docker)
 
 O deploy roda o app num container Docker, na porta 3000, com restart automático.
