@@ -607,7 +607,7 @@ export async function runSubagent(
   contact = '',
   /** Profundidade de encadeamento (F8). 0 = chamada direta; >=1 = via consultar_subagente. */
   depth = 0,
-  opts: { isCorrection?: boolean; crossContext?: string } = {}
+  opts: { isCorrection?: boolean; crossContext?: string; ragContext?: string } = {}
 ): Promise<string> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
   // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
@@ -702,6 +702,12 @@ ${
 (use para manter o fio do assunto; mas a fonte da verdade sobre agenda/lembretes são SEMPRE as
 ferramentas — se outra área PROMETEU agendar algo, confirme com listar_lembretes antes de assumir
 que existe):\n${opts.crossContext}`
+      : ''
+  }${
+    opts.ragContext
+      ? `\n\nTrechos de conversas ANTIGAS possivelmente relevantes (recuperados automaticamente por
+similaridade — use se ajudarem a responder; podem estar DESATUALIZADOS: horários e planos antigos
+não valem mais, e a fonte da verdade sobre agenda/lembretes são sempre as ferramentas):\n${opts.ragContext}`
       : ''
   }`;
 

@@ -14,6 +14,8 @@ proativas (bom dia, lembretes).
 - **Mensagens proativas** agendadas (node-cron): bom dia e lembretes.
 - Subagentes **criados/removidos dinamicamente** via API admin (e, no futuro, pelo próprio WhatsApp).
 - **Memória** de conversa por contato no Firestore.
+- **RAG automático**: as trocas antigas mais similares à mensagem entram no contexto
+  de toda resposta, sem depender de o modelo chamar a busca no histórico.
 
 ### Subagentes iniciais
 

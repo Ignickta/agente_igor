@@ -37,6 +37,27 @@ const MIN_SIMILARITY = 0.25;
 const RECENT_ALWAYS = 3;
 
 /**
+ * Cache do embedding da consulta: recallFacts e relevantPastExchanges embedam a
+ * MESMA mensagem do usuário a cada turno — com o cache, vira uma única chamada
+ * de API por mensagem. LRU simples (Map preserva ordem de inserção).
+ */
+const queryEmbCache = new Map<string, number[]>();
+const QUERY_EMB_CACHE_MAX = 30;
+
+async function embedQuery(text: string): Promise<number[]> {
+  const key = text.slice(0, 2000);
+  const hit = queryEmbCache.get(key);
+  if (hit) return hit;
+  const vector = await embed(key);
+  queryEmbCache.set(key, vector);
+  if (queryEmbCache.size > QUERY_EMB_CACHE_MAX) {
+    const oldest = queryEmbCache.keys().next().value;
+    if (oldest !== undefined) queryEmbCache.delete(oldest);
+  }
+  return vector;
+}
+
+/**
  * Salva um fato no pool compartilhado. Best-effort no embedding: se a API
  * falhar, grava sem vetor (o fato ainda aparece pelo critério de recência).
  */
@@ -148,9 +169,53 @@ export async function logExchange(
       embedding,
       timestamp,
     });
+    // Mantém o cache do RAG automático em dia sem esperar o TTL.
+    const cached = logCache.get(contact);
+    if (cached) {
+      cached.entries.unshift({
+        subagentName,
+        user: userText.slice(0, 1500),
+        assistant: reply.slice(0, 1500),
+        embedding,
+        timestamp,
+      });
+    }
   } catch (err) {
     console.error('[memory] falha ao registrar troca no log:', err);
   }
+}
+
+/**
+ * Cache do log de conversas: o RAG automático roda em TODA mensagem, e reler a
+ * coleção inteira do Firestore a cada turno seria caro. O log só cresce pelo
+ * nosso próprio logExchange (que alimenta o cache), então 10 min de TTL é só
+ * uma rede de segurança para outras instâncias escrevendo no mesmo banco.
+ */
+type CachedEntry = Pick<
+  import('./firebase').ConversationEntry,
+  'subagentName' | 'user' | 'assistant' | 'embedding' | 'timestamp'
+>;
+const logCache = new Map<string, { entries: CachedEntry[]; at: number }>();
+const LOG_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/** Log do contato (mais recente primeiro), com cache. Nunca lança. */
+async function getLogCached(contact: string): Promise<CachedEntry[]> {
+  const hit = logCache.get(contact);
+  if (hit && Date.now() - hit.at < LOG_CACHE_TTL_MS) return hit.entries;
+  try {
+    const entries = await getConversationLog(contact);
+    logCache.set(contact, { entries, at: Date.now() });
+    return entries;
+  } catch (err) {
+    console.error('[memory] falha ao carregar log de conversas:', err);
+    return hit?.entries ?? [];
+  }
+}
+
+/** Formata uma troca do log para injeção em prompt / tool result. */
+function formatEntry(e: CachedEntry): string {
+  const d = new Date(e.timestamp);
+  return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${e.user}\nAgente: ${e.assistant}`;
 }
 
 /**
@@ -158,12 +223,12 @@ export async function logExchange(
  * relevantes formatadas com data, hora e subagente — pronto para tool result.
  */
 export async function searchHistory(contact: string, query: string, k = 5): Promise<string[]> {
-  const all = await getConversationLog(contact);
+  const all = await getLogCached(contact);
   if (all.length === 0) return [];
 
   let queryEmb: number[] = [];
   try {
-    queryEmb = await embed(query.slice(0, 2000));
+    queryEmb = await embedQuery(query);
   } catch (err) {
     console.error('[memory] embedding da busca falhou:', err);
     return [];
@@ -174,10 +239,52 @@ export async function searchHistory(contact: string, query: string, k = 5): Prom
     .sort((a, b) => b.score - a.score)
     .filter((s) => s.score >= MIN_SIMILARITY)
     .slice(0, k)
-    .map(({ e }) => {
-      const d = new Date(e.timestamp);
-      return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${e.user}\nAgente: ${e.assistant}`;
-    });
+    .map(({ e }) => formatEntry(e));
+}
+
+// ===================== RAG automático do histórico =====================
+
+/**
+ * Injeção automática é mais exigente que a busca por tool: entra no prompt de
+ * TODA mensagem, então abaixo deste score é ruído que só gasta contexto.
+ */
+const MIN_SIMILARITY_AUTO = 0.35;
+
+/**
+ * As trocas mais recentes já chegam ao modelo pela memória do subagente (12
+ * mensagens) e pelo crossContext (4 trocas globais) — reinjetá-las seria
+ * duplicação. Pula as N mais novas e busca só no passado "esquecido".
+ */
+const AUTO_SKIP_RECENT = 6;
+
+/**
+ * RAG automático: as `k` trocas ANTIGAS mais similares à mensagem atual, para
+ * injetar no prompt sem depender de o modelo lembrar de chamar
+ * buscar_no_historico. Best-effort: nunca lança; sem nada relevante, [].
+ */
+export async function relevantPastExchanges(
+  contact: string,
+  query: string,
+  k = 3
+): Promise<string[]> {
+  try {
+    const all = await getLogCached(contact);
+    const candidates = all.slice(AUTO_SKIP_RECENT);
+    if (candidates.length === 0) return [];
+
+    const queryEmb = await embedQuery(query);
+    if (!queryEmb.length) return [];
+
+    return candidates
+      .map((e) => ({ e, score: cosine(queryEmb, e.embedding || []) }))
+      .filter((s) => s.score >= MIN_SIMILARITY_AUTO)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k)
+      .map(({ e }) => formatEntry(e));
+  } catch (err) {
+    console.error('[memory] RAG automático falhou (seguindo sem ele):', err);
+    return [];
+  }
 }
 
 /**
@@ -190,7 +297,7 @@ export async function recallFacts(contact: string, query: string, k = 8): Promis
 
   let queryEmb: number[] = [];
   try {
-    queryEmb = await embed(query.slice(0, 2000));
+    queryEmb = await embedQuery(query);
   } catch (err) {
     console.error('[memory] embedding da consulta falhou (usando só recência):', err);
   }

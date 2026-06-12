@@ -12,7 +12,7 @@ import {
 } from '../services/firebase';
 import { runSubagent, ORCHESTRATOR_NAME } from './subagents';
 import { tryHandleCommand } from './commands';
-import { logExchange, recentExchanges } from '../services/memory';
+import { logExchange, recentExchanges, relevantPastExchanges } from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
 import { beginUndoGroup, recordUndo } from './undo';
 import { dayKey, timeKey } from '../services/datetime';
@@ -321,10 +321,13 @@ export async function handleMessage(
   console.log(`[central] roteado para: ${target.name}`);
 
   // 2) Carrega a memória DESTE subagente + as trocas recentes GLOBAIS (qualquer
-  //    subagente). As globais entram como contexto para o alvo não perder o fio
-  //    quando a mensagem anterior foi atendida por outra área.
-  const memory = await getRecentMemory(contact, target.id, 12);
-  const globalRecent = await recentExchanges(contact, 4);
+  //    subagente) + RAG automático: as trocas ANTIGAS mais similares à mensagem,
+  //    para o agente "lembrar" sem precisar acertar a tool buscar_no_historico.
+  const [memory, globalRecent, ragHits] = await Promise.all([
+    getRecentMemory(contact, target.id, 12),
+    recentExchanges(contact, 4),
+    relevantPastExchanges(contact, text, 3),
+  ]);
   const crossContext = globalRecent
     .filter((e) => e.subagentId !== target!.id)
     .map((e) => {
@@ -339,6 +342,7 @@ export async function handleMessage(
   const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
     isCorrection,
     ...(crossContext ? { crossContext } : {}),
+    ...(ragHits.length ? { ragContext: ragHits.join('\n\n') } : {}),
   });
 
   // 3) Persiste memória da conversa nesse subagente (usuário + resposta).
