@@ -535,6 +535,23 @@ export async function deleteAgendaItem(id: string): Promise<void> {
   await agendaCol.doc(id).delete();
 }
 
+/**
+ * Itens concluídos COM duração medida (startedAt + completedAt), mais recentes
+ * primeiro — a matéria-prima da calibração de estimativas. Igualdade única
+ * (status == done) para não exigir índice composto; o resto filtra em memória.
+ */
+export async function getMeasuredAgendaItems(
+  sinceMs: number,
+  limit = 50
+): Promise<AgendaItem[]> {
+  const snap = await agendaCol.where('status', '==', 'done').get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as AgendaItem))
+    .filter((i) => i.startedAt != null && i.completedAt != null && i.completedAt >= sinceMs)
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+    .slice(0, limit);
+}
+
 // ===================== Modo foco =====================
 
 /** Inicia/renova a sessão de foco de um contato (documento por contato). */

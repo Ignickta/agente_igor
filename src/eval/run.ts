@@ -19,6 +19,7 @@ import {
   isPureDoneConfirmation,
 } from '../agents/central';
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
+import { realDurationMinutes } from '../agents/estimate';
 import { CLAIMS_ACTION_REGEX } from '../agents/subagents';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import { weekRange, monthRange } from '../agents/orchestrator';
@@ -271,6 +272,22 @@ async function suiteLiveRouting(): Promise<void> {
   }
 }
 
+// ===================== Suíte F: calibração de durações =====================
+
+function suiteDurationCalibration(): void {
+  suite('realDurationMinutes — sanidade da duração medida');
+
+  const t0 = 1_750_000_000_000;
+  const min = (n: number) => n * 60000;
+
+  check('calibração', '45 min medidos → 45', realDurationMinutes(t0, t0 + min(45)) === 45);
+  check('calibração', '2 min (toque acidental) → null', realDurationMinutes(t0, t0 + min(2)) === null);
+  check('calibração', '9h (item esquecido aberto) → null', realDurationMinutes(t0, t0 + min(540)) === null);
+  check('calibração', 'conclusão antes do início → null', realDurationMinutes(t0, t0 - min(5)) === null);
+  check('calibração', 'sem startedAt → null', realDurationMinutes(undefined, t0) === null);
+  check('calibração', 'sem completedAt → null', realDurationMinutes(t0, null) === null);
+}
+
 // ===================== Suíte G (--live): roteador por embedding =====================
 
 async function suiteLiveEmbedding(): Promise<void> {
@@ -332,6 +349,7 @@ async function main(): Promise<void> {
   suiteClaimsRegex();
   suiteKeywordRouting();
   suiteDatetime();
+  suiteDurationCalibration();
   if (live) {
     await suiteLiveRouting();
     await suiteLiveEmbedding();

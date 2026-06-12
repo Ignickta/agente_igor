@@ -16,6 +16,9 @@ proativas (bom dia, lembretes).
 - **Memória** de conversa por contato no Firestore.
 - **RAG automático**: as trocas antigas mais similares à mensagem entram no contexto
   de toda resposta, sem depender de o modelo chamar a busca no histórico.
+- **Estimativas calibradas**: o agente mede a duração real das tarefas concluídas
+  (início → conclusão confirmada) e usa as medições para estimar as próximas e
+  dimensionar o cronograma pelo ritmo real do Igor.
 
 ### Subagentes iniciais
 

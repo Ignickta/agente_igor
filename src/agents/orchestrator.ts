@@ -15,6 +15,7 @@ import {
   updateTask,
 } from '../services/firebase';
 import { AgendaItem } from '../types';
+import { calibrationSummary } from './estimate';
 import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence } from '../services/datetime';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
@@ -153,6 +154,10 @@ export async function learnUserPatterns(days = 28): Promise<string> {
       `- Período mais produtivo (mais conclusões): ${topBucket[0]}.`,
       `- Taxa de tarefas concluídas com atraso: ${taxaAtraso}% (de ${completed.length} tarefas).`,
     ];
+    // F7: calibração real×estimado — quando há medições, o cronograma passa a
+    // dimensionar blocos pelo ritmo REAL do Igor, não pela estimativa crua.
+    const calib = await calibrationSummary();
+    if (calib) linhas.push(calib);
     return linhas.join('\n');
   } catch (err) {
     console.error('[orchestrator] falha ao aprender padrões:', err instanceof Error ? err.message : err);
@@ -566,7 +571,8 @@ export async function sendDailySchedule(date = dayKey()): Promise<void> {
 /** Marca um item como concluído e propaga para a Task de origem, se houver. */
 async function completeItem(item: AgendaItem): Promise<void> {
   if (item.status !== 'done') {
-    await updateAgendaItem(item.id, { status: 'done' });
+    // completedAt + startedAt = duração REAL, usada para calibrar estimativas.
+    await updateAgendaItem(item.id, { status: 'done', completedAt: Date.now() });
   }
   if (item.taskId) {
     // Propaga a conclusão para a Task (lembrete) que originou o item. Se for
@@ -610,7 +616,11 @@ async function announceNext(date: string, doneTitle: string): Promise<void> {
   const slot = `${next.startTime}–${next.endTime}`;
   if (next.startTime <= now) {
     if (next.status !== 'in_progress') {
-      await updateAgendaItem(next.id, { status: 'in_progress' });
+      // Preserva o primeiro início se o item já tinha startedAt (ex: pós-undo).
+      await updateAgendaItem(next.id, {
+        status: 'in_progress',
+        ...(next.startedAt ? {} : { startedAt: Date.now() }),
+      });
     }
     await sendText(
       config.ownerPhone,

@@ -141,7 +141,12 @@ async function tryAdvanceAgenda(contact: string, text: string): Promise<string |
 
   await advanceTask(active);
   recordUndo(contact, `a conclusão de "${active.title}" (atalho "feito")`, async () => {
-    await updateAgendaItem(active.id, { status: active.status });
+    // Restaura também o completedAt: desfazer a conclusão não pode deixar uma
+    // "duração medida" órfã contaminando a calibração de estimativas.
+    await updateAgendaItem(active.id, {
+      status: active.status,
+      completedAt: active.completedAt ?? null,
+    });
     if (active.taskId && taskPrev) await updateTask(active.taskId, taskPrev);
   });
   // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.

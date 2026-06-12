@@ -91,6 +91,13 @@ export interface AgendaItem {
    * do Igor; este campo garante que a pergunta seja feita uma única vez.
    */
   nudgedAt?: number;
+  /** Epoch ms de quando o item entrou em andamento (mede duração real). */
+  startedAt?: number;
+  /**
+   * Epoch ms da conclusão confirmada. O par startedAt→completedAt é a duração
+   * REAL da tarefa, usada para calibrar as estimativas do agente. null = não.
+   */
+  completedAt?: number | null;
 }
 
 /**
