@@ -12,10 +12,14 @@ import {
 } from '../services/firebase';
 import { runSubagent, ORCHESTRATOR_NAME } from './subagents';
 import { tryHandleCommand } from './commands';
-import { logExchange, recentExchanges, relevantPastExchanges } from '../services/memory';
+import {
+  logExchange,
+  recentExchanges,
+  relevantPastExchanges,
+  formatEntry,
+} from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
 import { beginUndoGroup, recordUndo } from './undo';
-import { dayKey, timeKey } from '../services/datetime';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
 const DONE_PHRASES = [
@@ -350,13 +354,7 @@ export async function handleMessage(
   ]);
   const crossContext = globalRecent
     .filter((e) => e.subagentId !== target!.id)
-    .map((e) => {
-      const d = new Date(e.timestamp);
-      return (
-        `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\n` +
-        `Igor: ${e.user.slice(0, 300)}\nAgente: ${e.assistant.slice(0, 300)}`
-      );
-    })
+    .map((e) => formatEntry(e, 300))
     .join('\n');
   const isCorrection = CORRECTION_REGEX.test(text);
   const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {

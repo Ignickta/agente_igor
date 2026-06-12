@@ -1,8 +1,14 @@
 import { config } from '../config';
 import { chatJson, ChatMessage } from '../services/openai';
 import { getConversationLog, listTasks, createTask } from '../services/firebase';
-import { rememberFact } from '../services/memory';
+import { rememberFact, formatEntry } from '../services/memory';
 import { dayKey, timeKey, addDays, parseLocalIso } from '../services/datetime';
+
+/**
+ * Identificador de origem gravado em fatos e follow-ups criados pela reflexão
+ * (no campo subagentId, que aqui marca a procedência, não um subagente real).
+ */
+export const REFLECTION_ORIGIN_ID = 'reflexao-diaria';
 
 /**
  * Reflexão diária: relê as conversas das últimas 24h e extrai o que ficou para
@@ -67,10 +73,7 @@ export async function reflectOnRecentExchanges(
   if (recent.length === 0) return { facts: 0, reminders: 0 };
 
   const convo = recent
-    .map((e) => {
-      const d = new Date(e.timestamp);
-      return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${e.user}\nAgente: ${e.assistant}`;
-    })
+    .map((e) => formatEntry(e))
     .join('\n\n')
     .slice(-MAX_CONVO_CHARS); // corta pelo INÍCIO: o fim do dia é o mais fresco
 
@@ -128,7 +131,7 @@ ${MAX_PROMISES} promessas.`;
     const texto = String(f || '').trim();
     if (!texto) continue;
     try {
-      await rememberFact(contact, 'reflexao-diaria', texto);
+      await rememberFact(contact, REFLECTION_ORIGIN_ID, texto);
       facts++;
     } catch (err) {
       console.error('[reflection] falha ao salvar fato:', err);
@@ -153,7 +156,7 @@ ${MAX_PROMISES} promessas.`;
           text: texto,
           remindAt: when.toISOString(),
           to: contact,
-          subagentId: 'reflexao-diaria',
+          subagentId: REFLECTION_ORIGIN_ID,
         });
         reminders++;
       } catch (err) {

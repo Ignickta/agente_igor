@@ -328,15 +328,21 @@ export interface SharedFact {
   archivedAt?: number;
 }
 
-export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<void> {
-  if (!data.text.trim()) return;
+/**
+ * Salva um fato no pool compartilhado. Retorna true se salvou, false se um
+ * fato ATIVO idêntico já existia (dedupe). Fatos arquivados não bloqueiam:
+ * um fato que expirou e foi arquivado pode voltar se for dito de novo.
+ */
+export async function saveSharedFact(data: Omit<SharedFact, 'id'>): Promise<boolean> {
+  if (!data.text.trim()) return false;
   const dup = await sharedFactsCol
     .where('contact', '==', data.contact)
     .where('text', '==', data.text)
-    .limit(1)
     .get();
-  if (!dup.empty) return;
+  const activeDup = dup.docs.some((d) => !(d.data() as SharedFact).archived);
+  if (activeDup) return false;
   await sharedFactsCol.add(data);
+  return true;
 }
 
 /** Fatos compartilhados ATIVOS do contato (não arquivados), mais recentes primeiro. */

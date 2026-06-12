@@ -121,24 +121,32 @@ fundido. Sem nada a fazer, devolva as duas listas vazias.`;
     const grupo = numeros.map(byIndex).filter((x): x is SharedFact => x !== null);
     if (!texto || grupo.length < 2) continue;
 
-    let embedding: number[] = [];
-    try {
-      embedding = await embed(texto);
-    } catch (err) {
-      console.error('[maintenance] embedding do fato fundido falhou (salvando sem vetor):', err);
+    // Caso mais comum de fusão: o modelo devolve o texto do fato mais completo
+    // do grupo. Esse fato SOBREVIVE como o fundido (não arquivar!) — sem isso,
+    // o dedupe do save pulava a gravação e o arquivamento apagava o conteúdo.
+    const normFato = (s: string) => s.trim().toLowerCase();
+    const sobrevivente = grupo.find((g) => normFato(g.text) === normFato(texto));
+
+    if (!sobrevivente) {
+      let embedding: number[] = [];
+      try {
+        embedding = await embed(texto);
+      } catch (err) {
+        console.error('[maintenance] embedding do fato fundido falhou (salvando sem vetor):', err);
+      }
+      // Preserva o createdAt mais novo do grupo: o fato fundido não deve "furar"
+      // a fila de recência do recall só por ter sido reescrito hoje.
+      const sid = grupo.find((g) => g.subagentId)?.subagentId;
+      await saveSharedFact({
+        contact,
+        text: texto,
+        embedding,
+        createdAt: Math.max(...grupo.map((g) => g.createdAt)),
+        ...(sid ? { subagentId: sid } : {}),
+      });
     }
-    // Preserva o createdAt mais novo do grupo: o fato fundido não deve "furar"
-    // a fila de recência do recall só por ter sido reescrito hoje.
-    await saveSharedFact({
-      contact,
-      text: texto,
-      embedding,
-      createdAt: Math.max(...grupo.map((g) => g.createdAt)),
-      ...(grupo.find((g) => g.subagentId)?.subagentId
-        ? { subagentId: grupo.find((g) => g.subagentId)!.subagentId }
-        : {}),
-    });
     for (const g of grupo) {
+      if (g.id === sobrevivente?.id) continue; // ele É o fato fundido; fica ativo
       if (archivedIds.has(g.id)) continue;
       await archiveSharedFact(g.id);
       archivedIds.add(g.id);

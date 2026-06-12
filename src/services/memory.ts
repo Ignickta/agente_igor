@@ -4,6 +4,7 @@ import {
   getSharedFacts,
   saveConversationEntry,
   getConversationLog,
+  ConversationEntry,
 } from './firebase';
 import { dayKey, timeKey } from './datetime';
 
@@ -169,7 +170,9 @@ export async function logExchange(
       embedding,
       timestamp,
     });
-    // Mantém o cache do RAG automático em dia sem esperar o TTL.
+    // Mantém o cache do RAG automático em dia sem esperar o TTL. O teto
+    // espelha o limite do getConversationLog — sem ele, uma rajada de
+    // mensagens dentro da janela do TTL inflaria o array sem limite.
     const cached = logCache.get(contact);
     if (cached) {
       cached.entries.unshift({
@@ -179,6 +182,7 @@ export async function logExchange(
         embedding,
         timestamp,
       });
+      if (cached.entries.length > 800) cached.entries.length = 800;
     }
   } catch (err) {
     console.error('[memory] falha ao registrar troca no log:', err);
@@ -192,7 +196,7 @@ export async function logExchange(
  * uma rede de segurança para outras instâncias escrevendo no mesmo banco.
  */
 type CachedEntry = Pick<
-  import('./firebase').ConversationEntry,
+  ConversationEntry,
   'subagentName' | 'user' | 'assistant' | 'embedding' | 'timestamp'
 >;
 const logCache = new Map<string, { entries: CachedEntry[]; at: number }>();
@@ -212,18 +216,30 @@ async function getLogCached(contact: string): Promise<CachedEntry[]> {
   }
 }
 
-/** Formata uma troca do log para injeção em prompt / tool result. */
-function formatEntry(e: CachedEntry): string {
+/**
+ * Formata uma troca para injeção em prompt / tool result. `maxChars` trunca
+ * cada lado da troca (para contextos com orçamento curto, ex: crossContext).
+ */
+export function formatEntry(
+  e: Pick<CachedEntry, 'subagentName' | 'user' | 'assistant' | 'timestamp'>,
+  maxChars?: number
+): string {
   const d = new Date(e.timestamp);
-  return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${e.user}\nAgente: ${e.assistant}`;
+  const user = maxChars ? e.user.slice(0, maxChars) : e.user;
+  const assistant = maxChars ? e.assistant.slice(0, maxChars) : e.assistant;
+  return `[${dayKey(d)} ${timeKey(d)} | ${e.subagentName}]\nIgor: ${user}\nAgente: ${assistant}`;
 }
 
 /**
  * Busca semântica no histórico de conversas antigas. Retorna as trocas mais
  * relevantes formatadas com data, hora e subagente — pronto para tool result.
+ *
+ * Lê DIRETO do Firestore (sem cache): a tool é chamada raramente e precisa
+ * enxergar trocas recém-gravadas por outra instância (deploy com container
+ * antigo vivo, dev local) — o cache de 10 min fica só no RAG automático.
  */
 export async function searchHistory(contact: string, query: string, k = 5): Promise<string[]> {
-  const all = await getLogCached(contact);
+  const all = await getConversationLog(contact);
   if (all.length === 0) return [];
 
   let queryEmb: number[] = [];
