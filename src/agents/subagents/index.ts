@@ -16,6 +16,9 @@ import {
   createAgendaItem,
   getAgendaItem,
   deleteAgendaItem,
+  getPendingRouteSuggestion,
+  markRouteSuggestionApplied,
+  updateSubagent,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
 import { getProfileCached } from '../maintenance';
@@ -217,6 +220,17 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         },
         required: ['fato'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'aplicar_sugestoes_roteamento',
+      description:
+        'Aplica as sugestões PENDENTES de palavras-chave de roteamento (geradas pelo ' +
+        'aprendizado semanal — relatório 🧭). Use SOMENTE quando o Igor confirmar que quer ' +
+        'aplicá-las (ex: "aplica as sugestões de roteamento", "pode aplicar").',
+      parameters: { type: 'object', properties: {}, required: [] },
     },
   },
   {
@@ -577,6 +591,7 @@ const WRITE_TOOLS = new Set([
   'desfazer_ultima_acao',
   'acionar_automacao',
   'salvar_fato',
+  'aplicar_sugestoes_roteamento',
 ]);
 
 /**
@@ -1031,6 +1046,36 @@ async function executeTool(
         }
       }
       return await queryApp(app, colecao, filtros, limite);
+    }
+
+    if (call.function.name === 'aplicar_sugestoes_roteamento') {
+      const sug = await getPendingRouteSuggestion();
+      if (!sug) return 'Não há sugestões de roteamento pendentes para aplicar.';
+      const subs = await listSubagents(true);
+      const aplicadas: string[] = [];
+      const anteriores = new Map<string, string[]>();
+      for (const item of sug.items) {
+        const sub = subs.find((s) => s.id === item.subagentId);
+        if (!sub) continue;
+        const atuais = new Set(sub.keywords.map((k) => k.toLowerCase()));
+        const novas = item.keywords.filter((k) => !atuais.has(k.toLowerCase()));
+        if (novas.length === 0) continue;
+        anteriores.set(sub.id, sub.keywords);
+        await updateSubagent(sub.id, { keywords: [...sub.keywords, ...novas] });
+        aplicadas.push(`${sub.name}: +${novas.join(', +')}`);
+      }
+      await markRouteSuggestionApplied(sug.id);
+      if (aplicadas.length === 0) {
+        return 'As sugestões pendentes já estavam cobertas pelas keywords atuais — nada a aplicar.';
+      }
+      recordUndo(contact, 'a aplicação das sugestões de roteamento', async () => {
+        for (const [id, kw] of anteriores) {
+          await updateSubagent(id, { keywords: kw });
+        }
+      });
+      // O descritor do roteador por embedding inclui as keywords, então ele se
+      // recalibra sozinho na próxima mensagem (a chave do cache muda).
+      return `Sugestões aplicadas ✅:\n${aplicadas.join('\n')}`;
     }
 
     if (call.function.name === 'pesquisar') {

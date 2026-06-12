@@ -6,6 +6,7 @@ import {
   getRecentMemory,
   appendMemory,
   recordMessage,
+  recordRouteMiss,
   updateAgendaItem,
   getTask,
   updateTask,
@@ -178,6 +179,9 @@ export const AGENDA_REGEX =
  */
 const lastRouteByContact = new Map<string, { subagentId: string; at: number }>();
 const LAST_ROUTE_TTL_MS = 30 * 60 * 1000;
+
+/** Janela em que uma correção ainda aponta para a troca anterior (F9). */
+const ROUTE_MISS_WINDOW_MS = 5 * 60 * 1000;
 
 /**
  * Tenta um roteamento rápido por palavras-chave antes de gastar uma
@@ -381,6 +385,29 @@ export async function handleMessage(
     .map((e) => formatEntry(e, 300))
     .join('\n');
   const isCorrection = CORRECTION_REGEX.test(text);
+
+  // F9: correção rápida = possível erro de roteamento da TROCA ANTERIOR.
+  // Registro generoso (a correção pode ser de conteúdo); o job semanal usa o
+  // LLM para filtrar e sugerir keywords. Se a correção foi roteada para OUTRO
+  // subagente, guarda o palpite da rota certa. Best-effort: nunca bloqueia.
+  const prevExchange = globalRecent[globalRecent.length - 1];
+  if (
+    isCorrection &&
+    prevExchange &&
+    Date.now() - prevExchange.timestamp < ROUTE_MISS_WINDOW_MS
+  ) {
+    recordRouteMiss({
+      contact,
+      text: prevExchange.user.slice(0, 500),
+      routedToId: prevExchange.subagentId,
+      routedToName: prevExchange.subagentName,
+      correction: text.slice(0, 500),
+      ...(prevExchange.subagentId !== target.id
+        ? { suggestedCorrectName: target.name }
+        : {}),
+      at: Date.now(),
+    }).catch((err) => console.error('[central] falha ao registrar route miss:', err));
+  }
   const reply = await runSubagent(target, text, memory, fromAudio, contact, 0, {
     isCorrection,
     ...(crossContext ? { crossContext } : {}),

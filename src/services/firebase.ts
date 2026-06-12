@@ -24,6 +24,8 @@ const focusCol = db.collection('focus');
 const sharedFactsCol = db.collection('shared_facts');
 const conversationLogCol = db.collection('conversation_log');
 const jobLocksCol = db.collection('job_locks');
+const routeMissesCol = db.collection('route_misses');
+const routeSuggestionsCol = db.collection('route_suggestions');
 
 // ===================== Subagentes =====================
 
@@ -413,6 +415,71 @@ export async function getConversationLog(
     .map((d) => ({ id: d.id, ...d.data() } as ConversationEntry))
     .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, limit);
+}
+
+// ===================== F9: aprendizado de roteamento =====================
+
+/**
+ * Possível erro de roteamento: o Igor corrigiu logo após uma troca. A detecção
+ * é generosa (correção pode ser de conteúdo); o job semanal usa o LLM para
+ * separar o joio e sugerir keywords.
+ */
+export interface RouteMiss {
+  id: string;
+  contact: string;
+  /** A mensagem que pode ter sido mal roteada. */
+  text: string;
+  routedToId: string;
+  routedToName: string;
+  /** A correção do Igor que disparou o registro. */
+  correction: string;
+  /** Para onde a correção foi roteada, quando DIFERENTE — palpite da rota certa. */
+  suggestedCorrectName?: string;
+  at: number;
+}
+
+export async function recordRouteMiss(data: Omit<RouteMiss, 'id'>): Promise<void> {
+  await routeMissesCol.add(data);
+}
+
+/** Misses desde `sinceMs`, em ordem cronológica (range num campo só — sem índice). */
+export async function getRouteMisses(sinceMs: number): Promise<RouteMiss[]> {
+  const snap = await routeMissesCol.where('at', '>=', sinceMs).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as RouteMiss))
+    .sort((a, b) => a.at - b.at);
+}
+
+/** Sugestão de keywords por subagente, aguardando confirmação do Igor. */
+export interface RouteSuggestion {
+  id: string;
+  createdAt: number;
+  applied: boolean;
+  items: { subagentId: string; subagentName: string; keywords: string[] }[];
+}
+
+export async function saveRouteSuggestion(
+  items: RouteSuggestion['items']
+): Promise<void> {
+  // Uma pendente por vez: a nova substitui (marca como aplicada) as antigas,
+  // senão um "aplica" tardio executaria sugestões de semanas atrás.
+  const old = await routeSuggestionsCol.where('applied', '==', false).get();
+  for (const d of old.docs) {
+    await d.ref.set({ applied: true }, { merge: true });
+  }
+  await routeSuggestionsCol.add({ items, createdAt: Date.now(), applied: false });
+}
+
+export async function getPendingRouteSuggestion(): Promise<RouteSuggestion | null> {
+  const snap = await routeSuggestionsCol.where('applied', '==', false).get();
+  const all = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as RouteSuggestion))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return all[0] ?? null;
+}
+
+export async function markRouteSuggestionApplied(id: string): Promise<void> {
+  await routeSuggestionsCol.doc(id).set({ applied: true }, { merge: true });
 }
 
 // ===================== Métricas de uso =====================

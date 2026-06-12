@@ -23,6 +23,10 @@ proativas (bom dia, lembretes).
   para de adiar em silêncio — pergunta o que está travando e propõe quebrar em
   passos, fazer uma versão de 10 minutos agora, ou desistir conscientemente. No
   cronograma, tarefas muito adiadas vão para o primeiro bloco do dia.
+- **Aprendizado de roteamento**: correções rápidas do Igor são registradas como
+  possíveis erros de rota; todo domingo o agente analisa a semana, sugere
+  palavras-chave novas por subagente e aplica quando o Igor confirmar
+  ("aplica as sugestões de roteamento") — com desfazer.
 
 ### Subagentes iniciais
 

@@ -13,6 +13,7 @@ import {
   sendPendingFollowUp,
 } from './agents/reports';
 import { runMemoryMaintenance, bootstrapProfile } from './agents/maintenance';
+import { sendRouteLearningReport } from './agents/routeLearning';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -127,6 +128,19 @@ export function startScheduler(): void {
     () => {
       withJobLock('weekly_review', dayKey(), sendWeeklyReview).catch((err) =>
         console.error('[scheduler] falha na revisão semanal:', err)
+      );
+    },
+    opts
+  );
+
+  // Aprendizado de roteamento — todo domingo às 19:00: analisa as correções
+  // da semana, separa rota errada de correção de conteúdo e sugere keywords
+  // (aplicação só com confirmação do Igor). Silencioso quando não há nada.
+  cron.schedule(
+    '0 19 * * 0',
+    () => {
+      withJobLock('route_learning', dayKey(), sendRouteLearningReport).catch((err) =>
+        console.error('[scheduler] falha no aprendizado de roteamento:', err)
       );
     },
     opts
