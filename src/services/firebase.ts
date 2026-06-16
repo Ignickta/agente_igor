@@ -26,6 +26,7 @@ const conversationLogCol = db.collection('conversation_log');
 const jobLocksCol = db.collection('job_locks');
 const routeMissesCol = db.collection('route_misses');
 const routeSuggestionsCol = db.collection('route_suggestions');
+const settingsCol = db.collection('settings');
 
 // ===================== Subagentes =====================
 
@@ -660,6 +661,38 @@ export async function getExpiredFocusSessions(now = Date.now()): Promise<FocusSe
   return snap.docs
     .map((d) => d.data() as FocusSession)
     .filter((s) => s.endsAt <= now);
+}
+
+// ===================== Configurações de proatividade =====================
+
+/**
+ * Configurações editáveis pelo painel (agente-igor-web). Persistidas num
+ * documento único `settings/proactive`. Os defaults vêm do `config` (envs);
+ * o que estiver salvo aqui SOBRESCREVE em runtime via o serviço `settings`.
+ */
+export interface ProactiveSettings {
+  maxDailyWorkMinutes: number;
+  urgentKeywords: string[];
+  notifications: {
+    morningSchedule: { enabled: boolean; time: string };
+    eveningSummary: { enabled: boolean; time: string };
+    weeklyReview: { enabled: boolean; time: string };
+    subagentReports: { enabled: boolean };
+  };
+}
+
+const SETTINGS_DOC = 'proactive';
+
+/** Lê as configurações salvas, ou null se nunca foram gravadas. */
+export async function getStoredSettings(): Promise<ProactiveSettings | null> {
+  const doc = await settingsCol.doc(SETTINGS_DOC).get();
+  if (!doc.exists) return null;
+  return doc.data() as ProactiveSettings;
+}
+
+/** Grava (sobrescreve) as configurações de proatividade. */
+export async function saveStoredSettings(data: ProactiveSettings): Promise<void> {
+  await settingsCol.doc(SETTINGS_DOC).set(data);
 }
 
 export { db };

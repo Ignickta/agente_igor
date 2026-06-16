@@ -31,6 +31,8 @@ import { getUptimeSeconds, getRecentErrors, getLastMessageProcessedAt } from '..
 import { handleMessage } from '../agents/central';
 import { embed } from '../services/openai';
 import { cosine } from '../services/memory';
+import { effectiveSettings, updateSettings } from '../services/settings';
+import { ProactiveSettings } from '../services/firebase';
 
 export const adminRouter = Router();
 
@@ -215,6 +217,32 @@ adminRouter.post('/chat', async (req, res) => {
   } catch (err) {
     console.error('[chat] erro ao processar mensagem no playground:', err);
     res.status(500).json({ error: 'Erro ao processar mensagem' });
+  }
+});
+
+// ===================== Configurações de proatividade =====================
+
+adminRouter.get('/settings', async (_req, res) => {
+  try {
+    res.json(effectiveSettings());
+  } catch (err) {
+    console.error('[settings] erro ao obter configurações:', err);
+    res.status(500).json({ error: 'Erro ao carregar configurações' });
+  }
+});
+
+adminRouter.put('/settings', async (req, res) => {
+  try {
+    const body = req.body as Partial<ProactiveSettings>;
+    if (!body || typeof body !== 'object') {
+      return res.status(400).json({ error: 'Corpo inválido' });
+    }
+    // updateSettings normaliza e mescla com os defaults — tolera payload parcial.
+    await updateSettings(body as ProactiveSettings);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[settings] erro ao salvar configurações:', err);
+    res.status(500).json({ error: 'Erro ao salvar configurações' });
   }
 });
 

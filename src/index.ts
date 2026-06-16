@@ -13,6 +13,7 @@ import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
 import { recordMessageProcessed, recordError } from './services/status';
+import { loadSettings } from './services/settings';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -197,6 +198,10 @@ async function bootstrap(): Promise<void> {
 
   // Garante o subagente orquestrador mesmo em bancos já populados (idempotente).
   await ensureSubagent(ORCHESTRATOR_SUBAGENT);
+
+  // Carrega as configurações de proatividade do painel (Firestore) para o
+  // overlay em runtime. Sem isso, urgentKeywords/carga/flags caem nos defaults.
+  await loadSettings();
 
   // Inicia jobs proativos (cronograma do dia, lembretes, transições)
   startScheduler();

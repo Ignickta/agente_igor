@@ -13,6 +13,7 @@ import {
 import { weekRange } from './orchestrator';
 import { CLAIMS_ACTION_REGEX } from './subagents';
 import { dayKey, addDays, dayStartMs, timeKey } from '../services/datetime';
+import { isNotificationEnabled } from '../services/settings';
 
 /** True se as notificações proativas estão ligadas e há dono configurado. */
 function canNotify(): boolean {
@@ -69,7 +70,7 @@ export async function sendPendingFollowUp(): Promise<void> {
  * de amanhã (por prioridade na agenda).
  */
 export async function sendNightlySummary(): Promise<void> {
-  if (!canNotify()) return;
+  if (!canNotify() || !isNotificationEnabled('eveningSummary')) return;
   const today = dayKey();
   const start = dayStartMs(today);
   const end = Date.now();
@@ -106,7 +107,7 @@ export async function sendNightlySummary(): Promise<void> {
  * destaques da semana (resumidos pelo LLM a partir das tarefas concluídas).
  */
 export async function sendWeeklyReview(): Promise<void> {
-  if (!canNotify()) return;
+  if (!canNotify() || !isNotificationEnabled('weeklyReview')) return;
   const { start, end } = weekRange();
   const startMs = dayStartMs(start);
   const endMs = dayStartMs(end) + 86400000;
@@ -217,7 +218,7 @@ export async function runProactiveCheck(): Promise<void> {
  * itens pendentes da área.
  */
 export async function sendSubagentWeeklyReports(): Promise<void> {
-  if (!canNotify()) return;
+  if (!canNotify() || !isNotificationEnabled('subagentReports')) return;
   const subs = await listSubagents();
   const metrics = await getMetrics(7);
   const pending = await getPendingTasks();

@@ -18,6 +18,7 @@ import { AgendaItem } from '../types';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
 import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence } from '../services/datetime';
+import { getMaxDailyWorkMinutes, isNotificationEnabled } from '../services/settings';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
 export { dayKey, addDays, weekdayOf };
@@ -377,7 +378,7 @@ function itemMinutes(i: AgendaItem): number {
 }
 
 /**
- * Verifica se a carga do dia ultrapassa o limite (config.maxDailyWorkMinutes) e,
+ * Verifica se a carga do dia ultrapassa o limite (getMaxDailyWorkMinutes) e,
  * se sim, pede ao LLM quais itens NÃO-fixos realocar para amanhã. Retorna um
  * texto de aviso pronto para o WhatsApp, ou null se a carga estiver ok.
  */
@@ -389,7 +390,7 @@ export async function detectOverload(date = dayKey()): Promise<string | null> {
   const totalMin = items
     .filter((i) => i.status !== 'done')
     .reduce((acc, i) => acc + itemMinutes(i), 0);
-  const cap = config.maxDailyWorkMinutes;
+  const cap = getMaxDailyWorkMinutes();
   if (totalMin <= cap || moveable.length === 0) return null;
 
   const horas = (totalMin / 60).toFixed(1);
@@ -591,6 +592,10 @@ export async function upcomingView(days = 7, ref = dayKey()): Promise<string> {
 export async function sendDailySchedule(date = dayKey()): Promise<void> {
   if (!config.ownerPhone) {
     console.warn('[orchestrator] OWNER_PHONE ausente — cronograma não enviado.');
+    return;
+  }
+  if (!isNotificationEnabled('morningSchedule')) {
+    console.log('[orchestrator] cronograma do dia desativado nas configurações — não enviado.');
     return;
   }
   const items = await generateDailySchedule(date);

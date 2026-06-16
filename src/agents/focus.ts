@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { sendText } from '../services/evolution';
 import { timeKey } from '../services/datetime';
+import { getUrgentKeywords } from '../services/settings';
 import {
   startFocus,
   getFocus,
@@ -70,7 +71,7 @@ function parseFocusMinutes(text: string): number {
 /** True se a mensagem é marcada como urgente (passa mesmo durante o foco). */
 export function isUrgent(text: string): boolean {
   const t = text.toLowerCase();
-  return config.urgentKeywords.some((k) => t.includes(k));
+  return getUrgentKeywords().some((k) => t.includes(k));
 }
 
 /**
