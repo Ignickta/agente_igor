@@ -414,8 +414,8 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       name: 'realocar_agenda',
       description:
         'Reorganiza os BLOCOS do cronograma de um dia conforme um pedido em linguagem natural ' +
-        '(ex: "adia o dentista pra depois do almoço"). Itens fixos do usuário (prioridade 1) ' +
-        'nunca são movidos. Para mudar horário/texto de um LEMBRETE avulso, prefira ' +
+        '(ex: "adia o dentista pra depois do almoço"). Por padrão itens fixos (prioridade 1) ' +
+        'não são movidos. Para mudar horário/texto de um LEMBRETE avulso, prefira ' +
         'listar_lembretes + editar_lembrete.',
       parameters: {
         type: 'object',
@@ -430,6 +430,14 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
               'Dia local YYYY-MM-DD a reorganizar. Opcional; padrão = hoje. Use a data de ' +
               'AMANHÃ do contexto quando o pedido for sobre amanhã.',
           },
+          readaptar_tudo: {
+            type: 'boolean',
+            description:
+              'true quando o Igor pede para READAPTAR/RECOMEÇAR o dia inteiro a partir de um ' +
+              'horário (ex: "readapte minha agenda para começar às 9:30", "joga tudo pra depois ' +
+              'das 14h"). Nesse caso até os itens fixos podem ser movidos. Padrão false: ajuste ' +
+              'pontual que preserva os compromissos fixos.',
+          },
         },
         required: ['instrucao'],
       },
@@ -440,9 +448,12 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'criar_evento',
       description:
-        'Cria um EVENTO com horário de início e fim na agenda (ex: "reunião amanhã 15h às 16h"). ' +
-        'Por padrão o evento é FIXO (prioridade 1, nunca movido pelo reorganizador). Use para ' +
-        'compromissos com hora marcada; para um simples "me lembra de X", use criar_lembrete.',
+        'Cria um bloco com horário de início e fim na agenda. Por padrão o bloco é MÓVEL: ' +
+        'o reorganizador pode remanejá-lo quando o Igor pedir para readaptar o dia. Marque ' +
+        'fixo=true SOMENTE quando for um compromisso real com hora marcada e inegociável ' +
+        '(ex: "reunião 15h", "dentista 10h", evento de calendário) — nunca para tarefas que ' +
+        'você apenas encaixou num horário sugerido ("terminar os pedidos", "criar os bots"), ' +
+        'pois isso travaria a readaptação. Para um simples "me lembra de X", use criar_lembrete.',
       parameters: {
         type: 'object',
         properties: {
@@ -455,7 +466,9 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           fim: { type: 'string', description: 'Fim HH:mm (ex: 16:00).' },
           fixo: {
             type: 'boolean',
-            description: 'Se false, o evento pode ser remanejado pelo agente. Padrão true.',
+            description:
+              'true SÓ para compromisso real com hora marcada e inegociável (reunião, médico). ' +
+              'Padrão false: bloco apenas encaixado num horário, que o agente pode remanejar.',
           },
         },
         required: ['titulo', 'inicio', 'fim'],
@@ -1156,7 +1169,8 @@ async function executeTool(
         endTime: i.endTime,
         postponedCount: i.postponedCount ?? 0,
       }));
-      const result = await reorganize(instrucao, data);
+      const forceAll = args.readaptar_tudo === true;
+      const result = await reorganize(instrucao, data, forceAll);
       recordUndo(contact, `a reorganização da agenda de ${data}`, async () => {
         for (const item of before) {
           await updateAgendaItem(item.id, {
@@ -1174,7 +1188,7 @@ async function executeTool(
       const data = String(args.data || '').trim() || dayKey();
       const inicio = String(args.inicio || '').trim();
       const fim = String(args.fim || '').trim();
-      const fixo = args.fixo !== false;
+      const fixo = args.fixo === true;
       if (!titulo) return 'Informe o título do evento.';
       if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
       if (!/^\d{2}:\d{2}$/.test(inicio) || !/^\d{2}:\d{2}$/.test(fim)) {
@@ -1203,7 +1217,10 @@ async function executeTool(
         endTime: fim,
         priority: fixo ? 1 : 3,
         type: 'event',
-        createdBy: 'user',
+        // Fixo = compromisso do usuário (imutável); móvel = bloco de planejamento
+        // que o reorganizador pode remanejar. O createdBy precisa acompanhar o
+        // fixo, senão a readaptação trava (reorganize pula createdBy === 'user').
+        createdBy: fixo ? 'user' : 'agent',
       });
       // F10: evento FIXO também vai para o Google Calendar (best-effort — a
       // agenda local funciona igual se o Google falhar). Blocos não-fixos são

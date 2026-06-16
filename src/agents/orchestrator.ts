@@ -753,7 +753,11 @@ export async function getActiveItem(date = dayKey()): Promise<AgendaItem | null>
  * depois do almoço"). Itens fixos (priority 1) nunca são movidos. Retorna o
  * texto de confirmação com o novo cronograma.
  */
-export async function reorganize(instruction: string, date = dayKey()): Promise<string> {
+export async function reorganize(
+  instruction: string,
+  date = dayKey(),
+  forceAll = false
+): Promise<string> {
   const items = await getAgendaForDay(date);
   if (items.length === 0) {
     // A agenda (blocos de cronograma) pode estar vazia e ainda assim haver
@@ -783,14 +787,19 @@ export async function reorganize(instruction: string, date = dayKey()): Promise<
     startTime: i.startTime,
     endTime: i.endTime,
     priority: i.priority,
-    fixed: i.priority === 1 || i.createdBy === 'user',
+    // forceAll: o Igor pediu pra readaptar o dia inteiro — nada é intocável.
+    fixed: forceAll ? false : i.priority === 1 || i.createdBy === 'user',
   }));
+
+  const regraFixos = forceAll
+    ? '- O Igor pediu para READAPTAR O DIA TODO: você PODE mover qualquer item, inclusive os fixos.'
+    : '- Itens com "fixed": true (priority 1) NUNCA podem mudar de horário. Mantenha-os iguais.';
 
   const system = `Você reorganiza a agenda do Igor conforme um pedido em linguagem natural.
 
 Regras:
-- Itens com "fixed": true (priority 1) NUNCA podem mudar de horário. Mantenha-os iguais.
-- Reencaixe os demais sem sobreposição, respeitando o pedido do usuário.
+${regraFixos}
+- Reencaixe os itens sem sobreposição, respeitando o pedido do usuário.
 - Não invente itens novos nem remova existentes; apenas ajuste startTime/endTime.
 
 Responda com TODOS os itens (mesmo os que não mudaram) no campo "itens".`;
@@ -852,8 +861,9 @@ Novo cronograma:`;
   for (const u of updates) {
     const item = byId.get(u.id);
     if (!item) continue;
-    // Trava de segurança: nunca move item fixo, mesmo que o modelo tente.
-    if (item.priority === 1 || item.createdBy === 'user') continue;
+    // Trava de segurança: nunca move item fixo, mesmo que o modelo tente —
+    // EXCETO quando o Igor pediu para readaptar o dia inteiro (forceAll).
+    if (!forceAll && (item.priority === 1 || item.createdBy === 'user')) continue;
     if (!u.startTime || !u.endTime) continue;
     if (u.startTime === item.startTime && u.endTime === item.endTime) continue;
     // F8: mover para MAIS TARDE conta como adiamento; antecipar zera nada.
@@ -872,10 +882,10 @@ Novo cronograma:`;
 
   const updated = await getAgendaForDay(date);
   if (applied === 0) {
-    return (
-      'Nenhum horário foi alterado — os itens envolvidos são fixos (criados por você) ' +
-      `ou já estavam nos horários pedidos.\n\n${formatSchedule(updated, date)}`
-    );
+    const motivo = forceAll
+      ? 'os itens já estavam nos horários pedidos'
+      : 'os itens envolvidos são fixos (compromissos com hora marcada) ou já estavam nos horários pedidos';
+    return `Nenhum horário foi alterado — ${motivo}.\n\n${formatSchedule(updated, date)}`;
   }
   const aviso = procrastinados.length ? `\n\n${procrastinados.join('\n\n')}` : '';
   return `Pronto, reorganizei (${applied} ${applied === 1 ? 'item' : 'itens'})! ✨\n\n${formatSchedule(updated, date)}${aviso}`;

@@ -14,6 +14,7 @@ import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/def
 import { startScheduler } from './scheduler';
 import { recordMessageProcessed, recordError } from './services/status';
 import { loadSettings } from './services/settings';
+import { enqueueMessage } from './services/messageBuffer';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -133,26 +134,52 @@ async function processIncoming(body: unknown): Promise<void> {
 
   if (!text.trim()) return;
 
+  // Debounce de rajada: texto simples do usuário é agrupado por contato numa
+  // janela curta antes de processar — várias mensagens seguidas viram UMA só,
+  // o que evita respostas em dobro com agendas conflitantes. Áudio/mídia e
+  // ações de foco/comando seguem direto (chegam como unidade ou são one-shot).
+  const isCommand = text.trim().startsWith('/');
+  const isFocusAction = isCancelFocusRequest(text) || isFocusRequest(text);
+  const debounceable = !msg.isAudio && !msg.mediaType && !isCommand && !isFocusAction;
+
+  if (debounceable) {
+    const isAudio = msg.isAudio;
+    enqueueMessage(msg.from, text, (merged) => {
+      handleResolvedText(msg.from, merged, isAudio).catch((err) =>
+        console.error('[webhook] erro ao processar lote:', err)
+      );
+    });
+    return;
+  }
+
+  await handleResolvedText(msg.from, text, msg.isAudio);
+}
+
+/**
+ * Processa um texto já resolvido (transcrito/extraído e, quando aplicável,
+ * agrupado pela rajada): modo foco → roteamento pelo agente → resposta.
+ */
+async function handleResolvedText(from: string, text: string, isAudio: boolean): Promise<void> {
   // F3: modo foco. Pedido de foco entra direto; pedido de SAIR encerra; durante
   // o foco, mensagens não urgentes são seguradas com um aviso curto. Comandos
   // administrativos ("/...") e mensagens urgentes NUNCA são bloqueados — o
   // usuário precisa poder se administrar mesmo em foco.
   try {
     if (isCancelFocusRequest(text)) {
-      const reply = await cancelFocus(msg.from);
-      await sendText(msg.from, reply, 800);
+      const reply = await cancelFocus(from);
+      await sendText(from, reply, 800);
       return;
     }
     if (isFocusRequest(text)) {
-      const reply = await enterFocus(msg.from, text);
-      await sendText(msg.from, reply, 800);
+      const reply = await enterFocus(from, text);
+      await sendText(from, reply, 800);
       return;
     }
     const isCommand = text.trim().startsWith('/');
     if (!isCommand) {
-      const gate = await focusGate(msg.from, text);
+      const gate = await focusGate(from, text);
       if (gate.active && gate.reply) {
-        await sendText(msg.from, gate.reply, 800);
+        await sendText(from, gate.reply, 800);
         return;
       }
     }
@@ -168,7 +195,7 @@ async function processIncoming(body: unknown): Promise<void> {
 
   // Roteia pelo agente central e responde
   try {
-    const { reply } = await handleMessage(msg.from, text, msg.isAudio);
+    const { reply } = await handleMessage(from, text, isAudio);
     if (!reply) return;
 
     // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que
@@ -177,18 +204,18 @@ async function processIncoming(body: unknown): Promise<void> {
     if (audioRequested) {
       try {
         const audioBase64 = await textToSpeechBase64(reply);
-        await sendAudio(msg.from, audioBase64);
+        await sendAudio(from, audioBase64);
       } catch (ttsErr) {
         console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
       }
     }
     // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
-    await sendText(msg.from, reply, 1200);
+    await sendText(from, reply, 1200);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('[webhook] falha ao gerar/enviar resposta:', errMsg);
     recordError(`Falha ao gerar/enviar resposta: ${errMsg}`, 'Orquestrador Geral');
-    await sendText(msg.from, 'Ops, algo deu errado aqui. Tenta de novo em instantes? 🙏');
+    await sendText(from, 'Ops, algo deu errado aqui. Tenta de novo em instantes? 🙏');
   }
 }
 
