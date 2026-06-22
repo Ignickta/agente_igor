@@ -28,6 +28,12 @@ const routeMissesCol = db.collection('route_misses');
 const routeSuggestionsCol = db.collection('route_suggestions');
 const settingsCol = db.collection('settings');
 
+function withoutUndefined<T extends Record<string, unknown>>(data: T): T {
+  return Object.fromEntries(
+    Object.entries(data).filter(([, value]) => value !== undefined)
+  ) as T;
+}
+
 // ===================== Subagentes =====================
 
 export async function listSubagents(includeInactive = false): Promise<Subagent[]> {
@@ -167,7 +173,10 @@ export async function getFacts(
 // ===================== Tarefas =====================
 
 export async function createTask(data: Omit<Task, 'id' | 'createdAt' | 'done'>): Promise<Task> {
-  const task = { ...data, done: false, createdAt: Date.now() };
+  const task = withoutUndefined({ ...data, done: false, createdAt: Date.now() }) as Omit<
+    Task,
+    'id'
+  >;
   const ref = await tasksCol.add(task);
   return { id: ref.id, ...task };
 }
@@ -558,11 +567,11 @@ export async function getMetrics(days = 7): Promise<DayMetric[]> {
 export async function createAgendaItem(
   data: Omit<AgendaItem, 'id' | 'createdAt' | 'status'> & { status?: AgendaItem['status'] }
 ): Promise<AgendaItem> {
-  const item = {
+  const item = withoutUndefined({
     status: 'pending' as const,
     ...data,
     createdAt: Date.now(),
-  };
+  }) as Omit<AgendaItem, 'id'>;
   const ref = await agendaCol.add(item);
   return { id: ref.id, ...item };
 }
@@ -610,7 +619,7 @@ export async function updateAgendaItem(
   id: string,
   data: Partial<Omit<AgendaItem, 'id' | 'createdAt'>>
 ): Promise<void> {
-  await agendaCol.doc(id).set(data, { merge: true });
+  await agendaCol.doc(id).set(withoutUndefined(data), { merge: true });
 }
 
 export async function deleteAgendaItem(id: string): Promise<void> {

@@ -289,17 +289,22 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 // ===================== Tarefas / Lembretes =====================
 
 adminRouter.post('/tasks', async (req, res) => {
-  const { text, remindAt, to, subagentId } = req.body;
-  if (!text || !remindAt) {
-    return res.status(400).json({ error: 'text e remindAt (ISO) são obrigatórios' });
+  try {
+    const { text, remindAt, to, subagentId } = req.body;
+    if (!text || !remindAt) {
+      return res.status(400).json({ error: 'text e remindAt (ISO) são obrigatórios' });
+    }
+    const task = await createTask({
+      text,
+      remindAt,
+      to: to || config.ownerPhone,
+      ...(subagentId ? { subagentId } : {}),
+    });
+    res.status(201).json(task);
+  } catch (err) {
+    console.error('[tasks] erro ao criar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao criar tarefa' });
   }
-  const task = await createTask({
-    text,
-    remindAt,
-    to: to || config.ownerPhone,
-    subagentId,
-  });
-  res.status(201).json(task);
 });
 
 // Lista tarefas. Filtros opcionais:
@@ -429,51 +434,76 @@ function coerceAgendaFields(
 
 // Lista a agenda de um dia. ?date=YYYY-MM-DD (padrão: hoje).
 adminRouter.get('/agenda', async (req, res) => {
-  const date = (req.query.date as string)?.trim() || dayKey();
-  const items = await getAgendaForDay(date);
-  res.json(items);
+  try {
+    const date = (req.query.date as string)?.trim() || dayKey();
+    const items = await getAgendaForDay(date);
+    res.json(items);
+  } catch (err) {
+    console.error('[agenda] erro ao listar agenda:', err);
+    res.status(500).json({ error: 'Erro ao carregar agenda' });
+  }
 });
 
 // Cria um item da agenda. Itens fixos do usuário usam priority 1 / createdBy 'user'.
 adminRouter.post('/agenda', async (req, res) => {
-  const { title, date, startTime, endTime } = req.body;
-  if (!title || !date || !startTime || !endTime) {
-    return res
-      .status(400)
-      .json({ error: 'title, date, startTime e endTime são obrigatórios' });
+  try {
+    const { title, date, startTime, endTime } = req.body;
+    if (!title || !date || !startTime || !endTime) {
+      return res
+        .status(400)
+        .json({ error: 'title, date, startTime e endTime são obrigatórios' });
+    }
+    const fields = coerceAgendaFields(req.body, false) as Parameters<typeof createAgendaItem>[0];
+    const item = await createAgendaItem(fields);
+    res.status(201).json(item);
+  } catch (err) {
+    console.error('[agenda] erro ao criar item:', err);
+    res.status(500).json({ error: 'Erro ao criar item de agenda' });
   }
-  const fields = coerceAgendaFields(req.body, false) as Parameters<typeof createAgendaItem>[0];
-  const item = await createAgendaItem(fields);
-  res.status(201).json(item);
 });
 
 // Gera o cronograma do dia a partir das tarefas pendentes. ?date=&force=true
 adminRouter.post('/agenda/generate', async (req, res) => {
-  const date = (req.query.date as string)?.trim() || dayKey();
-  const force = req.query.force === 'true';
-  const items = await generateDailySchedule(date, force);
-  res.json({ date, count: items.length, items });
+  try {
+    const date = (req.query.date as string)?.trim() || dayKey();
+    const force = req.query.force === 'true';
+    const items = await generateDailySchedule(date, force);
+    res.json({ date, count: items.length, items });
+  } catch (err) {
+    console.error('[agenda] erro ao gerar cronograma:', err);
+    res.status(500).json({ error: 'Erro ao organizar agenda' });
+  }
 });
 
 // Atualiza um item da agenda (status, horários, prioridade, etc.).
 adminRouter.put('/agenda/:id', async (req, res) => {
-  const existing = await getAgendaItem(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
+  try {
+    const existing = await getAgendaItem(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
 
-  const update = coerceAgendaFields(req.body, true);
-  if (Object.keys(update).length === 0) {
-    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    const update = coerceAgendaFields(req.body, true);
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    }
+    await updateAgendaItem(req.params.id, update);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[agenda] erro ao atualizar item:', err);
+    res.status(500).json({ error: 'Erro ao atualizar item de agenda' });
   }
-  await updateAgendaItem(req.params.id, update);
-  res.json({ ok: true });
 });
 
 // Remove um item da agenda.
 adminRouter.delete('/agenda/:id', async (req, res) => {
-  const existing = await getAgendaItem(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
-  await deleteAgendaItem(req.params.id);
-  res.json({ ok: true });
+  try {
+    const existing = await getAgendaItem(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
+    await deleteAgendaItem(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[agenda] erro ao remover item:', err);
+    res.status(500).json({ error: 'Erro ao remover item de agenda' });
+  }
 });
 
 // ===================== Memórias / Fatos Compartilhados =====================
