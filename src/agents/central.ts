@@ -21,6 +21,7 @@ import {
 } from '../services/memory';
 import { getActiveItem, advanceTask } from './orchestrator';
 import { routeByEmbedding, hintFrom, EmbeddingRoute } from './embeddingRouter';
+import { routeByLearnedExample, learnRouteExample } from './routeShortcut';
 import { beginUndoGroup, recordUndo } from './undo';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
@@ -141,15 +142,26 @@ async function tryAdvanceAgenda(contact: string, text: string): Promise<string |
   }
 
   await advanceTask(active);
-  recordUndo(contact, `a conclusão de "${active.title}" (atalho "feito")`, async () => {
-    // Restaura também o completedAt: desfazer a conclusão não pode deixar uma
-    // "duração medida" órfã contaminando a calibração de estimativas.
-    await updateAgendaItem(active.id, {
-      status: active.status,
-      completedAt: active.completedAt ?? null,
-    });
-    if (active.taskId && taskPrev) await updateTask(active.taskId, taskPrev);
-  });
+  const agendaRestore = {
+    status: active.status,
+    completedAt: active.completedAt ?? null,
+  };
+  recordUndo(
+    contact,
+    `a conclusão de "${active.title}" (atalho "feito")`,
+    async () => {
+      // Restaura também o completedAt: desfazer a conclusão não pode deixar uma
+      // "duração medida" órfã contaminando a calibração de estimativas.
+      await updateAgendaItem(active.id, agendaRestore);
+      if (active.taskId && taskPrev) await updateTask(active.taskId, taskPrev);
+    },
+    [
+      { kind: 'agenda.update', id: active.id, data: agendaRestore },
+      ...(active.taskId && taskPrev
+        ? [{ kind: 'task.update' as const, id: active.taskId, data: taskPrev }]
+        : []),
+    ]
+  );
   // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.
   return '';
 }
@@ -161,6 +173,26 @@ async function tryAdvanceAgenda(contact: string, text: string): Promise<string |
  */
 const CORRECTION_REGEX =
   /\b(errado|errada|errou|não era isso|nao era isso|não foi isso|nao foi isso|não é isso|nao é isso|entendeu errado|corrige isso|corrigindo|não pedi isso|nao pedi isso|você tinha dito|voce tinha dito)\b/i;
+
+/**
+ * Correção de ROTA: o Igor diz que a mensagem anterior era de outro assunto
+ * ("não, isso é de vendas", "manda pro estudos", "isso aí é do blog"). Detecta
+ * pela combinação de um SINAL de correção/negação com um de DIRECIONAMENTO a
+ * assunto. Mais abrangente que CORRECTION_REGEX de propósito — alimenta o
+ * aprendizado de roteamento (routeShortcut), que só age quando a correção MUDA
+ * de subagente, então um falso positivo aqui é inofensivo.
+ */
+// "não," / "não é" / "não era" (correção) — não "não esquece" (negação comum).
+const ROUTE_CORRECTION_SIGNAL = /(\bn[ãa]o\s*[,.]|\bn[ãa]o (é|e|era|foi)\b|\bna verdade\b|\bquis dizer\b|\bisso (é|e|a[íi])\b)/i;
+const ROUTE_DIRECTION_SIGNAL = /\b(de|do|da|dos|das|pro|pra|para)\b/i;
+// Direcionamento imperativo ("manda/joga/põe pro X") já é, sozinho, correção de
+// rota — não precisa do sinal de negação.
+const ROUTE_IMPERATIVE = /\b(manda|mande|joga|jogue|p[õo]e|coloca|coloque|envia|envie|passa|passe)\b.*\b(pro|pra|para|no|na)\b/i;
+
+function isRouteCorrectionText(text: string): boolean {
+  if (ROUTE_IMPERATIVE.test(text)) return true;
+  return ROUTE_CORRECTION_SIGNAL.test(text) && ROUTE_DIRECTION_SIGNAL.test(text);
+}
 
 /**
  * Pedidos claramente de AGENDA (organizar o dia, horários, lembretes, remarcar).
@@ -336,9 +368,10 @@ export async function handleMessage(
   }
 
   // 1) Roteamento, do mais barato ao mais caro:
-  //    regex de agenda → keywords (match forte >= 2) → EMBEDDING (decide quando
-  //    a similaridade é forte e com folga) → LLM com contexto de continuidade,
-  //    para que continuações curtas ("e amanhã?") fiquem no mesmo assunto.
+  //    regex de agenda → APRENDIDO (correção do Igor) → keywords (match forte
+  //    >= 2) → EMBEDDING (decide quando a similaridade é forte e com folga) →
+  //    LLM com contexto de continuidade, para que continuações curtas
+  //    ("e amanhã?") fiquem no mesmo assunto.
   let target: Subagent | null = null;
   let via = 'agenda-regex';
   if (AGENDA_REGEX.test(text)) {
@@ -346,6 +379,19 @@ export async function handleMessage(
       subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
       subagents.find((s) => /agenda/i.test(s.name)) ??
       null;
+  }
+
+  // 1.1) Atalho APRENDIDO: se a mensagem é muito parecida com alguma que o Igor
+  //       já CORRIGIU, vai direto pro subagente certo. Vem ANTES das keywords de
+  //       propósito: uma correção explícita do Igor é sinal mais forte que uma
+  //       keyword genérica (ex: "predileto" puxa p/ Vendas, mas ele corrigiu p/
+  //       Blog). Piso alto de similaridade não desvia mensagem legítima.
+  if (!target) {
+    const learned = await routeByLearnedExample(contact, text, subagents);
+    if (learned) {
+      target = learned.sub;
+      via = `aprendido ${learned.score.toFixed(2)}`;
+    }
   }
 
   const kw = target ? null : routeByKeywords(text, subagents);
@@ -415,17 +461,19 @@ export async function handleMessage(
     .map((e) => formatEntry(e, 300))
     .join('\n');
   const isCorrection = CORRECTION_REGEX.test(text);
+  // Correção de ROTA (forma natural "não, isso é de X") — mais ampla que a de
+  // conteúdo; usada para o aprendizado de roteamento.
+  const isRouteCorrection = isCorrection || isRouteCorrectionText(text);
 
   // F9: correção rápida = possível erro de roteamento da TROCA ANTERIOR.
   // Registro generoso (a correção pode ser de conteúdo); o job semanal usa o
   // LLM para filtrar e sugerir keywords. Se a correção foi roteada para OUTRO
   // subagente, guarda o palpite da rota certa. Best-effort: nunca bloqueia.
   const prevExchange = globalRecent[globalRecent.length - 1];
-  if (
-    isCorrection &&
-    prevExchange &&
-    Date.now() - prevExchange.timestamp < ROUTE_MISS_WINDOW_MS
-  ) {
+  const prevInWindow =
+    prevExchange && Date.now() - prevExchange.timestamp < ROUTE_MISS_WINDOW_MS;
+
+  if (isCorrection && prevInWindow) {
     recordRouteMiss({
       contact,
       text: prevExchange.user.slice(0, 500),
@@ -437,6 +485,16 @@ export async function handleMessage(
         : {}),
       at: Date.now(),
     }).catch((err) => console.error('[central] falha ao registrar route miss:', err));
+  }
+
+  // Aprendizado imediato de rota: numa correção (conteúdo OU rota) que aponta a
+  // troca anterior para OUTRO subagente, a mensagem anterior deveria ter ido
+  // para o subagente atual (`target`). Guarda como exemplo rotulado para o
+  // atalho de roteamento aprendido agir já no próximo caso parecido.
+  if (isRouteCorrection && prevInWindow && prevExchange.subagentId !== target.id) {
+    learnRouteExample(contact, prevExchange.user, target).catch((err) =>
+      console.error('[central] falha ao aprender exemplo de rota:', err)
+    );
   }
 
   const start = Date.now();

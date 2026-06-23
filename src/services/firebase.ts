@@ -1,7 +1,15 @@
 import admin from 'firebase-admin';
 import { config } from '../config';
 import { dayKey, nextOccurrence } from './datetime';
-import { Subagent, MemoryMessage, Task, AgendaItem, FocusSession } from '../types';
+import {
+  Subagent,
+  MemoryMessage,
+  Task,
+  AgendaItem,
+  FocusSession,
+  ActionRecord,
+  PersistedUndo,
+} from '../types';
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -27,6 +35,8 @@ const jobLocksCol = db.collection('job_locks');
 const routeMissesCol = db.collection('route_misses');
 const routeSuggestionsCol = db.collection('route_suggestions');
 const settingsCol = db.collection('settings');
+const actionsCol = db.collection('actions');
+const routeExamplesCol = db.collection('route_examples');
 
 function withoutUndefined<T extends Record<string, unknown>>(data: T): T {
   return Object.fromEntries(
@@ -333,6 +343,14 @@ export interface SharedFact {
   subagentId?: string;
   createdAt: number;
   /**
+   * Natureza do fato, para pesar a recência no recall:
+   * - `permanent`: preferência/traço duradouro — não decai com o tempo.
+   * - `transient`: status do momento ("está configurando o celular") — decai
+   *   rápido, para não competir com informação atual depois de velho.
+   * Ausente = tratado como permanente (compatível com fatos antigos).
+   */
+  kind?: 'permanent' | 'transient';
+  /**
    * Arquivado pela consolidação noturna (duplicado, corrigido ou expirado).
    * Arquivar é reversível — fatos nunca são apagados de verdade.
    */
@@ -472,6 +490,48 @@ export async function getRouteMisses(sinceMs: number): Promise<RouteMiss[]> {
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as RouteMiss))
     .sort((a, b) => a.at - b.at);
+}
+
+/**
+ * Exemplo rotulado de roteamento, derivado de uma correção do Igor: "esta
+ * mensagem deveria ter ido para este subagente". Usado pelo atalho de
+ * roteamento aprendido (routeShortcut), que age de imediato — sem esperar a
+ * rotina semanal de keywords.
+ */
+export interface RouteExample {
+  id: string;
+  contact: string;
+  /** A mensagem original que foi mal roteada. */
+  text: string;
+  /** Embedding da mensagem, para comparar por similaridade. */
+  embedding: number[];
+  /** Subagente CORRETO (para onde a correção foi roteada). */
+  subagentId: string;
+  subagentName: string;
+  at: number;
+}
+
+/**
+ * Grava um exemplo de roteamento aprendido. Idempotente por (contact, text,
+ * subagentId): re-corrigir a mesma mensagem não duplica.
+ */
+export async function saveRouteExample(
+  data: Omit<RouteExample, 'id'>
+): Promise<void> {
+  const dup = await routeExamplesCol
+    .where('contact', '==', data.contact)
+    .where('text', '==', data.text)
+    .where('subagentId', '==', data.subagentId)
+    .limit(1)
+    .get();
+  if (!dup.empty) return;
+  await routeExamplesCol.add(withoutUndefined(data));
+}
+
+/** Todos os exemplos aprendidos de um contato (volume pequeno; filtra em memória). */
+export async function getRouteExamples(contact: string): Promise<RouteExample[]> {
+  const snap = await routeExamplesCol.where('contact', '==', contact).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as RouteExample));
 }
 
 /** Sugestão de keywords por subagente, aguardando confirmação do Igor. */
@@ -702,6 +762,61 @@ export async function getStoredSettings(): Promise<ProactiveSettings | null> {
 /** Grava (sobrescreve) as configurações de proatividade. */
 export async function saveStoredSettings(data: ProactiveSettings): Promise<void> {
   await settingsCol.doc(SETTINGS_DOC).set(data);
+}
+
+// ===================== Auditoria de ações (undo persistente) =====================
+
+/**
+ * Grava um registro de auditoria de uma escrita do agente. Best-effort: nunca
+ * deve quebrar o fluxo principal, então o chamador trata a falha como não-fatal.
+ */
+export async function logAction(
+  data: Omit<ActionRecord, 'id'>
+): Promise<ActionRecord> {
+  const clean = withoutUndefined({ ...data }) as Omit<ActionRecord, 'id'>;
+  const ref = await actionsCol.add(clean);
+  return { id: ref.id, ...clean };
+}
+
+/** Lista as ações mais recentes (auditoria), da mais nova para a mais antiga. */
+export async function listActions(limit = 50): Promise<ActionRecord[]> {
+  const snap = await actionsCol.orderBy('at', 'desc').limit(limit).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as ActionRecord));
+}
+
+export async function getAction(id: string): Promise<ActionRecord | null> {
+  const doc = await actionsCol.doc(id).get();
+  if (!doc.exists) return null;
+  return { id: doc.id, ...doc.data() } as ActionRecord;
+}
+
+/** Marca uma ação como desfeita pelo painel (carimba `undoneAt`). */
+export async function markActionUndone(id: string): Promise<void> {
+  await actionsCol.doc(id).set({ undoneAt: Date.now() }, { merge: true });
+}
+
+/**
+ * Executa uma reversão declarativa contra o Firestore, aplicando cada operação
+ * em ordem. É o "motor" do desfazer pelo painel: reconstrói o efeito da closure
+ * `revert` a partir do payload serializado, então funciona mesmo após restart.
+ */
+export async function applyPersistedUndo(undo: PersistedUndo): Promise<void> {
+  for (const op of undo) {
+    switch (op.kind) {
+      case 'task.create':
+        await createTask(op.data);
+        break;
+      case 'task.update':
+        await updateTask(op.id, op.data);
+        break;
+      case 'task.delete':
+        await deleteTask(op.id);
+        break;
+      case 'agenda.update':
+        await updateAgendaItem(op.id, op.data);
+        break;
+    }
+  }
 }
 
 export { db };

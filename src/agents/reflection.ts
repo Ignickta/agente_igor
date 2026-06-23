@@ -39,7 +39,12 @@ const REFLECTION_SCHEMA = {
         additionalProperties: false,
         required: ['texto', 'quando_iso'],
         properties: {
-          texto: { type: 'string', description: 'O que lembrar, na voz do lembrete' },
+          texto: {
+            type: 'string',
+            description:
+              'O que lembrar, na voz do lembrete, COM o contexto/motivo da conversa ' +
+              '(assunto, pessoa, projeto) — autoexplicativo dias depois, não só a ação.',
+          },
           quando_iso: {
             type: ['string', 'null'],
             description: 'Data/hora LOCAL ISO 8601 sem offset (ex: 2026-06-13T09:00:00), ou null',
@@ -100,7 +105,10 @@ export async function reflectOnRecentExchanges(
 2. PROMESSAS do Igor com ação futura clara ("vou ligar pro João amanhã", "semana que vem
    reviso o contrato") que ainda NÃO têm lembrete — a lista de lembretes existentes está
    abaixo; não repita nenhum deles, nem reformulado. Escreva o texto na forma de lembrete
-   ("Ligar para o João sobre ...").
+   INCLUINDO O CONTEXTO/MOTIVO da conversa, não só a ação seca: o lembrete deve fazer
+   sentido sozinho dias depois. Ex.: em vez de "Ligar para o João", escreva "Ligar para o
+   João sobre o orçamento da reforma da clínica que ele ia mandar". Puxe o porquê, o
+   assunto e quem/o quê estava envolvido a partir da conversa.
 
 Para cada promessa, defina quando_iso (data e hora LOCAIS, ISO 8601 sem offset, ex:
 ${amanha}T09:00:00) com o melhor momento para lembrar. Hoje é ${hoje}; amanhã é ${amanha} —

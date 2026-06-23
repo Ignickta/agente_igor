@@ -23,7 +23,9 @@ import {
   getSharedFacts,
   updateSharedFact,
   deleteSharedFact,
+  listActions,
 } from '../services/firebase';
+import { undoActionById } from '../agents/undo';
 import { generateDailySchedule, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
 import { getConnectionState } from '../services/evolution';
@@ -389,6 +391,27 @@ adminRouter.delete('/tasks/:id', async (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
   await deleteTask(req.params.id);
   res.json({ ok: true });
+});
+
+// ===================== Auditoria de ações (undo persistente) =====================
+
+// Feed das últimas escritas do agente, da mais recente para a mais antiga.
+adminRouter.get('/actions', async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const actions = await listActions(limit);
+  res.json(actions);
+});
+
+// Desfaz uma ação pelo id (reexecuta a reversão declarativa).
+adminRouter.post('/actions/:id/undo', async (req, res) => {
+  try {
+    const message = await undoActionById(req.params.id);
+    res.json({ ok: true, message });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Falha ao desfazer';
+    const code = msg === 'Ação não encontrada.' ? 404 : 400;
+    res.status(code).json({ error: msg });
+  }
 });
 
 // ===================== Agenda (cronograma diário) =====================

@@ -124,6 +124,49 @@ export interface FocusSession {
   ended: boolean;
 }
 
+/**
+ * Uma operação inversa serializável. É a versão declarativa do que a closure
+ * `revert` do undo faria, para sobreviver a um restart do backend (a closure em
+ * memória se perde; este payload no Firestore não).
+ */
+export type UndoOp =
+  /** Recria uma task (revert de uma remoção). */
+  | { kind: 'task.create'; data: Omit<Task, 'id' | 'createdAt' | 'done'> }
+  /** Aplica estes campos de volta na task (revert de uma edição/conclusão). */
+  | { kind: 'task.update'; id: string; data: Partial<Omit<Task, 'id' | 'createdAt'>> }
+  /** Apaga a task criada (revert de uma criação). */
+  | { kind: 'task.delete'; id: string }
+  /** Aplica estes campos de volta num item de agenda (revert de uma conclusão/edição). */
+  | { kind: 'agenda.update'; id: string; data: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> };
+
+/**
+ * Reversão declarativa de uma ação — uma OU MAIS operações inversas aplicadas
+ * em ordem. Uma ação composta (ex: concluir item de agenda + task vinculada)
+ * vira várias `UndoOp`. Permite desfazer pelo painel mesmo após restart.
+ */
+export type PersistedUndo = UndoOp[];
+
+/**
+ * Registro de auditoria de uma escrita do agente, persistido na coleção
+ * `actions`. Alimenta o feed de auditoria do painel e permite desfazer pelo
+ * navegador. `undo` é a reversão declarativa; ausente = ação não-desfazível.
+ */
+export interface ActionRecord {
+  id: string;
+  /** Contato (telefone) que originou a ação. */
+  contact: string;
+  /** Descrição legível, ex: 'a criação do lembrete "Pagar conta"'. */
+  description: string;
+  /** Agrupa escritas de uma mesma mensagem do usuário. */
+  group: number;
+  /** Epoch ms de quando a ação ocorreu. */
+  at: number;
+  /** Reversão declarativa; ausente quando a ação não é desfazível pelo painel. */
+  undo?: PersistedUndo;
+  /** Epoch ms de quando foi desfeita pelo painel; ausente se ainda ativa. */
+  undoneAt?: number;
+}
+
 /** Mensagem normalizada extraída do webhook da Evolution. */
 export interface IncomingMessage {
   from: string;

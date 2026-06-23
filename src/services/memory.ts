@@ -1,11 +1,14 @@
-import { embed } from './openai';
+import { embed, chatJson } from './openai';
 import {
   saveSharedFact,
   getSharedFacts,
+  archiveSharedFact,
   saveConversationEntry,
   getConversationLog,
   ConversationEntry,
+  SharedFact,
 } from './firebase';
+import { config } from '../config';
 import { dayKey, timeKey } from './datetime';
 
 /**
@@ -34,8 +37,20 @@ export function cosine(a: number[], b: number[]): number {
 /** Score mínimo para um fato entrar por similaridade (abaixo disso é ruído). */
 const MIN_SIMILARITY = 0.25;
 
-/** Quantos fatos recentes entram sempre, independente de similaridade. */
+/**
+ * Quantos fatos recentes podem entrar SEM serem os mais relevantes — desde que
+ * tenham relevância mínima com a pergunta (RECENT_MIN_SIMILARITY). Antes eram
+ * injetados incondicionalmente (os 3 mais novos sempre), o que poluía o prompt
+ * com fatos sem relação. Agora recência é desempate, não passe livre.
+ */
 const RECENT_ALWAYS = 3;
+
+/**
+ * Piso de relevância para um fato recente "furar a fila" pela recência. Mais
+ * baixo que MIN_SIMILARITY (damos um bônus à recência), mas não zero — um fato
+ * novo totalmente fora do assunto continua de fora.
+ */
+const RECENT_MIN_SIMILARITY = 0.15;
 
 /**
  * Cache do embedding da consulta: recallFacts e relevantPastExchanges embedam a
@@ -59,21 +74,167 @@ export async function embedQuery(text: string): Promise<number[]> {
 }
 
 /**
- * Salva um fato no pool compartilhado. Best-effort no embedding: se a API
- * falhar, grava sem vetor (o fato ainda aparece pelo critério de recência).
+ * Acima desta similaridade, dois fatos são considerados a MESMA informação
+ * ("gosta de café" vs "prefere café") — o novo é redundante e não é salvo.
+ * Alto de propósito: só barra quase-idênticos, nunca fatos meramente do mesmo
+ * tema. Ajustável por env sem mexer no código.
+ */
+const DEDUP_SIMILARITY = parseFloat(process.env.FACT_DEDUP_SIM || '0.88');
+
+/**
+ * Classifica um fato como permanente (preferência/traço) ou transitório (status
+ * do momento). Heurística barata por palavras — sem chamada de LLM. Sinais de
+ * status em andamento/conclusão recente puxam para transitório; o resto é
+ * permanente (default seguro: preferências nunca decaem por engano).
+ */
+const TRANSIENT_HINTS =
+  /\b(est[áa] (configurando|terminando|fazendo|trabalhando|organizando|finalizando)|em (andamento|processo|progresso)|concluiu|conclu[ií]da?|finalizou|terminou|lan[çc]ou|até (hoje|amanh[ãa]|esta semana|essa semana|o dia)|esta semana|essa semana|no momento|por enquanto|ainda (não|nao|está|esta))\b/i;
+
+function classifyFact(text: string): 'permanent' | 'transient' {
+  return TRANSIENT_HINTS.test(text) ? 'transient' : 'permanent';
+}
+
+/** Meia-vida do decaimento de fatos transitórios, em dias. */
+const TRANSIENT_HALF_LIFE_DAYS = parseFloat(process.env.FACT_TRANSIENT_HALFLIFE_DAYS || '14');
+
+/**
+ * Fator de recência [0..1] aplicado ao score de um fato no recall. Permanentes
+ * não decaem (sempre 1). Transitórios decaem exponencialmente com a idade
+ * (meia-vida configurável): um status de "está configurando o celular" de 2
+ * meses atrás vira quase irrelevante, mas uma preferência antiga continua forte.
+ */
+function recencyFactor(fact: { kind?: 'permanent' | 'transient'; createdAt: number }): number {
+  if (fact.kind !== 'transient') return 1;
+  const ageDays = (Date.now() - fact.createdAt) / (24 * 60 * 60 * 1000);
+  return Math.pow(0.5, ageDays / TRANSIENT_HALF_LIFE_DAYS);
+}
+
+/**
+ * Acima desta similaridade um fato existente é CANDIDATO a ser contradito pelo
+ * novo (mesmo tema). Abaixo, são assuntos distintos e nem entram no julgamento.
+ * Menor que a dedup: "acordo 9h" vs "acordo 7h" são similares mas não idênticos.
+ */
+const CONTRADICTION_CANDIDATE_SIM = parseFloat(process.env.FACT_CONTRA_SIM || '0.78');
+
+const CONTRADICTION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['substitui'],
+  properties: {
+    substitui: {
+      type: 'array',
+      description: 'Índices (1-based) dos fatos ANTIGOS que o fato NOVO torna desatualizados/contradiz.',
+      items: { type: 'integer' },
+    },
+  },
+};
+
+/**
+ * Dado um fato novo e candidatos do mesmo tema, pergunta a um LLM leve quais
+ * candidatos o novo CONTRADIZ/ATUALIZA (ex: "acorda às 7h" substitui "acorda às
+ * 9h"). Só arquiva o que for atualização real — fatos meramente parecidos mas
+ * compatíveis ficam. Best-effort: erro = não arquiva nada.
+ */
+async function reconcileContradictions(
+  newText: string,
+  candidates: SharedFact[]
+): Promise<number> {
+  if (candidates.length === 0) return 0;
+  try {
+    const lista = candidates.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
+    const res = await chatJson<{ substitui: number[] }>(
+      [
+        {
+          role: 'system',
+          content:
+            'Você cuida da memória de um assistente pessoal. Receberá um fato NOVO e uma ' +
+            'lista de fatos ANTIGOS do mesmo tema. Responda quais ANTIGOS o NOVO torna ' +
+            'desatualizados ou contradiz (ex: mudança de horário, preferência ou status). ' +
+            'NÃO inclua fatos que apenas se parecem mas continuam verdadeiros junto do novo. ' +
+            'Na dúvida, NÃO inclua.',
+        },
+        { role: 'user', content: `NOVO: ${newText}\n\nANTIGOS:\n${lista}` },
+      ],
+      { name: 'reconciliacao', schema: CONTRADICTION_SCHEMA, model: config.openai.utilityModel, temperature: 0 }
+    );
+    const idxs = res?.substitui ?? [];
+    let archived = 0;
+    for (const i of idxs) {
+      const victim = candidates[i - 1];
+      if (!victim) continue;
+      await archiveSharedFact(victim.id);
+      archived++;
+      console.log(`[memory] fato atualizado: arquivei "${victim.text.slice(0, 60)}" (substituído por "${newText.slice(0, 60)}")`);
+    }
+    return archived;
+  } catch (err) {
+    console.error('[memory] reconciliação de contradições falhou (seguindo):', err);
+    return 0;
+  }
+}
+
+/**
+ * Salva um fato no pool compartilhado, com DEDUP SEMÂNTICA (não duplica
+ * quase-iguais) e RECONCILIAÇÃO (arquiva fatos do mesmo tema que o novo
+ * contradiz/atualiza). Best-effort no embedding: se a API falhar, grava sem
+ * vetor (cai no dedup exato do saveSharedFact e na recência).
+ *
+ * Retorna { saved } — false se foi descartado como redundante.
  */
 export async function rememberFact(
   contact: string,
   subagentId: string,
   text: string
-): Promise<void> {
+): Promise<{ saved: boolean; reason?: string }> {
+  const clean = text.trim();
+  if (!clean) return { saved: false, reason: 'vazio' };
+
   let embedding: number[] = [];
   try {
-    embedding = await embed(text);
+    embedding = await embed(clean);
   } catch (err) {
     console.error('[memory] embedding falhou (salvando sem vetor):', err);
   }
-  await saveSharedFact({ contact, text: text.trim(), embedding, subagentId, createdAt: Date.now() });
+
+  if (embedding.length) {
+    const existing = await getSharedFacts(contact);
+    const scored = existing
+      .filter((f) => f.embedding?.length)
+      .map((f) => ({ f, sim: cosine(embedding, f.embedding) }))
+      .sort((a, b) => b.sim - a.sim);
+
+    // Candidatos do mesmo tema (inclui os quase-idênticos da faixa de dedup —
+    // "acorda 9h" e "acorda 7h" são ~0.9 mas contraditórios, então a decisão de
+    // descartar NÃO pode ser só por similaridade).
+    const candidates = scored.filter((s) => s.sim >= CONTRADICTION_CANDIDATE_SIM).map((s) => s.f);
+
+    // RECONCILIAÇÃO primeiro: o LLM diz quais antigos o novo torna obsoletos.
+    // Precisa rodar ANTES da decisão de dedup (a dedup sozinha barraria "acorda
+    // 7h" achando que é repetição de "acorda 9h"). A chamada de LLM só acontece
+    // quando HÁ candidato do mesmo tema (caso raro = atualização real); no caso
+    // comum (fato inédito) candidates é vazio e não há custo nem latência extra.
+    const archived = candidates.length ? await reconcileContradictions(clean, candidates) : 0;
+
+    // Se NADA foi arquivado e existe um quase-idêntico, então o novo é mesmo
+    // redundante (mera repetição, não atualização) → não duplica.
+    if (archived === 0) {
+      const near = scored.find((s) => s.sim >= DEDUP_SIMILARITY);
+      if (near) {
+        console.log(`[memory] fato redundante, não salvo: "${clean.slice(0, 60)}" ≈ "${near.f.text.slice(0, 60)}"`);
+        return { saved: false, reason: 'redundante' };
+      }
+    }
+  }
+
+  const ok = await saveSharedFact({
+    contact,
+    text: clean,
+    embedding,
+    subagentId,
+    kind: classifyFact(clean),
+    createdAt: Date.now(),
+  });
+  return { saved: ok };
 }
 
 // ===================== Trocas recentes GLOBAIS (entre subagentes) =====================
@@ -324,19 +485,37 @@ export async function recallFacts(contact: string, query: string, k = 8): Promis
     console.error('[memory] embedding da consulta falhou (usando só recência):', err);
   }
 
-  const scored = all.map((f) => ({
-    f,
-    score: queryEmb.length ? cosine(queryEmb, f.embedding || []) : 0,
-  }));
+  // Sem embedding da consulta (API falhou): não há sinal de relevância, então
+  // cai na recência pura — melhor algum contexto que nenhum.
+  if (!queryEmb.length) {
+    return all.slice(0, k).map((f) => f.text);
+  }
 
-  const recent = scored.slice(0, RECENT_ALWAYS);
-  const similar = [...scored]
-    .sort((a, b) => b.score - a.score)
-    .filter((s) => s.score >= MIN_SIMILARITY);
+  // Score = similaridade × fator de recência. Transitórios velhos perdem força;
+  // permanentes não decaem. `idx` preserva a ordem original (mais novo primeiro)
+  // para a reserva de vagas por recência logo abaixo.
+  const scored = all
+    .map((f, idx) => ({
+      f,
+      idx,
+      score: cosine(queryEmb, f.embedding || []) * recencyFactor(f),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  // 1) Relevantes de verdade entram primeiro (ordenados por similaridade).
+  const relevant = scored.filter((s) => s.score >= MIN_SIMILARITY);
+
+  // 2) Reserva algumas vagas para fatos RECENTES — mas só os que têm relevância
+  //    mínima com a pergunta (não despeja os mais novos cegamente). `idx` reflete
+  //    a ordem de getSharedFacts (mais novo primeiro).
+  const recentRelevant = [...scored]
+    .filter((s) => s.idx < RECENT_ALWAYS * 2 && s.score >= RECENT_MIN_SIMILARITY)
+    .sort((a, b) => a.idx - b.idx)
+    .slice(0, RECENT_ALWAYS);
 
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const s of [...recent, ...similar]) {
+  for (const s of [...relevant, ...recentRelevant]) {
     if (seen.has(s.f.text)) continue;
     seen.add(s.f.text);
     out.push(s.f.text);

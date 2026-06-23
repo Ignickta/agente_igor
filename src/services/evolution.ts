@@ -20,6 +20,10 @@ export async function sendText(
   delayMs = 0
 ): Promise<void> {
   const number = normalizeNumber(to);
+  if (process.env.DISABLE_WHATSAPP === '1') {
+    console.log(`[dry-run] sendText → ${number}: ${text.slice(0, 80)}`);
+    return;
+  }
   try {
     // `delay` faz a Evolution exibir "digitando..." pelo tempo informado
     // antes de entregar a mensagem — feedback natural sem endpoint extra.
@@ -40,6 +44,10 @@ export async function sendText(
  */
 export async function sendAudio(to: string, audioBase64: string): Promise<void> {
   const number = normalizeNumber(to);
+  if (process.env.DISABLE_WHATSAPP === '1') {
+    console.log(`[dry-run] sendAudio → ${number}`);
+    return;
+  }
   try {
     await client.post(`/message/sendWhatsAppAudio/${config.evolution.instance}`, {
       number,

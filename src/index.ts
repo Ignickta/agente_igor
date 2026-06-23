@@ -230,8 +230,13 @@ async function bootstrap(): Promise<void> {
   // overlay em runtime. Sem isso, urgentKeywords/carga/flags caem nos defaults.
   await loadSettings();
 
-  // Inicia jobs proativos (cronograma do dia, lembretes, transições)
-  startScheduler();
+  // Inicia jobs proativos (cronograma do dia, lembretes, transições).
+  // Em dev local, defina DISABLE_SCHEDULER=1 para não disparar mensagens reais.
+  if (process.env.DISABLE_SCHEDULER === '1') {
+    console.log('⏸️  Scheduler desativado (DISABLE_SCHEDULER=1)');
+  } else {
+    startScheduler();
+  }
 
   app.listen(config.server.port, () => {
     console.log(`🤖 agente-igor rodando na porta ${config.server.port}`);

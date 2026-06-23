@@ -13,6 +13,7 @@ import {
   sendPendingFollowUp,
 } from './agents/reports';
 import { runMemoryMaintenance, bootstrapProfile } from './agents/maintenance';
+import { runSmartProactiveCheck } from './agents/proactiveInsights';
 import { sendRouteLearningReport } from './agents/routeLearning';
 import { syncCalendarRange } from './agents/calendarSync';
 import { calendarEnabled } from './services/googleCalendar';
@@ -177,6 +178,19 @@ export function startScheduler(): void {
     () => {
       withJobLock('subagent_reports', dayKey(), sendSubagentWeeklyReports).catch((err) =>
         console.error('[scheduler] falha nos relatórios por subagente:', err)
+      );
+    },
+    opts
+  );
+
+  // Proatividade ESPERTA — uma vez por dia, às 08:00 (cedo: a sobrecarga do dia
+  // precisa avisar ANTES de o dia começar). Procrastinação, sobrecarga e tarefas
+  // esquecidas, derivadas de sinais já coletados (postponedCount, estimativas).
+  cron.schedule(
+    '0 8 * * *',
+    () => {
+      withJobLock('smart_proactive', dayKey(), runSmartProactiveCheck).catch((err) =>
+        console.error('[scheduler] falha na proatividade esperta:', err)
       );
     },
     opts

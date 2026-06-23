@@ -685,6 +685,24 @@ Regras gerais:
 - Responda em português do Brasil.
 - Se faltar informação, faça no máximo uma pergunta objetiva.
 - Você é o subagente "${subagent.name}" do agente pessoal do Igor.
+
+Estilo (braço direito do Igor — consultivo, não tagarela):
+- Comece pela resposta. Sem abertura ritual ("Claro!", "Com certeza!", "Ótima pergunta!"),
+  sem repetir a pergunta dele de volta e sem fechar com oferta vazia ("precisa de mais
+  alguma coisa?"). Corte preâmbulo e meta-comentário ("como assistente, vou...").
+- Não bajule. Vá ao ponto com a confiança de quem conhece o contexto do Igor.
+- Seja consultivo: além de responder, ANTECIPE. Quando agregar valor de verdade, aponte
+  em uma linha um risco, um próximo passo óbvio ou a pergunta certa que ele não fez —
+  sem inventar trabalho nem alongar à toa. Se a resposta é simples, entregue e pare.
+- Use os fatos que você sabe sobre o Igor de forma IMPLÍCITA (aja de acordo com eles),
+  não os recite de volta ("Como você prefere X..."). Ele já sabe o que te contou.
+- ENXUTO por padrão (é WhatsApp): mesmo em perguntas abertas, dê o essencial em até
+  3-4 pontos, SEM sub-bullets aninhados e sem subdividir em muitas seções. Escolha o que
+  mais importa em vez de listar tudo que existe. Se houver muito a dizer, entregue o
+  núcleo e ofereça aprofundar UM ponto ("quer que eu detalhe a parte de X?") — não
+  despeje o manual inteiro de uma vez.
+- Formatação a serviço da clareza: listas só quando há itens de verdade; senão, frases.
+  Nada de encher de bullets nem de negrito decorativo.
 - O Igor pode escrever ou mandar áudio; áudios já chegam transcritos. Trate-os como
   mensagens normais. NUNCA diga que não consegue ouvir ou processar áudios.${
     fromAudio ? '\n- A mensagem atual foi enviada por áudio (já transcrita).' : ''
@@ -895,7 +913,9 @@ async function executeTool(
         ...(estimatedMinutes ? { estimatedMinutes } : {}),
         ...(recValida ? { recurrence: recValida } : {}),
       });
-      recordUndo(contact, `a criação do lembrete "${texto}"`, () => deleteTask(created.id));
+      recordUndo(contact, `a criação do lembrete "${texto}"`, () => deleteTask(created.id), [
+        { kind: 'task.delete', id: created.id },
+      ]);
       const quandoBr = when.toLocaleString('pt-BR', { timeZone: config.timezone });
       const dur = estimatedMinutes
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
@@ -976,7 +996,9 @@ async function executeTool(
         recurrence: task.recurrence ?? null,
         postponedCount: task.postponedCount ?? 0,
       };
-      recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev));
+      recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev), [
+        { kind: 'task.update', id, data: prev },
+      ]);
 
       const after = { ...task, ...updates };
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
@@ -996,8 +1018,11 @@ async function executeTool(
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       if (task.completedAt) return `O lembrete "${task.text}" já estava concluído.`;
       await markTaskDone(id);
-      recordUndo(contact, `a conclusão do lembrete "${task.text}"`, () =>
-        updateTask(id, { done: task.done, completedAt: null })
+      recordUndo(
+        contact,
+        `a conclusão do lembrete "${task.text}"`,
+        () => updateTask(id, { done: task.done, completedAt: null }),
+        [{ kind: 'task.update', id, data: { done: task.done, completedAt: null } }]
       );
       return `Concluído ✅: "${task.text}".`;
     }
@@ -1008,15 +1033,23 @@ async function executeTool(
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       await deleteTask(id);
-      recordUndo(contact, `a remoção do lembrete "${task.text}"`, async () => {
-        await createTask({
-          text: task.text,
-          remindAt: task.remindAt,
-          to: task.to,
-          ...(task.subagentId ? { subagentId: task.subagentId } : {}),
-          ...(task.estimatedMinutes ? { estimatedMinutes: task.estimatedMinutes } : {}),
-        });
-      });
+      // Recriar a task removida = a reversão (mesmo payload na closure e na
+      // versão declarativa para o painel).
+      const restorePayload = {
+        text: task.text,
+        remindAt: task.remindAt,
+        to: task.to,
+        ...(task.subagentId ? { subagentId: task.subagentId } : {}),
+        ...(task.estimatedMinutes ? { estimatedMinutes: task.estimatedMinutes } : {}),
+      };
+      recordUndo(
+        contact,
+        `a remoção do lembrete "${task.text}"`,
+        async () => {
+          await createTask(restorePayload);
+        },
+        [{ kind: 'task.create', data: restorePayload }]
+      );
       return `Lembrete removido: "${task.text}".`;
     }
 
@@ -1038,8 +1071,11 @@ async function executeTool(
       const fato = String(args.fato || '').trim();
       if (!fato || !contact) return 'Nada para salvar.';
       // Pool compartilhado com embedding: todas as áreas enxergam o fato.
-      await rememberFact(contact, subagentId, fato);
-      return `Fato memorizado: "${fato}".`;
+      // A dedup semântica pode descartar um fato quase-igual a um já existente.
+      const res = await rememberFact(contact, subagentId, fato);
+      return res.saved
+        ? `Fato memorizado: "${fato}".`
+        : `Já sabia disso (algo equivalente já estava na memória); não dupliquei.`;
     }
 
     if (call.function.name === 'acionar_automacao') {

@@ -1,3 +1,6 @@
+import { PersistedUndo } from '../types';
+import { logAction, getAction, markActionUndone, applyPersistedUndo } from '../services/firebase';
+
 /**
  * Desfazer: cada ação de escrita das tools (criar/editar/remover lembrete,
  * reorganizar agenda...) registra aqui sua reversão. "Desfaz isso" vira a
@@ -5,6 +8,10 @@
  * várias escritas (ex: "organiza minha tarde" cria 4 lembretes), e desfazer só
  * a última seria mentir que desfez tudo. Em memória, por contato (zera num
  * restart — aceitável para uma janela de arrependimento curta).
+ *
+ * Em paralelo, quando a ação informa uma reversão DECLARATIVA (`persist`), ela
+ * também é gravada na coleção `actions` do Firestore — isso alimenta o feed de
+ * auditoria do painel e permite desfazer pelo navegador mesmo após restart.
  */
 interface UndoEntry {
   /** Descrição curta do que foi feito, para a mensagem de confirmação. */
@@ -29,17 +36,46 @@ export function beginUndoGroup(contact: string): void {
   groupSeq.set(contact, (groupSeq.get(contact) ?? 0) + 1);
 }
 
-/** Registra uma ação desfazível para o contato (no grupo atual). */
+/**
+ * Registra uma ação desfazível para o contato (no grupo atual).
+ *
+ * `persist` é a reversão DECLARATIVA (serializável). Quando informada, a ação
+ * também vai para a auditoria persistente (Firestore) e fica desfazível pelo
+ * painel. A gravação é best-effort: uma falha aqui nunca quebra o WhatsApp.
+ */
 export function recordUndo(
   contact: string,
   description: string,
-  revert: () => Promise<void>
+  revert: () => Promise<void>,
+  persist?: PersistedUndo
 ): void {
   if (!contact) return;
+  const group = groupSeq.get(contact) ?? 0;
   const stack = stacks.get(contact) ?? [];
-  stack.push({ description, revert, at: Date.now(), group: groupSeq.get(contact) ?? 0 });
+  stack.push({ description, revert, at: Date.now(), group });
   if (stack.length > MAX_ENTRIES) stack.shift();
   stacks.set(contact, stack);
+
+  if (persist) {
+    logAction({ contact, description, group, at: Date.now(), undo: persist }).catch((err) =>
+      console.error('[undo] falha ao gravar auditoria:', err)
+    );
+  }
+}
+
+/**
+ * Desfaz UMA ação específica da auditoria pelo id (acionado pelo painel).
+ * Reexecuta a reversão declarativa e carimba `undoneAt`. Retorna uma mensagem
+ * de resultado; lança em caso de erro real para o chamador devolver 4xx/5xx.
+ */
+export async function undoActionById(id: string): Promise<string> {
+  const action = await getAction(id);
+  if (!action) throw new Error('Ação não encontrada.');
+  if (action.undoneAt) return `"${action.description}" já havia sido desfeita.`;
+  if (!action.undo) throw new Error('Esta ação não é desfazível.');
+  await applyPersistedUndo(action.undo);
+  await markActionUndone(id);
+  return `Desfeito: ${action.description}.`;
 }
 
 /**

@@ -114,6 +114,16 @@ export const config = {
     minMargin: parseFloat(process.env.EMB_ROUTE_MARGIN || '0.08'),
   },
   /**
+   * Atalho de roteamento APRENDIDO: cada correção do Igor vira um exemplo
+   * rotulado (mensagem → subagente certo). Numa mensagem nova muito parecida
+   * com um exemplo, roteia direto pro subagente certo — aprendizado imediato,
+   * sem esperar a rotina semanal. Piso ALTO de propósito: só age com forte
+   * semelhança, para nunca "aprender errado" e desviar mensagens legítimas.
+   */
+  learnedRouting: {
+    minSim: parseFloat(process.env.LEARNED_ROUTE_MIN_SIM || '0.82'),
+  },
+  /**
    * F10: integração com o Google Calendar via a MESMA service account do
    * Firebase. Para ativar: habilite a Calendar API no projeto Google Cloud do
    * Firebase, compartilhe a agenda com o e-mail da service account (permissão
