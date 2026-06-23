@@ -165,9 +165,11 @@ export async function runProactiveCheck(): Promise<void> {
   for (const sub of subs) {
     try {
       const myTasks = pending.filter((t) => t.subagentId === sub.id);
+      // A proatividade genérica já gerou ruído quando o modelo extrapolou a
+      // partir de memória antiga. Só interrompe o Igor se existir tarefa
+      // pendente real nesta área; fatos entram apenas como contexto auxiliar.
+      if (myTasks.length === 0) continue;
       const facts = await getFacts(config.ownerPhone, sub.id, 10);
-      // Sem nada específico desta área? pula para evitar ruído.
-      if (myTasks.length === 0 && facts.length === 0) continue;
 
       const messages: ChatMessage[] = [
         {

@@ -179,7 +179,8 @@ export async function learnUserPatterns(days = 28): Promise<string> {
  */
 export async function generateDailySchedule(
   date = dayKey(),
-  force = false
+  force = false,
+  opts: { startTime?: string; endTime?: string; maxMinutes?: number } = {}
 ): Promise<AgendaItem[]> {
   // F10: traz os eventos do Google Calendar ANTES de planejar — eles entram
   // como itens fixos e o modelo encaixa as tarefas em volta. Best-effort.
@@ -251,6 +252,10 @@ export async function generateDailySchedule(
         .join('\n')
     : '(nenhum item fixo)';
 
+  const workStart = opts.startTime || '08:00';
+  const workEnd = opts.endTime || '19:00';
+  const maxMinutes = opts.maxMinutes || getMaxDailyWorkMinutes();
+
   const system = `Você é o orquestrador do dia do Igor. Monte um cronograma realista para ${date}.
 
 Regras de prioridade:
@@ -259,11 +264,14 @@ Regras de prioridade:
   (2 = mais urgente/importante, 5 = menos).
 
 Encaixe as tarefas pendentes em volta dos itens fixos, sem sobreposição de horários,
-respeitando horário comercial (08:00–19:00) e deixando intervalos curtos quando fizer sentido.
+respeitando a janela útil (${workStart}–${workEnd}) e o limite máximo de ${maxMinutes} minutos
+de trabalho planejado. Deixe intervalos curtos quando fizer sentido.
 Se a tarefa trouxer "estimatedMinutes", use-o para dimensionar o bloco (start→end). Quando o
 histórico indicar um período mais produtivo, prefira alocar as tarefas mais importantes nele.
 Se a tarefa trouxer "postponedCount" >= ${PROCRASTINATION_THRESHOLD}, ela vem sendo adiada
 repetidamente: aloque-a no PRIMEIRO bloco produtivo do dia (engolir o sapo) com prioridade 2.
+Se não couber tudo dentro do limite, priorize o que for mais urgente/importante e deixe o resto
+fora da resposta; não estoure a janela nem o limite só para encaixar todos os itens.
 
 Classifique cada item em type: "task", "event" ou "research". Responda com a lista de
 itens planejados no campo "itens" (priority de 2 a 5).`;

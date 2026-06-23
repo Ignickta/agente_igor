@@ -11,6 +11,7 @@ import {
   getTask,
   updateTask,
   deleteTask,
+  markTaskDone,
   getMetrics,
   getAgendaForDay,
   getAgendaItem,
@@ -222,6 +223,66 @@ adminRouter.post('/chat', async (req, res) => {
   }
 });
 
+adminRouter.get('/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    if (!q) return res.json([]);
+
+    const contact = config.ownerPhone;
+    const [tasks, facts, actions] = await Promise.all([
+      listTasks(),
+      contact ? getSharedFacts(contact) : Promise.resolve([]),
+      listActions(100),
+    ]);
+
+    const results: Array<{
+      kind: 'task' | 'fact' | 'action';
+      id: string;
+      title: string;
+      subtitle?: string;
+      href?: string;
+    }> = [];
+
+    for (const t of tasks) {
+      if (!t.text.toLowerCase().includes(q)) continue;
+      results.push({
+        kind: 'task',
+        id: t.id,
+        title: t.text,
+        subtitle: t.completedAt ? 'tarefa concluída' : t.done ? 'tocou sem confirmação' : 'tarefa pendente',
+        href: `/tasks?search=${encodeURIComponent(t.text)}`,
+      });
+    }
+
+    for (const f of facts) {
+      if (!f.text.toLowerCase().includes(q)) continue;
+      results.push({
+        kind: 'fact',
+        id: f.id,
+        title: f.text,
+        subtitle: 'memória',
+        href: `/memoria?search=${encodeURIComponent(q)}`,
+      });
+    }
+
+    for (const a of actions) {
+      if (!a.description.toLowerCase().includes(q)) continue;
+      results.push({
+        kind: 'action',
+        id: a.id,
+        title: a.description,
+        subtitle: 'auditoria',
+        href: '/auditoria',
+      });
+    }
+
+    res.json(results.slice(0, 30));
+  } catch (err) {
+    console.error('[search] erro ao buscar:', err);
+    res.status(500).json({ error: 'Erro ao buscar' });
+  }
+});
+
 // ===================== Configurações de proatividade =====================
 
 adminRouter.get('/settings', async (_req, res) => {
@@ -373,7 +434,10 @@ adminRouter.put('/tasks/:id', async (req, res) => {
   const update: Record<string, unknown> = {};
   if (text !== undefined) update.text = text;
   if (remindAt !== undefined) update.remindAt = remindAt;
-  if (done !== undefined) update.done = !!done;
+  if (done !== undefined) {
+    update.done = !!done;
+    update.completedAt = done ? Date.now() : null;
+  }
   if (subagentId !== undefined) update.subagentId = subagentId;
   if (to !== undefined) update.to = to;
 
@@ -490,11 +554,54 @@ adminRouter.post('/agenda/generate', async (req, res) => {
   try {
     const date = (req.query.date as string)?.trim() || dayKey();
     const force = req.query.force === 'true';
-    const items = await generateDailySchedule(date, force);
+    const maxMinutesRaw = Number(req.query.maxMinutes);
+    const items = await generateDailySchedule(date, force, {
+      startTime: (req.query.startTime as string) || undefined,
+      endTime: (req.query.endTime as string) || undefined,
+      maxMinutes: Number.isFinite(maxMinutesRaw) && maxMinutesRaw > 0 ? maxMinutesRaw : undefined,
+    });
     res.json({ date, count: items.length, items });
   } catch (err) {
     console.error('[agenda] erro ao gerar cronograma:', err);
     res.status(500).json({ error: 'Erro ao organizar agenda' });
+  }
+});
+
+adminRouter.post('/tasks/:id/action', async (req, res) => {
+  try {
+    const existing = await getTask(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
+
+    const action = String(req.body?.action || '').trim();
+    if (action === 'done') {
+      await markTaskDone(req.params.id);
+      return res.json({ ok: true });
+    }
+    if (action === 'discard') {
+      await deleteTask(req.params.id);
+      return res.json({ ok: true });
+    }
+
+    const next = new Date(existing.remindAt);
+    if (action === 'postpone_1h') {
+      next.setHours(next.getHours() + 1);
+    } else if (action === 'tomorrow') {
+      next.setDate(next.getDate() + 1);
+      next.setHours(9, 0, 0, 0);
+    } else {
+      return res.status(400).json({ error: 'Ação inválida' });
+    }
+
+    await updateTask(req.params.id, {
+      remindAt: next.toISOString(),
+      done: false,
+      completedAt: null,
+      postponedCount: (existing.postponedCount ?? 0) + 1,
+    });
+    return res.json({ ok: true, remindAt: next.toISOString() });
+  } catch (err) {
+    console.error('[tasks] erro ao executar ação rápida:', err);
+    res.status(500).json({ error: 'Erro ao executar ação rápida' });
   }
 });
 

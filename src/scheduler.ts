@@ -223,7 +223,10 @@ export function startScheduler(): void {
           // recorrente) de forma atômica. Se outra instância chegou primeiro,
           // não envia — é isso que evita o lembrete em dobro.
           if (!(await claimDueTask(task))) continue;
-          await sendText(task.to || config.ownerPhone, `⏰ Lembrete: ${task.text}`);
+          await sendText(
+            task.to || config.ownerPhone,
+            `⏰ Lembrete: ${task.text}\n\nResponda com: *feito*, *adiar 1h*, *amanhã* ou *apagar ${task.text}*.`
+          );
           console.log(
             `[scheduler] lembrete enviado: ${task.id}${task.recurrence ? ' (recorrente, reagendado)' : ''}`
           );

@@ -7,9 +7,12 @@ import {
   appendMemory,
   recordMessage,
   recordRouteMiss,
+  listTasks,
   updateAgendaItem,
   getTask,
   updateTask,
+  markTaskDone,
+  deleteTask,
 } from '../services/firebase';
 import { runSubagent, ORCHESTRATOR_NAME } from './subagents';
 import { tryHandleCommand } from './commands';
@@ -164,6 +167,137 @@ async function tryAdvanceAgenda(contact: string, text: string): Promise<string |
   );
   // advanceTask já envia a mensagem de transição; aqui evitamos resposta duplicada.
   return '';
+}
+
+function normalizeTaskText(text: string): string[] {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((w) => w.length >= 3 && !FILLER_WORDS.has(w));
+}
+
+function taskScore(queryWords: string[], taskText: string): number {
+  if (queryWords.length === 0) return 0;
+  const taskWords = normalizeTaskText(taskText);
+  const taskSet = new Set(taskWords);
+  const hits = queryWords.filter((w) => taskSet.has(w) || taskText.toLowerCase().includes(w));
+  return hits.length / queryWords.length;
+}
+
+async function findTaskByNaturalText(query: string, fallbackToLatestFired = false) {
+  const queryWords = normalizeTaskText(query);
+  const candidates = (await listTasks()).filter((t) => !t.completedAt);
+  if (queryWords.length === 0) {
+    if (!fallbackToLatestFired) return null;
+    return (
+      candidates
+        .filter((t) => t.done)
+        .sort((a, b) => b.remindAt.localeCompare(a.remindAt))[0] ?? null
+    );
+  }
+  const ranked = candidates
+    .map((task) => ({ task, score: taskScore(queryWords, task.text) }))
+    .filter((item) => item.score >= 0.5)
+    .sort((a, b) => b.score - a.score || a.task.remindAt.localeCompare(b.task.remindAt));
+  if (ranked[0]?.task) return ranked[0].task;
+  if (fallbackToLatestFired) {
+    return (
+      candidates
+        .filter((t) => t.done)
+        .sort((a, b) => b.remindAt.localeCompare(a.remindAt))[0] ?? null
+    );
+  }
+  return null;
+}
+
+async function tryNaturalTaskCommand(contact: string, text: string): Promise<string | null> {
+  const lower = text.trim().toLowerCase();
+  if (lower.includes('?')) return null;
+
+  if (/\b(lista|liste|mostra|mostrar|quais)\b.*\b(pend[eê]ncias?|pendentes?|tarefas?|lembretes?)\b/i.test(text)) {
+    const tasks = (await listTasks())
+      .filter((t) => !t.completedAt)
+      .sort((a, b) => a.remindAt.localeCompare(b.remindAt))
+      .slice(0, 15);
+    if (tasks.length === 0) return 'Você não tem tarefas ou lembretes pendentes agora.';
+    const linhas = tasks.map((t) => {
+      const status = t.done ? 'tocou sem confirmação' : 'pendente';
+      return `• ${t.text} — ${new Date(t.remindAt).toLocaleString('pt-BR', { timeZone: config.timezone })} (${status})`;
+    });
+    return `📋 *Pendências atuais:*\n${linhas.join('\n')}`;
+  }
+
+  if (DONE_REGEX.test(lower)) {
+    const task = await findTaskByNaturalText(text, true);
+    if (!task) return null;
+    await markTaskDone(task.id);
+    recordUndo(
+      contact,
+      `a conclusão de "${task.text}" por frase natural`,
+      () => updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null }),
+      [{ kind: 'task.update', id: task.id, data: { done: task.done, completedAt: task.completedAt ?? null } }]
+    );
+    return `✅ Marquei como concluído: *${task.text}*.`;
+  }
+
+  if (/\b(apaga|apague|remove|remova|descarta|descarte|cancela|cancele)\b/i.test(text)) {
+    const task = await findTaskByNaturalText(text, true);
+    if (!task) return null;
+    await deleteTask(task.id);
+    recordUndo(
+      contact,
+      `a remoção de "${task.text}" por frase natural`,
+      () => updateTask(task.id, task),
+      [{ kind: 'task.create', data: task }]
+    );
+    return `🗑️ Removi: *${task.text}*.`;
+  }
+
+  if (/\b(adia|adiar|adie|amanh[ãa]|mais tarde)\b/i.test(text)) {
+    const task = await findTaskByNaturalText(text, true);
+    if (!task) return null;
+    const next = new Date(task.remindAt);
+    if (/\b(1h|uma hora|1 hora)\b/i.test(text)) {
+      next.setHours(next.getHours() + 1);
+    } else {
+      next.setDate(next.getDate() + 1);
+      next.setHours(9, 0, 0, 0);
+    }
+    await updateTask(task.id, {
+      remindAt: next.toISOString(),
+      done: false,
+      completedAt: null,
+      postponedCount: (task.postponedCount ?? 0) + 1,
+    });
+    recordUndo(
+      contact,
+      `o adiamento de "${task.text}" por frase natural`,
+      () =>
+        updateTask(task.id, {
+          remindAt: task.remindAt,
+          done: task.done,
+          completedAt: task.completedAt ?? null,
+          postponedCount: task.postponedCount,
+        }),
+      [
+        {
+          kind: 'task.update',
+          id: task.id,
+          data: {
+            remindAt: task.remindAt,
+            done: task.done,
+            completedAt: task.completedAt ?? null,
+            postponedCount: task.postponedCount,
+          },
+        },
+      ]
+    );
+    return `⏰ Adiei *${task.text}* para ${next.toLocaleString('pt-BR', { timeZone: config.timezone })}.`;
+  }
+
+  return null;
 }
 
 /**
@@ -338,6 +472,18 @@ export async function handleMessage(
   // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
   // mensagem causar (ex: 4 lembretes criados de uma vez), não só a última escrita.
   beginUndoGroup(contact);
+
+  const naturalTaskCommand = await tryNaturalTaskCommand(contact, text);
+  if (naturalTaskCommand !== null) {
+    return {
+      reply: naturalTaskCommand,
+      subagentId: 'tasks',
+      subagentName: 'Tarefas',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'natural-task-command',
+    };
+  }
 
   // 0.5) Atalho de conclusão da tarefa atual ("terminei", "pronto", ...).
   //      Só do dono e quando há item em andamento na agenda.
