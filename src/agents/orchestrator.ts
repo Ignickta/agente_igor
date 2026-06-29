@@ -17,7 +17,7 @@ import {
 import { AgendaItem } from '../types';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
-import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence } from '../services/datetime';
+import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence, dateLabelPt } from '../services/datetime';
 import { getMaxDailyWorkMinutes, isNotificationEnabled } from '../services/settings';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
@@ -64,58 +64,6 @@ const TYPE_EMOJI: Record<AgendaItem['type'], string> = {
 };
 
 // ===================== Geração do cronograma =====================
-
-/**
- * Resultado bruto que o LLM deve devolver para cada item planejado. Campos
- * opcionais são `| null` por exigência do modo estrito de Structured Outputs
- * (todo campo é required; opcional = união com null).
- */
-interface PlannedItem {
-  title: string;
-  startTime: string;
-  endTime: string;
-  priority: number;
-  type: AgendaItem['type'];
-  estimatedMinutes?: number | null;
-  notes?: string | null;
-  subagentId?: string | null;
-}
-
-/** Schema estrito do cronograma gerado (raiz precisa ser objeto, não array). */
-const SCHEDULE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['itens'],
-  properties: {
-    itens: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: [
-          'title',
-          'startTime',
-          'endTime',
-          'priority',
-          'type',
-          'estimatedMinutes',
-          'notes',
-          'subagentId',
-        ],
-        properties: {
-          title: { type: 'string' },
-          startTime: { type: 'string', description: 'HH:mm' },
-          endTime: { type: 'string', description: 'HH:mm' },
-          priority: { type: 'integer', description: '2 (mais urgente) a 5 (menos)' },
-          type: { type: 'string', enum: ['task', 'event', 'research'] },
-          estimatedMinutes: { type: ['integer', 'null'] },
-          notes: { type: ['string', 'null'] },
-          subagentId: { type: ['string', 'null'] },
-        },
-      },
-    },
-  },
-};
 
 // ===================== F10: aprendizado de padrões =====================
 
@@ -199,147 +147,49 @@ export async function generateDailySchedule(
   const normTitle = (s: string) => s.trim().toLowerCase();
   const linkedTaskIds = new Set(existing.map((i) => i.taskId).filter(Boolean));
   const existingTitleSet = new Set(existing.map((i) => normTitle(i.title)));
-  const tasks = allDayTasks.filter(
+  const pendingForDay = allDayTasks.filter(
     (t) => !linkedTaskIds.has(t.id) && !existingTitleSet.has(normTitle(t.text))
   );
 
-  const agentGenerated = existing.filter((i) => i.createdBy === 'agent');
-  if (agentGenerated.length > 0 && !force && tasks.length === 0) {
-    return existing; // nada novo a encaixar
-  }
-
-  // Restrições do encaixe: TUDO que já está na agenda não pode ser sobreposto
-  // (itens fixos do usuário e blocos já gerados).
-  const fixed = existing;
-
-  if (tasks.length === 0 && existing.length === 0) {
-    return [];
-  }
-
-  // Contexto da memória: fatos do subagente "Pessoal", se existir.
-  let memoryContext = '';
-  try {
-    const subs = await listSubagents(true);
-    const pessoal = subs.find((s) => /pessoal/i.test(s.name));
-    if (pessoal && config.ownerPhone) {
-      const facts = await getFacts(config.ownerPhone, pessoal.id, 15);
-      if (facts.length) memoryContext = facts.map((f) => `- ${f}`).join('\n');
-    }
-  } catch (err) {
-    console.error('[orchestrator] falha ao carregar contexto de memória:', err);
-  }
-
-  const candidates = tasks.map((t) => ({
-    title: t.text,
-    deadline: t.remindAt,
-    subagentId: t.subagentId,
-    estimatedMinutes: t.estimatedMinutes,
-    // F8: o planejador vê quantas vezes a tarefa já foi adiada.
-    ...(t.postponedCount ? { postponedCount: t.postponedCount } : {}),
-  }));
-
-  // F10: padrões aprendidos do histórico, para otimizar ordem/horários.
-  const patterns = await learnUserPatterns();
-
-  const fixedDesc = fixed.length
-    ? fixed
-        .map(
-          (i) =>
-            `- ${i.startTime}–${i.endTime} "${i.title}" (JÁ NA AGENDA${
-              i.priority === 1 || i.createdBy === 'user' ? ', FIXO do usuário' : ''
-            } — não sobrepor)`
-        )
-        .join('\n')
-    : '(nenhum item fixo)';
-
-  const workStart = opts.startTime || '08:00';
-  const workEnd = opts.endTime || '19:00';
-  const maxMinutes = opts.maxMinutes || getMaxDailyWorkMinutes();
-
-  const system = `Você é o orquestrador do dia do Igor. Monte um cronograma realista para ${date}.
-
-Regras de prioridade:
-- priority 1 = item fixo do usuário com horário definido; NUNCA mova nem altere esses.
-- priority 2 a 5 = você calcula com base em deadline, tipo de tarefa e contexto do usuário
-  (2 = mais urgente/importante, 5 = menos).
-
-Encaixe as tarefas pendentes em volta dos itens fixos, sem sobreposição de horários,
-respeitando a janela útil (${workStart}–${workEnd}) e o limite máximo de ${maxMinutes} minutos
-de trabalho planejado. Deixe intervalos curtos quando fizer sentido.
-Se a tarefa trouxer "estimatedMinutes", use-o para dimensionar o bloco (start→end). Quando o
-histórico indicar um período mais produtivo, prefira alocar as tarefas mais importantes nele.
-Se a tarefa trouxer "postponedCount" >= ${PROCRASTINATION_THRESHOLD}, ela vem sendo adiada
-repetidamente: aloque-a no PRIMEIRO bloco produtivo do dia (engolir o sapo) com prioridade 2.
-Se não couber tudo dentro do limite, priorize o que for mais urgente/importante e deixe o resto
-fora da resposta; não estoure a janela nem o limite só para encaixar todos os itens.
-
-Classifique cada item em type: "task", "event" ou "research". Responda com a lista de
-itens planejados no campo "itens" (priority de 2 a 5).`;
-
-  const user = `Itens FIXOS (não mexer):
-${fixedDesc}
-
-Tarefas pendentes a encaixar:
-${candidates.length ? JSON.stringify(candidates, null, 2) : '(nenhuma)'}
-
-Contexto do usuário (memória):
-${memoryContext || '(sem contexto adicional)'}
-
-Padrões aprendidos do histórico:
-${patterns || '(sem histórico suficiente)'}
-
-Gere o cronograma dos itens NÃO-fixos:`;
-
-  const messages: ChatMessage[] = [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-
-  const result = await chatJson<{ itens: PlannedItem[] }>(messages, {
-    name: 'cronograma',
-    schema: SCHEDULE_SCHEMA,
-    temperature: 0,
-  });
-  const planned = result?.itens ?? [];
-
-  // Defesa: o modelo pode reemitir um item fixo (que foi passado só como
-  // contexto) ou repetir um mesmo item dentro do próprio JSON. Não persistimos
-  // planejados que dupliquem um fixo NEM um planejado já criado nesta rodada —
-  // por título normalizado ou pelo mesmo slot de horário.
-  const norm = (s: string) => s.trim().toLowerCase();
-  const fixedTitles = new Set(fixed.map((i) => norm(i.title)));
-  const fixedSlots = new Set(fixed.map((i) => `${i.startTime}-${i.endTime}`));
-
-  // Mapa título→taskId para vincular o item de agenda à Task de origem, de modo
-  // que concluir o item depois propague para a Task (markTaskDone).
-  const taskByTitle = new Map(tasks.map((t) => [norm(t.text), t.id]));
-
-  // Persiste os itens gerados pelo agente.
-  const created: AgendaItem[] = [];
-  for (const p of planned) {
-    if (!p.title || !p.startTime || !p.endTime) continue;
-    if (fixedTitles.has(norm(p.title)) || fixedSlots.has(`${p.startTime}-${p.endTime}`)) {
-      continue;
-    }
-    const taskId = taskByTitle.get(norm(p.title));
+  // O horário do lembrete (remindAt) é a hora que o Igor escolheu — não um mero
+  // "prazo". Toda task pendente vira um bloco no PRÓPRIO horário do remindAt:
+  // o LLM nunca a realoca. Antes, o orquestrador passava o remindAt como
+  // "deadline" e o modelo encaixava a tarefa no primeiro bloco livre da manhã,
+  // ignorando o horário pedido (ex: pedido p/ 15:00 caía em 08:00). Só as tasks
+  // sem horário definido sobrariam para o LLM — mas hoje toda task tem hora, então
+  // todas entram como bloco fixo aqui e o modelo só preenche eventuais lacunas.
+  const fixedFromTasks: AgendaItem[] = [];
+  for (const t of pendingForDay) {
+    const startTime = timeKey(new Date(t.remindAt));
+    const dur = t.estimatedMinutes && t.estimatedMinutes > 0 ? t.estimatedMinutes : 45;
+    const [sh, sm] = startTime.split(':').map(Number);
+    const endMin = sh * 60 + sm + dur;
+    const endTime = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}:${String(
+      endMin % 60
+    ).padStart(2, '0')}`;
     const item = await createAgendaItem({
-      title: p.title,
+      title: t.text,
       date,
-      startTime: p.startTime,
-      endTime: p.endTime,
-      priority: Math.min(5, Math.max(2, Number(p.priority) || 3)),
-      type: (['task', 'event', 'research'] as const).includes(p.type) ? p.type : 'task',
-      createdBy: 'agent',
-      ...(p.estimatedMinutes ? { estimatedMinutes: Math.round(Number(p.estimatedMinutes)) } : {}),
-      ...(p.notes ? { notes: p.notes } : {}),
-      ...(p.subagentId ? { subagentId: p.subagentId } : {}),
-      ...(taskId ? { taskId } : {}),
+      startTime,
+      endTime,
+      // Hora escolhida pelo Igor = bloco fixo (priority 1): o reorganizador nunca move.
+      priority: 1,
+      type: 'task',
+      createdBy: 'user',
+      ...(t.estimatedMinutes ? { estimatedMinutes: t.estimatedMinutes } : {}),
+      ...(t.subagentId ? { subagentId: t.subagentId } : {}),
+      taskId: t.id,
     });
-    created.push(item);
-    fixedTitles.add(norm(p.title));
-    fixedSlots.add(`${p.startTime}-${p.endTime}`);
+    fixedFromTasks.push(item);
+    existingTitleSet.add(normTitle(t.text));
   }
 
+  // Toda task pendente já virou bloco fixo no horário pedido (loop acima): nada
+  // sobra para o LLM "encaixar". O cronograma do dia é, então, os lembretes do
+  // Igor (cada um na SUA hora) + o que já existia na agenda. Não chamamos mais o
+  // modelo para distribuir horários, justamente porque era ele quem realocava as
+  // tarefas para a manhã e ignorava o horário pedido.
+  void fixedFromTasks;
   return getAgendaForDay(date);
 }
 
@@ -452,7 +302,7 @@ Quais realocar para amanhã?`;
 /** Formata o cronograma para o WhatsApp. */
 export function formatSchedule(items: AgendaItem[], date = dayKey()): string {
   if (items.length === 0) {
-    return `📋 Sem itens na agenda de ${date} ainda. Me diga o que você quer encaixar hoje! 🙂`;
+    return `📋 Sem itens na agenda de ${dateLabelPt(date)} ainda. Me diga o que você quer encaixar hoje! 🙂`;
   }
   const lines = items.map((i) => {
     const done = i.status === 'done' ? ' ✔️' : i.status === 'in_progress' ? ' ⏳' : '';
@@ -460,7 +310,7 @@ export function formatSchedule(items: AgendaItem[], date = dayKey()): string {
     const typ = TYPE_EMOJI[i.type] || '';
     return `${prio} *${i.startTime}–${i.endTime}* ${typ} ${i.title}${done}`;
   });
-  return `🗓️ *Cronograma de ${date}*\n\n${lines.join('\n')}\n\n_Quer reorganizar algo? É só me dizer._`;
+  return `🗓️ *Cronograma de ${dateLabelPt(date)}*\n\n${lines.join('\n')}\n\n_Quer reorganizar algo? É só me dizer._`;
 }
 
 // ===================== Visões consolidadas (semana / mês / próximos) =====================
@@ -780,7 +630,7 @@ export async function reorganize(
         .map((t) => `- id: ${t.id} | ${timeKey(new Date(t.remindAt))} | ${t.text}`)
         .join('\n');
       return (
-        `A agenda de ${date} não tem blocos de cronograma, mas existem LEMBRETES no dia:\n` +
+        `A agenda de ${dateLabelPt(date)} não tem blocos de cronograma, mas existem LEMBRETES no dia:\n` +
         `${linhas}\n\n` +
         `Para alterar horário ou texto de um deles, use a ferramenta editar_lembrete com o id. ` +
         `Para apagar, remover_lembrete.`
