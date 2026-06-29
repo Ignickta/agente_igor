@@ -12,7 +12,7 @@ import {
 } from '../services/firebase';
 import { weekRange } from './orchestrator';
 import { CLAIMS_ACTION_REGEX } from './subagents';
-import { dayKey, addDays, dayStartMs, timeKey } from '../services/datetime';
+import { dayKey, addDays, dayStartMs, timeKey, dateLabelPt } from '../services/datetime';
 import { isNotificationEnabled } from '../services/settings';
 
 /** True se as notificações proativas estão ligadas e há dono configurado. */
@@ -91,7 +91,7 @@ export async function sendNightlySummary(): Promise<void> {
     : '   • (nada agendado ainda)';
 
   const text =
-    `🌙 *Resumo do dia* (${today})\n\n` +
+    `🌙 *Resumo do dia* (${dateLabelPt(today)})\n\n` +
     `✅ Concluídas hoje: ${completed.length}\n` +
     `⬜ Pendentes no total: ${pending.length}\n\n` +
     `🔝 *Prioridades de amanhã:*\n${linhasTop}\n\n` +
@@ -139,7 +139,7 @@ export async function sendWeeklyReview(): Promise<void> {
   }
 
   const text =
-    `📊 *Revisão semanal* (${start} a ${end})\n\n` +
+    `📊 *Revisão semanal* (${start.slice(8, 10)}/${start.slice(5, 7)} a ${end.slice(8, 10)}/${end.slice(5, 7)})\n\n` +
     `✅ Concluídas: ${completed.length}\n` +
     `⬜ Pendentes: ${pending.length}\n` +
     `📈 Taxa de conclusão: ${taxa}%\n` +

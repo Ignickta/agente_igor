@@ -17,6 +17,26 @@ export function dayKey(date = new Date()): string {
   }).format(date);
 }
 
+const WEEKDAY_PT_FULL = [
+  'domingo',
+  'segunda-feira',
+  'terça-feira',
+  'quarta-feira',
+  'quinta-feira',
+  'sexta-feira',
+  'sábado',
+];
+
+/**
+ * Rótulo de data legível em PT-BR a partir de um YYYY-MM-DD, ex:
+ * "sexta-feira, 26/06/2026". Usado nas mensagens ao Igor — nunca exibir a chave
+ * crua YYYY-MM-DD (formato técnico), que parece data invertida.
+ */
+export function dateLabelPt(dateKey: string): string {
+  const [y, m, d] = dateKey.split('-');
+  return `${WEEKDAY_PT_FULL[weekdayOf(dateKey)]}, ${d}/${m}/${y}`;
+}
+
 /** Hora local (HH:mm) no timezone configurado. */
 export function timeKey(date = new Date()): string {
   return new Intl.DateTimeFormat('en-GB', {
