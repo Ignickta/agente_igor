@@ -27,7 +27,7 @@ import {
   listActions,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
-import { generateDailySchedule, dayKey } from '../agents/orchestrator';
+import { generateDailySchedule, advanceTask, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
 import { getConnectionState } from '../services/evolution';
 import { getUptimeSeconds, getRecentErrors, getLastMessageProcessedAt } from '../services/status';
@@ -550,20 +550,44 @@ adminRouter.post('/agenda', async (req, res) => {
 });
 
 // Gera o cronograma do dia a partir das tarefas pendentes. ?date=&force=true
+// Body opcional { taskIds: string[] }: quando presente, só ESSAS tarefas viram
+// bloco (o "escolho tudo ou só alguns" do painel). Ausente/vazio = todas.
 adminRouter.post('/agenda/generate', async (req, res) => {
   try {
     const date = (req.query.date as string)?.trim() || dayKey();
     const force = req.query.force === 'true';
     const maxMinutesRaw = Number(req.query.maxMinutes);
+    const rawIds = (req.body as Record<string, unknown> | undefined)?.taskIds;
+    const taskIds = Array.isArray(rawIds)
+      ? rawIds.map((id) => String(id)).filter(Boolean)
+      : undefined;
     const items = await generateDailySchedule(date, force, {
       startTime: (req.query.startTime as string) || undefined,
       endTime: (req.query.endTime as string) || undefined,
       maxMinutes: Number.isFinite(maxMinutesRaw) && maxMinutesRaw > 0 ? maxMinutesRaw : undefined,
+      taskIds,
     });
     res.json({ date, count: items.length, items });
   } catch (err) {
     console.error('[agenda] erro ao gerar cronograma:', err);
     res.status(500).json({ error: 'Erro ao organizar agenda' });
+  }
+});
+
+// Conclui um item da agenda e avança para o próximo (modo secretário).
+// Reusa advanceTask: propaga a conclusão para a Task de origem (taskId) e
+// anuncia o próximo item no WhatsApp — mantendo tela e WhatsApp sincronizados.
+adminRouter.post('/agenda/:id/advance', async (req, res) => {
+  try {
+    const existing = await getAgendaItem(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
+    await advanceTask(existing);
+    const items = await getAgendaForDay(existing.date);
+    const next = items.find((i) => i.status === 'pending' || i.status === 'in_progress') || null;
+    res.json({ ok: true, items, next });
+  } catch (err) {
+    console.error('[agenda] erro ao avançar item:', err);
+    res.status(500).json({ error: 'Erro ao concluir e avançar' });
   }
 });
 

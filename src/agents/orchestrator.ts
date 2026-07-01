@@ -128,7 +128,7 @@ export async function learnUserPatterns(days = 28): Promise<string> {
 export async function generateDailySchedule(
   date = dayKey(),
   force = false,
-  opts: { startTime?: string; endTime?: string; maxMinutes?: number } = {}
+  opts: { startTime?: string; endTime?: string; maxMinutes?: number; taskIds?: string[] } = {}
 ): Promise<AgendaItem[]> {
   // F10: traz os eventos do Google Calendar ANTES de planejar — eles entram
   // como itens fixos e o modelo encaixa as tarefas em volta. Best-effort.
@@ -136,10 +136,16 @@ export async function generateDailySchedule(
 
   const existing = await getAgendaForDay(date);
 
+  // Seleção do Igor: quando `taskIds` vem preenchido, só ESSAS tarefas viram
+  // bloco (o "escolho tudo ou só alguns"). Sem lista = comportamento antigo:
+  // todas as pendentes do dia. Uma lista vazia também cai no "todas" (o front
+  // manda undefined quando quer tudo).
+  const selected = opts.taskIds && opts.taskIds.length > 0 ? new Set(opts.taskIds) : null;
+
   // Tarefas pendentes cujo lembrete cai no dia alvo (data LOCAL: remindAt é
   // ISO UTC, e cortar a string colocaria lembretes após as 21h no dia seguinte).
   const allDayTasks = (await listTasks()).filter(
-    (t) => !t.done && dayKey(new Date(t.remindAt)) === date
+    (t) => !t.done && dayKey(new Date(t.remindAt)) === date && (!selected || selected.has(t.id))
   );
 
   // Só encaixa o que ainda NÃO está representado na agenda (por taskId ou
