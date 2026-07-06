@@ -15,6 +15,7 @@ import {
   getMetrics,
   getAgendaForDay,
   getAgendaItem,
+  getAgendaItemsByTaskId,
   createAgendaItem,
   updateAgendaItem,
   deleteAgendaItem,
@@ -36,6 +37,7 @@ import { embed } from '../services/openai';
 import { cosine } from '../services/memory';
 import { effectiveSettings, updateSettings } from '../services/settings';
 import { ProactiveSettings } from '../services/firebase';
+import { timeKey, parseLocalIso } from '../services/datetime';
 
 export const adminRouter = Router();
 
@@ -433,7 +435,18 @@ adminRouter.put('/tasks/:id', async (req, res) => {
   const { text, remindAt, done, subagentId, to } = req.body;
   const update: Record<string, unknown> = {};
   if (text !== undefined) update.text = text;
-  if (remindAt !== undefined) update.remindAt = remindAt;
+  if (remindAt !== undefined) {
+    update.remindAt = remindAt;
+    // Editar o horário rearma o disparo e os marcadores da fila sequencial —
+    // mesma regra do editar_lembrete via WhatsApp (senão o painel poderia
+    // "destravar" um lembrete que a fila considera confirmado).
+    if (remindAt !== existing.remindAt && done === undefined) {
+      update.done = false;
+      update.completedAt = null;
+    }
+    update.firedAt = null;
+    update.lastNudgeAt = null;
+  }
   if (done !== undefined) {
     update.done = !!done;
     update.completedAt = done ? Date.now() : null;
@@ -446,6 +459,40 @@ adminRouter.put('/tasks/:id', async (req, res) => {
   }
 
   await updateTask(req.params.id, update);
+
+  // Propaga para os BLOCOS da agenda ligados a este lembrete (taskId): mover
+  // ou renomear o lembrete pelo painel também move/renomeia o cronograma, e
+  // confirmar o lembrete conclui o bloco — mesma regra do editar_lembrete /
+  // concluir_lembrete via WhatsApp (evita o "editei/confirmei aqui e o bloco
+  // ficou órfão ou continuou cobrando na agenda").
+  if (text !== undefined || remindAt !== undefined || done === true) {
+    const linked = (await getAgendaItemsByTaskId(req.params.id)).filter((i) => i.status !== 'done');
+    for (const item of linked) {
+      const itemUpdate: Record<string, unknown> = {};
+      if (text !== undefined) itemUpdate.title = text;
+      if (remindAt !== undefined) {
+        const when = new Date(remindAt);
+        const [sh, sm] = item.startTime.split(':').map(Number);
+        const [eh, em] = item.endTime.split(':').map(Number);
+        const dur = Math.max(5, (eh * 60 + em - (sh * 60 + sm) + 1440) % 1440);
+        const startTime = timeKey(when);
+        const [nh, nm] = startTime.split(':').map(Number);
+        const endMin = nh * 60 + nm + dur;
+        itemUpdate.date = dayKey(when);
+        itemUpdate.startTime = startTime;
+        itemUpdate.endTime = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}:${String(
+          endMin % 60
+        ).padStart(2, '0')}`;
+        itemUpdate.nudgedAt = null;
+      }
+      if (done === true) {
+        itemUpdate.status = 'done';
+        itemUpdate.completedAt = Date.now();
+      }
+      await updateAgendaItem(item.id, itemUpdate);
+    }
+  }
+
   res.json({ ok: true });
 });
 
@@ -454,6 +501,12 @@ adminRouter.delete('/tasks/:id', async (req, res) => {
   const existing = await getTask(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
   await deleteTask(req.params.id);
+  // Remove também os blocos da agenda ligados — mesma regra do remover_lembrete
+  // via WhatsApp (evita o cronograma cobrar um compromisso que não existe mais).
+  const linked = (await getAgendaItemsByTaskId(req.params.id)).filter((i) => i.status !== 'done');
+  for (const item of linked) {
+    await deleteAgendaItem(item.id);
+  }
   res.json({ ok: true });
 });
 
@@ -640,6 +693,29 @@ adminRouter.put('/agenda/:id', async (req, res) => {
       return res.status(400).json({ error: 'Nenhum campo para atualizar' });
     }
     await updateAgendaItem(req.params.id, update);
+
+    // Propaga para o LEMBRETE que originou este bloco: mover/renomear o bloco
+    // pelo painel também move/renomeia o lembrete — mesma regra do
+    // editar_item_agenda via WhatsApp (evita o lembrete tocar no dia/horário
+    // antigo depois que o bloco já foi movido no cronograma).
+    if (existing.taskId && (update.title !== undefined || update.date || update.startTime)) {
+      const task = await getTask(existing.taskId);
+      if (task && !task.completedAt) {
+        const taskUpdate: Record<string, unknown> = {};
+        if (update.title !== undefined) taskUpdate.text = update.title;
+        if (update.date || update.startTime) {
+          const date = update.date || existing.date;
+          const startTime = update.startTime || existing.startTime;
+          const when = parseLocalIso(`${date}T${startTime}:00`);
+          taskUpdate.remindAt = when.toISOString();
+          taskUpdate.done = false;
+          taskUpdate.firedAt = null;
+          taskUpdate.lastNudgeAt = null;
+        }
+        await updateTask(task.id, taskUpdate);
+      }
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[agenda] erro ao atualizar item:', err);
@@ -653,6 +729,15 @@ adminRouter.delete('/agenda/:id', async (req, res) => {
     const existing = await getAgendaItem(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Item de agenda não encontrado' });
     await deleteAgendaItem(req.params.id);
+    // Cancela também o LEMBRETE que originou o bloco — mesma regra do
+    // remover_item_agenda via WhatsApp. Recorrentes ficam: a ocorrência some,
+    // a série continua.
+    if (existing.taskId) {
+      const task = await getTask(existing.taskId);
+      if (task && !task.recurrence && !task.completedAt) {
+        await deleteTask(task.id);
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('[agenda] erro ao remover item:', err);
