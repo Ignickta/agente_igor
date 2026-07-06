@@ -1,9 +1,21 @@
 import cron from 'node-cron';
 import { config } from './config';
 import { sendText, ensureConnected } from './services/evolution';
-import { getDueTasks, claimDueTask, acquireJobLock, cleanupJobLocks } from './services/firebase';
+import {
+  getDueTasks,
+  claimDueTask,
+  getFiredUnconfirmed,
+  updateTask,
+  acquireJobLock,
+  cleanupJobLocks,
+} from './services/firebase';
 import { dayKey, timeKey, addDays } from './services/datetime';
-import { sendDailySchedule, processTimeBasedTransitions } from './agents/orchestrator';
+import {
+  sendDailySchedule,
+  processTimeBasedTransitions,
+  rollOverPendingTasks,
+} from './agents/orchestrator';
+import { Task } from './types';
 import { processFocusExpirations } from './agents/focus';
 import {
   sendNightlySummary,
@@ -30,6 +42,98 @@ async function withJobLock(job: string, periodKey: string, fn: () => Promise<voi
     return;
   }
   await fn();
+}
+
+// ===================== Fila sequencial de lembretes =====================
+
+/**
+ * Turno do dia (no fuso do usuário) para um instante em epoch ms. Madrugada
+ * (23h–6h) devolve null: a fila não cobra ninguém nesse horário.
+ */
+function turnoOf(ms: number): 'manhã' | 'tarde' | 'noite' | null {
+  const h = parseInt(timeKey(new Date(ms)).slice(0, 2), 10);
+  if (h < 6) return null;
+  if (h < 12) return 'manhã';
+  if (h < 18) return 'tarde';
+  if (h < 23) return 'noite';
+  return null;
+}
+
+/** Instrução padrão de resposta que acompanha toda cobrança de lembrete. */
+function replyHint(text: string): string {
+  return `Responda com: *feito*, *adiar 1h*, *amanhã* ou *apagar ${text}*.`;
+}
+
+/** Sufixo "o que está esperando na fila", quando houver. */
+function queueSuffix(held: Task[]): string {
+  if (held.length === 0) return '';
+  const nomes = held.map((t) => `_${t.text}_`).join('; ');
+  return `\n\n📋 Na fila esperando você confirmar: ${nomes}.`;
+}
+
+/**
+ * Re-cobra o lembrete ativo (disparado e sem confirmação) no máximo UMA vez por
+ * turno (manhã/tarde/noite). Marca `lastNudgeAt` antes de enviar para nunca
+ * repetir a cobrança em loop se o envio falhar no meio.
+ */
+async function maybeNudgeActive(active: Task, held: Task[]): Promise<void> {
+  const now = Date.now();
+  const turnoAtual = turnoOf(now);
+  if (!turnoAtual) return; // madrugada: silêncio
+  const last = active.lastNudgeAt ?? active.firedAt ?? new Date(active.remindAt).getTime();
+  const mesmoTurno = dayKey(new Date(last)) === dayKey() && turnoOf(last) === turnoAtual;
+  if (mesmoTurno) return; // já cobramos neste turno
+  await updateTask(active.id, { lastNudgeAt: now });
+  await sendText(
+    active.to || config.ownerPhone,
+    `⏰ Ainda pendente: *${active.text}*\n\nConseguiu fazer? ${replyHint(active.text)}` +
+      queueSuffix(held)
+  );
+  console.log(`[scheduler] re-cobrança de turno enviada: ${active.id}`);
+}
+
+/**
+ * Fila SEQUENCIAL de lembretes, por contato: só um lembrete fica "ativo" por
+ * vez. Enquanto o Igor não confirmar o ativo (feito/adiar/apagar), os próximos
+ * seguram — sem metralhar mensagem. O ativo é re-cobrado uma vez por turno; ao
+ * confirmar, o próximo da fila dispara no tick seguinte (≤1 min).
+ */
+async function processReminderQueue(): Promise<void> {
+  const [due, blockers] = await Promise.all([getDueTasks(), getFiredUnconfirmed(dayKey())]);
+  if (due.length === 0 && blockers.length === 0) return;
+
+  const owner = config.ownerPhone;
+  const contactOf = (t: Task) => t.to || owner;
+  const contacts = new Set([...due, ...blockers].map(contactOf));
+
+  for (const contact of contacts) {
+    const myDue = due.filter((t) => contactOf(t) === contact);
+    myDue.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+    const myBlockers = blockers.filter((t) => contactOf(t) === contact);
+
+    if (myBlockers.length > 0) {
+      // Fila travada: o mais antigo sem confirmação é o ativo; os demais
+      // disparados + os vencidos ainda não enviados esperam com ele.
+      const [active, ...restBlockers] = myBlockers;
+      await maybeNudgeActive(active, [...restBlockers, ...myDue]);
+      continue;
+    }
+
+    const next = myDue[0];
+    if (!next) continue;
+    // Reivindica ANTES de enviar: marca como enviado (ou reagenda, se
+    // recorrente) de forma atômica. Se outra instância chegou primeiro,
+    // não envia — é isso que evita o lembrete em dobro.
+    if (!(await claimDueTask(next))) continue;
+    await sendText(
+      contact,
+      `⏰ Lembrete: ${next.text}\n\n${replyHint(next.text)}` + queueSuffix(myDue.slice(1))
+    );
+    console.log(
+      `[scheduler] lembrete enviado: ${next.id}${next.recurrence ? ' (recorrente, reagendado)' : ''}` +
+        (myDue.length > 1 ? ` — ${myDue.length - 1} na fila aguardando confirmação` : '')
+    );
+  }
 }
 
 /**
@@ -111,6 +215,9 @@ export function startScheduler(): void {
     async () => {
       try {
         await withJobLock('daily_schedule', dayKey(), async () => {
+          // O que ficou de ontem sem confirmação rola para hoje ANTES de gerar
+          // o cronograma — assim os blocos do dia já nascem com as pendências.
+          await rollOverPendingTasks();
           await sendDailySchedule();
           console.log('[scheduler] cronograma do dia enviado.');
         });
@@ -217,20 +324,7 @@ export function startScheduler(): void {
       if (!(await acquireJobLock('minute_tick', minuteKey))) return;
 
       try {
-        const due = await getDueTasks();
-        for (const task of due) {
-          // Reivindica ANTES de enviar: marca como enviado (ou reagenda, se
-          // recorrente) de forma atômica. Se outra instância chegou primeiro,
-          // não envia — é isso que evita o lembrete em dobro.
-          if (!(await claimDueTask(task))) continue;
-          await sendText(
-            task.to || config.ownerPhone,
-            `⏰ Lembrete: ${task.text}\n\nResponda com: *feito*, *adiar 1h*, *amanhã* ou *apagar ${task.text}*.`
-          );
-          console.log(
-            `[scheduler] lembrete enviado: ${task.id}${task.recurrence ? ' (recorrente, reagendado)' : ''}`
-          );
-        }
+        await processReminderQueue();
       } catch (err) {
         console.error('[scheduler] falha ao processar lembretes:', err);
       }

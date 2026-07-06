@@ -43,6 +43,14 @@ export interface Task {
   recurrence?: Recurrence | null;
   /** Quantas vezes foi adiado (detector de procrastinação). */
   postponedCount?: number;
+  /** Epoch ms de quando o lembrete foi ENVIADO (disparou). null = ainda não. */
+  firedAt?: number | null;
+  /**
+   * Epoch ms do último re-lembrete de turno ("ainda pendente: X"). A fila
+   * sequencial re-cobra a tarefa ativa no máximo uma vez por turno
+   * (manhã/tarde/noite) enquanto o Igor não confirma. null = nenhum ainda.
+   */
+  lastNudgeAt?: number | null;
 }
 
 /** Tipo de item da agenda. */
@@ -91,8 +99,9 @@ export interface AgendaItem {
    * Epoch ms de quando o agente perguntou "você concluiu?" após o fim do slot.
    * Itens NÃO são concluídos automaticamente por horário — só com confirmação
    * do Igor; este campo garante que a pergunta seja feita uma única vez.
+   * null = rearmado (ex: o lembrete de origem mudou de horário).
    */
-  nudgedAt?: number;
+  nudgedAt?: number | null;
   /** Epoch ms de quando o item entrou em andamento (mede duração real). */
   startedAt?: number;
   /** Quantas vezes foi empurrado para mais tarde (detector de procrastinação). */
@@ -137,7 +146,9 @@ export type UndoOp =
   /** Apaga a task criada (revert de uma criação). */
   | { kind: 'task.delete'; id: string }
   /** Aplica estes campos de volta num item de agenda (revert de uma conclusão/edição). */
-  | { kind: 'agenda.update'; id: string; data: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> };
+  | { kind: 'agenda.update'; id: string; data: Partial<Omit<AgendaItem, 'id' | 'createdAt'>> }
+  /** Recria um item de agenda (revert de uma remoção propagada). */
+  | { kind: 'agenda.create'; data: Omit<AgendaItem, 'id' | 'createdAt'> };
 
 /**
  * Reversão declarativa de uma ação — uma OU MAIS operações inversas aplicadas

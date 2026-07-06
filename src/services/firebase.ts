@@ -241,10 +241,13 @@ export async function claimDueTask(task: Task): Promise<boolean> {
       if (task.recurrence) {
         // Outra instância já reagendou esta ocorrência.
         if (current.remindAt !== task.remindAt) return false;
-        tx.update(ref, { remindAt: nextOccurrence(task.remindAt, task.recurrence) });
+        tx.update(ref, {
+          remindAt: nextOccurrence(task.remindAt, task.recurrence),
+          firedAt: Date.now(),
+        });
       } else {
         if (current.done) return false;
-        tx.update(ref, { done: true });
+        tx.update(ref, { done: true, firedAt: Date.now() });
       }
       return true;
     });
@@ -292,6 +295,19 @@ export async function getCompletedTasksBetween(start: number, end: number): Prom
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as Task))
     .filter((t) => t.completedAt != null && t.completedAt >= start && t.completedAt <= end);
+}
+
+/**
+ * Lembretes que JÁ DISPARARAM hoje e ainda não foram confirmados pelo usuário
+ * (done sem completedAt, remindAt no dia local `today`). São os "bloqueadores"
+ * da fila sequencial: enquanto existir um, os próximos lembretes seguram.
+ */
+export async function getFiredUnconfirmed(today: string): Promise<Task[]> {
+  const snap = await tasksCol.where('done', '==', true).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .filter((t) => !t.completedAt && dayKey(new Date(t.remindAt)) === today)
+    .sort((a, b) => a.remindAt.localeCompare(b.remindAt));
 }
 
 /** Todas as tarefas pendentes (done == false), sem filtro de horário. */
@@ -674,6 +690,16 @@ export async function getAgendaItem(id: string): Promise<AgendaItem | null> {
   return { id: doc.id, ...doc.data() } as AgendaItem;
 }
 
+/**
+ * Itens da agenda ligados a uma Task (lembrete) pelo `taskId`. Base da
+ * propagação bidirecional: mover/remover/concluir um lembrete alcança os blocos
+ * de cronograma que nasceram dele.
+ */
+export async function getAgendaItemsByTaskId(taskId: string): Promise<AgendaItem[]> {
+  const snap = await agendaCol.where('taskId', '==', taskId).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as AgendaItem));
+}
+
 /** Atualiza campos de um item da agenda (status, horários, prioridade...). */
 export async function updateAgendaItem(
   id: string,
@@ -814,6 +840,9 @@ export async function applyPersistedUndo(undo: PersistedUndo): Promise<void> {
         break;
       case 'agenda.update':
         await updateAgendaItem(op.id, op.data);
+        break;
+      case 'agenda.create':
+        await createAgendaItem(op.data);
         break;
     }
   }

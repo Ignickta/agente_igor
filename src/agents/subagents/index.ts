@@ -1,4 +1,4 @@
-import { Subagent, MemoryMessage, Task, AgendaItem } from '../../types';
+import { Subagent, MemoryMessage, Task, AgendaItem, UndoOp } from '../../types';
 import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
@@ -16,6 +16,7 @@ import {
   createAgendaItem,
   getAgendaItem,
   deleteAgendaItem,
+  getAgendaItemsByTaskId,
   getPendingRouteSuggestion,
   markRouteSuggestionApplied,
   updateSubagent,
@@ -121,8 +122,10 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       name: 'editar_lembrete',
       description:
         'Altera um lembrete existente: o texto, o horário ou ambos. Use quando o usuário pedir ' +
-        'para mudar/adiar/renomear um compromisso que é um lembrete. Se não souber o id, chame ' +
-        'listar_lembretes primeiro — NUNCA diga que não há o que alterar sem listar antes.',
+        'para mudar/adiar/ANTECIPAR/renomear um compromisso que é um lembrete (ex: "isso é para ' +
+        'hoje", "joga pra amanhã"). O bloco correspondente no cronograma é movido JUNTO, ' +
+        'automaticamente — NÃO crie um evento novo na agenda para a mesma tarefa. Se não souber ' +
+        'o id, chame listar_lembretes primeiro — NUNCA diga que não há o que alterar sem listar antes.',
       parameters: {
         type: 'object',
         properties: {
@@ -496,8 +499,9 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'editar_item_agenda',
       description:
-        'Altera um item da agenda: título, horários e/ou dia. Se não souber o id, chame ' +
-        'listar_itens_agenda primeiro.',
+        'Altera um item da agenda: título, horários e/ou dia. Se o item nasceu de um lembrete, ' +
+        'o lembrete é movido junto automaticamente (dispara no novo dia/horário). Se não souber ' +
+        'o id, chame listar_itens_agenda primeiro.',
       parameters: {
         type: 'object',
         properties: {
@@ -988,6 +992,12 @@ async function executeTool(
           updates.postponedCount = adiamentos;
         }
       }
+      // Mudou o horário: rearma também os marcadores da fila sequencial —
+      // adiar/antecipar tira a tarefa do estado "aguardando confirmação".
+      if (quando) {
+        updates.firedAt = null;
+        updates.lastNudgeAt = null;
+      }
       await updateTask(id, updates);
       const prev = {
         text: task.text,
@@ -996,11 +1006,64 @@ async function executeTool(
         recurrence: task.recurrence ?? null,
         postponedCount: task.postponedCount ?? 0,
       };
-      recordUndo(contact, `a edição do lembrete "${task.text}"`, () => updateTask(id, prev), [
-        { kind: 'task.update', id, data: prev },
-      ]);
+      const undoOps: UndoOp[] = [{ kind: 'task.update', id, data: prev }];
 
+      // Propaga para os BLOCOS da agenda que nasceram deste lembrete: mover o
+      // lembrete sem mover o bloco deixava o cronograma no dia/horário antigo
+      // (era o bug do "antecipei e ele continuou lembrando no dia seguinte").
+      const linked = (await getAgendaItemsByTaskId(id)).filter((i) => i.status !== 'done');
       const after = { ...task, ...updates };
+      for (const item of linked) {
+        const itemUpdates: Partial<
+          Pick<AgendaItem, 'title' | 'date' | 'startTime' | 'endTime' | 'nudgedAt'>
+        > = {};
+        if (texto) itemUpdates.title = texto;
+        if (quando) {
+          const when = new Date(after.remindAt);
+          const [sh, sm] = item.startTime.split(':').map(Number);
+          const [eh, em] = item.endTime.split(':').map(Number);
+          const dur = Math.max(5, (eh * 60 + em - (sh * 60 + sm) + 1440) % 1440);
+          const startTime = timeKey(when);
+          const [nh, nm] = startTime.split(':').map(Number);
+          const endMin = nh * 60 + nm + dur;
+          itemUpdates.date = dayKey(when);
+          itemUpdates.startTime = startTime;
+          itemUpdates.endTime = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}:${String(
+            endMin % 60
+          ).padStart(2, '0')}`;
+          itemUpdates.nudgedAt = null;
+        }
+        if (Object.keys(itemUpdates).length === 0) continue;
+        await updateAgendaItem(item.id, itemUpdates);
+        undoOps.push({
+          kind: 'agenda.update',
+          id: item.id,
+          data: {
+            title: item.title,
+            date: item.date,
+            startTime: item.startTime,
+            endTime: item.endTime,
+          },
+        });
+      }
+
+      recordUndo(
+        contact,
+        `a edição do lembrete "${task.text}"`,
+        async () => {
+          await updateTask(id, prev);
+          for (const item of linked) {
+            await updateAgendaItem(item.id, {
+              title: item.title,
+              date: item.date,
+              startTime: item.startTime,
+              endTime: item.endTime,
+            });
+          }
+        },
+        undoOps
+      );
+
       const quandoBr = new Date(after.remindAt).toLocaleString('pt-BR', {
         timeZone: config.timezone,
       });
@@ -1008,7 +1071,10 @@ async function executeTool(
         adiamentos >= PROCRASTINATION_THRESHOLD
           ? `\n\n${procrastinationWarning(after.text, adiamentos)}`
           : '';
-      return `Lembrete atualizado: "${after.text}" — ${quandoBr}.${alerta}`;
+      const blocos = linked.length
+        ? ` (bloco da agenda ${linked.length > 1 ? 'movidos' : 'movido'} junto)`
+        : '';
+      return `Lembrete atualizado: "${after.text}" — ${quandoBr}${blocos}.${alerta}`;
     }
 
     if (call.function.name === 'concluir_lembrete') {
@@ -1018,11 +1084,34 @@ async function executeTool(
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       if (task.completedAt) return `O lembrete "${task.text}" já estava concluído.`;
       await markTaskDone(id);
+      // Conclui também os blocos da agenda ligados — senão o cronograma e o
+      // follow-up das 20:30 continuariam cobrando um item já confirmado.
+      const linkedDone = (await getAgendaItemsByTaskId(id)).filter((i) => i.status !== 'done');
+      for (const item of linkedDone) {
+        await updateAgendaItem(item.id, { status: 'done', completedAt: Date.now() });
+      }
       recordUndo(
         contact,
         `a conclusão do lembrete "${task.text}"`,
-        () => updateTask(id, { done: task.done, completedAt: null }),
-        [{ kind: 'task.update', id, data: { done: task.done, completedAt: null } }]
+        async () => {
+          await updateTask(id, { done: task.done, completedAt: null });
+          for (const item of linkedDone) {
+            await updateAgendaItem(item.id, {
+              status: item.status,
+              completedAt: item.completedAt ?? null,
+            });
+          }
+        },
+        [
+          { kind: 'task.update', id, data: { done: task.done, completedAt: null } },
+          ...linkedDone.map(
+            (item): UndoOp => ({
+              kind: 'agenda.update',
+              id: item.id,
+              data: { status: item.status, completedAt: item.completedAt ?? null },
+            })
+          ),
+        ]
       );
       return `Concluído ✅: "${task.text}".`;
     }
@@ -1033,6 +1122,13 @@ async function executeTool(
       const task = await getTask(id);
       if (!task) return `Lembrete "${id}" não encontrado. Use listar_lembretes para ver os ids.`;
       await deleteTask(id);
+      // Remove também os blocos da agenda que nasceram deste lembrete — apagar
+      // o lembrete e deixar o bloco fazia o cronograma cobrar um compromisso
+      // que não existe mais.
+      const linkedItems = (await getAgendaItemsByTaskId(id)).filter((i) => i.status !== 'done');
+      for (const item of linkedItems) {
+        await deleteAgendaItem(item.id);
+      }
       // Recriar a task removida = a reversão (mesmo payload na closure e na
       // versão declarativa para o painel).
       const restorePayload = {
@@ -1042,15 +1138,38 @@ async function executeTool(
         ...(task.subagentId ? { subagentId: task.subagentId } : {}),
         ...(task.estimatedMinutes ? { estimatedMinutes: task.estimatedMinutes } : {}),
       };
+      const itemPayloads = linkedItems.map((item) => ({
+        title: item.title,
+        date: item.date,
+        startTime: item.startTime,
+        endTime: item.endTime,
+        priority: item.priority,
+        type: item.type,
+        status: item.status,
+        createdBy: item.createdBy,
+        ...(item.notes ? { notes: item.notes } : {}),
+        ...(item.subagentId ? { subagentId: item.subagentId } : {}),
+        ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
+        ...(item.taskId ? { taskId: item.taskId } : {}),
+      }));
       recordUndo(
         contact,
         `a remoção do lembrete "${task.text}"`,
         async () => {
           await createTask(restorePayload);
+          for (const payload of itemPayloads) {
+            await createAgendaItem(payload);
+          }
         },
-        [{ kind: 'task.create', data: restorePayload }]
+        [
+          { kind: 'task.create', data: restorePayload },
+          ...itemPayloads.map((data): UndoOp => ({ kind: 'agenda.create', data })),
+        ]
       );
-      return `Lembrete removido: "${task.text}".`;
+      const blocos = linkedItems.length
+        ? ` (e ${linkedItems.length} bloco${linkedItems.length > 1 ? 's' : ''} da agenda)`
+        : '';
+      return `Lembrete removido: "${task.text}"${blocos}.`;
     }
 
     if (call.function.name === 'buscar_no_historico') {
@@ -1341,28 +1460,82 @@ async function executeTool(
           console.error('[tool] editar_item_agenda: falha ao propagar para o Google Calendar:', err);
         }
       }
-      recordUndo(contact, `a edição do item "${item.title}"`, async () => {
-        await updateAgendaItem(id, {
-          title: item.title,
-          startTime: item.startTime,
-          endTime: item.endTime,
-          date: item.date,
-          postponedCount: item.postponedCount ?? 0,
-        });
-        if (item.gcalEventId && calendarEnabled()) {
-          await updateCalendarEvent(item.gcalEventId, {
+      // Propaga para o LEMBRETE que originou o bloco: mover o bloco sem mover a
+      // task deixava o lembrete tocando no dia/horário antigo (o "antecipei e
+      // ele continuou lembrando"). Rearma o disparo para o novo horário.
+      let linkedTask: Task | null = null;
+      let linkedTaskPrev: Partial<Omit<Task, 'id' | 'createdAt'>> | null = null;
+      if (item.taskId && (data || inicio || titulo)) {
+        linkedTask = await getTask(item.taskId);
+        if (linkedTask && !linkedTask.completedAt) {
+          linkedTaskPrev = {
+            text: linkedTask.text,
+            remindAt: linkedTask.remindAt,
+            done: linkedTask.done,
+            firedAt: linkedTask.firedAt ?? null,
+            lastNudgeAt: linkedTask.lastNudgeAt ?? null,
+          };
+          await updateTask(linkedTask.id, {
+            ...(titulo ? { text: titulo } : {}),
+            ...(data || inicio
+              ? {
+                  remindAt: parseLocalIso(`${after.date}T${after.startTime}:00`).toISOString(),
+                  done: false,
+                  firedAt: null,
+                  lastNudgeAt: null,
+                }
+              : {}),
+          });
+        } else {
+          linkedTask = null;
+        }
+      }
+      recordUndo(
+        contact,
+        `a edição do item "${item.title}"`,
+        async () => {
+          await updateAgendaItem(id, {
             title: item.title,
-            date: item.date,
             startTime: item.startTime,
             endTime: item.endTime,
-          }).catch(() => undefined);
-        }
-      });
+            date: item.date,
+            postponedCount: item.postponedCount ?? 0,
+          });
+          if (linkedTask && linkedTaskPrev) {
+            await updateTask(linkedTask.id, linkedTaskPrev);
+          }
+          if (item.gcalEventId && calendarEnabled()) {
+            await updateCalendarEvent(item.gcalEventId, {
+              title: item.title,
+              date: item.date,
+              startTime: item.startTime,
+              endTime: item.endTime,
+            }).catch(() => undefined);
+          }
+        },
+        [
+          {
+            kind: 'agenda.update',
+            id,
+            data: {
+              title: item.title,
+              startTime: item.startTime,
+              endTime: item.endTime,
+              date: item.date,
+              postponedCount: item.postponedCount ?? 0,
+            },
+          },
+          ...(linkedTask && linkedTaskPrev
+            ? [{ kind: 'task.update', id: linkedTask.id, data: linkedTaskPrev } as UndoOp]
+            : []),
+        ]
+      );
       const alertaItem =
         adiamentosItem >= PROCRASTINATION_THRESHOLD
           ? `\n\n${procrastinationWarning(after.title, adiamentosItem)}`
           : '';
-      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.${alertaItem}`;
+      const lembreteMovido = linkedTask ? ' O lembrete ligado foi movido junto.' : '';
+      return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.${lembreteMovido}${alertaItem}`;
     }
 
     if (call.function.name === 'remover_item_agenda') {
@@ -1371,6 +1544,17 @@ async function executeTool(
       const item = await getAgendaItem(id);
       if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
       await deleteAgendaItem(id);
+      // Cancela também o LEMBRETE que originou o bloco (compromisso cancelado
+      // = lembrete não deve mais tocar). Recorrentes ficam: a ocorrência some,
+      // a série continua.
+      let removedTask: Task | null = null;
+      if (item.taskId) {
+        const t = await getTask(item.taskId);
+        if (t && !t.recurrence && !t.completedAt) {
+          await deleteTask(t.id);
+          removedTask = t;
+        }
+      }
       // F10: item espelhado → cancela o evento no Google Calendar também
       // (senão o próximo sync recriaria o item aqui).
       let gcalRemovido = false;
@@ -1383,6 +1567,17 @@ async function executeTool(
         }
       }
       recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
+        if (removedTask) {
+          await createTask({
+            text: removedTask.text,
+            remindAt: removedTask.remindAt,
+            to: removedTask.to,
+            ...(removedTask.subagentId ? { subagentId: removedTask.subagentId } : {}),
+            ...(removedTask.estimatedMinutes
+              ? { estimatedMinutes: removedTask.estimatedMinutes }
+              : {}),
+          });
+        }
         // Recria no Google primeiro (id novo) para religar o espelho.
         let novoGcalId: string | null = null;
         if (gcalRemovido) {
@@ -1411,6 +1606,7 @@ async function executeTool(
       });
       return (
         `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime})` +
+        `${removedTask ? ' — o lembrete ligado foi cancelado junto' : ''}` +
         `${gcalRemovido ? ' — removido também do Google Calendar' : ''}.`
       );
     }

@@ -17,7 +17,15 @@ import {
 import { AgendaItem } from '../types';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
-import { dayKey, timeKey, addDays, weekdayOf, nextOccurrence, dateLabelPt } from '../services/datetime';
+import {
+  dayKey,
+  timeKey,
+  addDays,
+  weekdayOf,
+  nextOccurrence,
+  dateLabelPt,
+  parseLocalIso,
+} from '../services/datetime';
 import { getMaxDailyWorkMinutes, isNotificationEnabled } from '../services/settings';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
@@ -580,18 +588,53 @@ export async function processTimeBasedTransitions(): Promise<void> {
     await updateAgendaItem(item.id, { nudgedAt: Date.now() });
   }
 
-  if (!config.ownerPhone) return;
-  const linhas = overdue
+  // Itens que nasceram de um LEMBRETE (taskId) não ganham mensagem própria de
+  // fim de bloco: a fila sequencial de lembretes já cobra a tarefa ativa uma
+  // vez por turno — mandar "o horário terminou" em cima disso era a rajada de
+  // mensagens que fazia o Igor ignorar tudo. Só eventos puros (sem lembrete)
+  // continuam recebendo o aviso.
+  const toAsk = overdue.filter((i) => !i.taskId);
+  if (toAsk.length === 0 || !config.ownerPhone) return;
+
+  const linhas = toAsk
     .sort((a, b) => a.startTime.localeCompare(b.startTime))
     .map((i) => `• *${i.title}* (${i.startTime}–${i.endTime})`)
     .join('\n');
-  const plural = overdue.length > 1;
+  const plural = toAsk.length > 1;
   await sendText(
     config.ownerPhone,
     `⏰ O horário ${plural ? 'destes itens' : 'deste item'} da agenda terminou:\n${linhas}\n\n` +
       `Conseguiu fazer? Me diga o que concluiu que eu marco ✅. ` +
       `O que ficar sem resposta continua pendente e eu te lembro à noite.`
   );
+}
+
+/**
+ * Rolagem diária (07:00): tarefa que ficou para trás vai para HOJE, no mesmo
+ * horário — tanto a que disparou e nunca foi confirmada quanto a que ficou
+ * segurada na fila e nem chegou a tocar. Rearma o disparo (done=false) e zera
+ * os marcadores da fila; conta como adiamento no detector de procrastinação.
+ * Recorrentes ficam de fora (reagendam sozinhas) e concluídas também.
+ */
+export async function rollOverPendingTasks(): Promise<number> {
+  const today = dayKey();
+  const stale = (await listTasks()).filter(
+    (t) => !t.recurrence && !t.completedAt && dayKey(new Date(t.remindAt)) < today
+  );
+  for (const t of stale) {
+    const time = timeKey(new Date(t.remindAt));
+    await updateTask(t.id, {
+      remindAt: parseLocalIso(`${today}T${time}:00`).toISOString(),
+      done: false,
+      firedAt: null,
+      lastNudgeAt: null,
+      postponedCount: (t.postponedCount ?? 0) + 1,
+    });
+  }
+  if (stale.length > 0) {
+    console.log(`[orchestrator] rolagem diária: ${stale.length} tarefa(s) movida(s) para hoje.`);
+  }
+  return stale.length;
 }
 
 /**
