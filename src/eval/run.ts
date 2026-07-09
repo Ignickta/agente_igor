@@ -16,6 +16,7 @@ import {
   AGENDA_REGEX,
   routeByKeywords,
   routeByLLM,
+  explicitDoneCount,
   isPureDoneConfirmation,
 } from '../agents/central';
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
@@ -112,6 +113,17 @@ function suiteDoneShortcut(): void {
   for (const t of naoConfirma) {
     check('feito', `NÃO confirma: "${t}"`, !isPureDoneConfirmation(t));
   }
+
+  const plurais: Array<[string, number]> = [
+    ['feito os 2', 2],
+    ['já fiz as duas', 2],
+    ['concluí ambos', 2],
+    ['terminei 3', 3],
+  ];
+  for (const [text, count] of plurais) {
+    check('feito', `quantidade explícita: "${text}"`, explicitDoneCount(text) === count);
+  }
+  check('feito', 'confirmação singular não inventa quantidade', explicitDoneCount('feito') === null);
 }
 
 // ===================== Suíte C: guarda anti-alucinação =====================

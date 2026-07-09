@@ -31,6 +31,8 @@ export interface Task {
   text: string;
   /** ISO date string de quando lembrar. */
   remindAt: string;
+  /** false = tarefa sem prazo/lembrete definido; não dispara nem fica atrasada. */
+  hasReminder?: boolean;
   /** Para quem enviar (telefone Evolution). */
   to: string;
   done: boolean;

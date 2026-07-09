@@ -41,6 +41,19 @@ import { timeKey, parseLocalIso } from '../services/datetime';
 
 export const adminRouter = Router();
 
+function taskHasReminder(task: {
+  hasReminder?: boolean;
+  remindAt: string;
+  createdAt: number;
+  done: boolean;
+  firedAt?: number | null;
+}): boolean {
+  if (task.hasReminder === false) return false;
+  if (task.done || task.firedAt) return true;
+  const remindTime = new Date(task.remindAt).getTime();
+  return Number.isFinite(remindTime) && Math.abs(remindTime - task.createdAt) > 60_000;
+}
+
 /** Middleware simples de auth por token (header x-admin-token ou ?token=). */
 function requireToken(req: Request, res: Response, next: NextFunction): void {
   if (!config.adminToken) return next(); // sem token configurado = aberto (apenas dev)
@@ -356,12 +369,14 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 adminRouter.post('/tasks', async (req, res) => {
   try {
     const { text, remindAt, to, subagentId } = req.body;
-    if (!text || !remindAt) {
-      return res.status(400).json({ error: 'text e remindAt (ISO) são obrigatórios' });
+    if (!text) {
+      return res.status(400).json({ error: 'text é obrigatório' });
     }
+    const hasReminder = !!remindAt;
     const task = await createTask({
       text,
-      remindAt,
+      remindAt: hasReminder ? remindAt : new Date().toISOString(),
+      hasReminder,
       to: to || config.ownerPhone,
       ...(subagentId ? { subagentId } : {}),
     });
@@ -390,7 +405,7 @@ adminRouter.get('/tasks', async (req, res) => {
 
   if (req.query.upcoming === 'true') {
     const nowIso = new Date().toISOString();
-    tasks = tasks.filter((t) => !t.done && t.remindAt >= nowIso);
+    tasks = tasks.filter((t) => !t.done && taskHasReminder(t) && t.remindAt >= nowIso);
   }
 
   res.json(tasks);
@@ -432,11 +447,13 @@ adminRouter.put('/tasks/:id', async (req, res) => {
   const existing = await getTask(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
 
-  const { text, remindAt, done, subagentId, to } = req.body;
+  const { text, remindAt, done, subagentId, to, hasReminder } = req.body;
   const update: Record<string, unknown> = {};
   if (text !== undefined) update.text = text;
+  if (hasReminder === false) update.hasReminder = false;
   if (remindAt !== undefined) {
     update.remindAt = remindAt;
+    update.hasReminder = true;
     // Editar o horário rearma o disparo e os marcadores da fila sequencial —
     // mesma regra do editar_lembrete via WhatsApp (senão o painel poderia
     // "destravar" um lembrete que a fila considera confirmado).
@@ -671,6 +688,7 @@ adminRouter.post('/tasks/:id/action', async (req, res) => {
 
     await updateTask(req.params.id, {
       remindAt: next.toISOString(),
+      hasReminder: true,
       done: false,
       completedAt: null,
       postponedCount: (existing.postponedCount ?? 0) + 1,

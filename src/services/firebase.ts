@@ -182,6 +182,13 @@ export async function getFacts(
 
 // ===================== Tarefas =====================
 
+function taskHasReminder(task: Task): boolean {
+  if (task.hasReminder === false) return false;
+  if (task.done || task.firedAt) return true;
+  const remindTime = new Date(task.remindAt).getTime();
+  return Number.isFinite(remindTime) && Math.abs(remindTime - task.createdAt) > 60_000;
+}
+
 export async function createTask(data: Omit<Task, 'id' | 'createdAt' | 'done'>): Promise<Task> {
   const task = withoutUndefined({ ...data, done: false, createdAt: Date.now() }) as Omit<
     Task,
@@ -203,7 +210,7 @@ export async function getDueTasks(): Promise<Task[]> {
   const snap = await tasksCol.where('done', '==', false).get();
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as Task))
-    .filter((t) => t.remindAt <= nowIso);
+    .filter((t) => taskHasReminder(t) && t.remindAt <= nowIso);
 }
 
 /**

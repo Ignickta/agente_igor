@@ -125,6 +125,17 @@ export function isPureDoneConfirmation(text: string): boolean {
   return leftoverContentWords(lower).length === 0;
 }
 
+/** Quantidade explícita numa confirmação plural ("feito os 2", "fiz ambos"). */
+export function explicitDoneCount(text: string): number | null {
+  const lower = text.trim().toLowerCase();
+  if (!DONE_REGEX.test(lower) || lower.includes('?')) return null;
+  if (/\b(ambos|ambas|os dois|as duas)\b/i.test(lower)) return 2;
+  const match = lower.match(/\b(?:os|as|esses|essas)?\s*(\d{1,2})\b/i);
+  if (!match) return null;
+  const count = Number(match[1]);
+  return count >= 2 && count <= 10 ? count : null;
+}
+
 /**
  * Atalho de conclusão: dispara só quando a mensagem é uma confirmação PURA e há
  * um item em andamento na agenda. Retorna a resposta a enviar, ou null se não
@@ -230,6 +241,40 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
   }
 
   if (DONE_REGEX.test(lower)) {
+    const explicitCount = explicitDoneCount(text);
+    if (explicitCount) {
+      const nowIso = new Date().toISOString();
+      const candidates = (await listTasks())
+        .filter((t) => !t.completedAt && (t.done || t.remindAt <= nowIso))
+        .sort(
+          (a, b) =>
+            Number(b.done) - Number(a.done) ||
+            (b.createdAt ?? 0) - (a.createdAt ?? 0) ||
+            b.remindAt.localeCompare(a.remindAt)
+        )
+        .slice(0, explicitCount);
+      if (candidates.length === 0) {
+        return 'Não encontrei tarefas recentes pendentes para marcar como concluídas.';
+      }
+      for (const task of candidates) {
+        await markTaskDone(task.id);
+        recordUndo(
+          contact,
+          `a conclusão de "${task.text}" por confirmação plural`,
+          () => updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null }),
+          [
+            {
+              kind: 'task.update',
+              id: task.id,
+              data: { done: task.done, completedAt: task.completedAt ?? null },
+            },
+          ]
+        );
+      }
+      const lines = candidates.map((task) => `• ${task.text}`).join('\n');
+      return `✅ Marquei como ${candidates.length > 1 ? 'concluídos' : 'concluído'}:\n${lines}`;
+    }
+
     const task = await findTaskByNaturalText(text, true);
     if (!task) return null;
     await markTaskDone(task.id);

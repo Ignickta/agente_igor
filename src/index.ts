@@ -19,6 +19,20 @@ import { enqueueMessage } from './services/messageBuffer';
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 
+// Garante que duas mensagens próximas do mesmo contato não leiam e alterem o
+// estado das tarefas em paralelo. Contatos diferentes continuam independentes.
+const contactQueues = new Map<string, Promise<void>>();
+
+function processInContactQueue(contact: string, work: () => Promise<void>): Promise<void> {
+  const previous = contactQueues.get(contact) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(work);
+  contactQueues.set(contact, current);
+  current.finally(() => {
+    if (contactQueues.get(contact) === current) contactQueues.delete(contact);
+  });
+  return current;
+}
+
 // CORS — permite que o painel web (agente-igor-web) consuma a API do navegador.
 // Aberto por padrão; restrinja via CORS_ORIGIN (ex: https://painel.seudominio.com).
 app.use((req, res, next) => {
@@ -145,14 +159,14 @@ async function processIncoming(body: unknown): Promise<void> {
   if (debounceable) {
     const isAudio = msg.isAudio;
     enqueueMessage(msg.from, text, (merged) => {
-      handleResolvedText(msg.from, merged, isAudio).catch((err) =>
-        console.error('[webhook] erro ao processar lote:', err)
-      );
+      processInContactQueue(msg.from, () =>
+        handleResolvedText(msg.from, merged, isAudio)
+      ).catch((err) => console.error('[webhook] erro ao processar lote:', err));
     });
     return;
   }
 
-  await handleResolvedText(msg.from, text, msg.isAudio);
+  await processInContactQueue(msg.from, () => handleResolvedText(msg.from, text, msg.isAudio));
 }
 
 /**
