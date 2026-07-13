@@ -88,17 +88,23 @@ adminRouter.get('/metrics', async (req, res) => {
     const days = parseInt(period, 10) || 7;
     const metrics = await getMetrics(days);
 
-    // 1. Calcular Summary
+    // 1. Resumo baseado apenas em dados efetivamente registrados.
     const totalMessages = metrics.reduce((acc, m) => acc + m.total, 0);
-    const totalTokens = totalMessages * 620; // Estimativa média realista
-    const estimatedCost = parseFloat((totalTokens * 0.000012).toFixed(4)); // Custo estimado (USD)
-    const averageLatency = 1450; // Latência média aproximada (ms)
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const logs = config.ownerPhone
+      ? (await getConversationLog(config.ownerPhone, 2_000)).filter((log) => log.timestamp >= sinceMs)
+      : [];
+    const latencySamples = logs.filter((log) => typeof log.elapsedMs === 'number' && log.elapsedMs > 0);
+    const averageLatency = latencySamples.length
+      ? Math.round(latencySamples.reduce((sum, log) => sum + (log.elapsedMs || 0), 0) / latencySamples.length)
+      : null;
 
     // Buscar tarefas concluídas e pendentes no período
     const now = Date.now();
     const startPeriodMs = now - days * 24 * 60 * 60 * 1000;
     const completedTasks = await getCompletedTasksBetween(startPeriodMs, now);
     const pendingTasks = await getPendingTasks();
+    const allTasks = await listTasks();
 
     // Taxa de sucesso de lembretes
     const totalTasksInPeriod = completedTasks.length + pendingTasks.length;
@@ -106,12 +112,15 @@ adminRouter.get('/metrics', async (req, res) => {
       ? Math.round((completedTasks.length / totalTasksInPeriod) * 100)
       : 100;
 
-    // 2. Divisão de Roteamento (estimativa baseada em uso típico)
-    const routing = {
-      regex: Math.round(totalMessages * 0.45),
-      keyword: Math.round(totalMessages * 0.35),
-      llm: Math.round(totalMessages * 0.20),
-    };
+    // 2. Divisão de roteamento registrada no log de conversas.
+    // "outros" cobre embedding, exemplos aprendidos e atalhos administrativos.
+    const routing = { regex: 0, keyword: 0, llm: 0, other: 0 };
+    for (const log of logs) {
+      if (log.routedBy === 'agenda-regex') routing.regex++;
+      else if (log.routedBy === 'keywords') routing.keyword++;
+      else if (log.routedBy === 'llm') routing.llm++;
+      else routing.other++;
+    }
 
     // 3. Uso por agente (real do Firestore)
     const byAgent: Record<string, { name: string; count: number }> = {};
@@ -144,7 +153,8 @@ adminRouter.get('/metrics', async (req, res) => {
       const weekLabel = `${startD.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} a ${endD.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}`;
       
       const completedCount = completedTasks.filter(t => t.completedAt && t.completedAt >= startMs && t.completedAt <= endMs).length;
-      const pendingCount = pendingTasks.filter(t => {
+      const postponedCount = allTasks.filter((t) => {
+        if ((t.postponedCount ?? 0) === 0) return false;
         const tDate = new Date(t.remindAt).getTime();
         return tDate >= startMs && tDate <= endMs;
       }).length;
@@ -152,16 +162,17 @@ adminRouter.get('/metrics', async (req, res) => {
       tasksActivity.push({
         week: weekLabel,
         completed: completedCount,
-        postponed: pendingCount
+        // Não são tarefas pendentes: são tarefas que possuem um adiamento
+        // registrado e estão agendadas para esta semana.
+        postponed: postponedCount
       });
     }
 
     res.json({
       summary: {
         totalMessages,
-        totalTokens,
-        estimatedCost,
         averageLatency,
+        latencySampleSize: latencySamples.length,
         reminderSuccessRate
       },
       routing,
