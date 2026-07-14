@@ -625,7 +625,7 @@ const WRITE_TOOLS = new Set([
  * (ex: proatividade diária), onde QUALQUER promessa dessas é falsa.
  */
 export const CLAIMS_ACTION_REGEX =
-  /\b(agendei|criei|marquei|remarquei|adiei|encaixei|reorganizei|organizei|realoquei|atualizei (a |sua )?agenda|vou te lembrar|te lembro (às|as|nesses)|vou (te )?mandar lembrete|lembretes? (criado|marcado|agendado)s?|(está|tá|fica) agendado|deixei (anotado|agendado|marcado))\b/i;
+  /\b(agendei|criei|marquei|remarquei|adiei|encaixei|reorganizei|organizei|realoquei|atualizei (a |sua )?agenda|vou te lembrar|te lembro (às|as|nesses)|vou (te )?mandar lembrete|vou (organizar|criar|registrar|adicionar|anotar).{0,40}\b(tarefas?|lembretes?)\b|lembretes? (criado|marcado|agendado)s?|(está|tá|fica) agendado|deixei (anotado|agendado|marcado))\b/i;
 
 /** Mensagem injetada quando o modelo afirma ter agendado sem chamar ferramenta. */
 const HALLUCINATION_NUDGE =

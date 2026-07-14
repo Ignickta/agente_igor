@@ -347,6 +347,57 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
   return null;
 }
 
+const TASK_ACTION_START = /^(melhorar|mandar|fazer|criar|enviar|ligar|pagar|resolver|revisar|definir|escrever|estudar|organizar|comprar|finalizar|corrigir|integrar|abrir|instalar|preparar|publicar|montar|seguir|atualizar|implementar)\b/i;
+
+/**
+ * Uma lista enviada em linhas separadas no WhatsApp é uma captura de tarefas.
+ * Ela não deve cair em um subagente de assunto e virar apenas uma resposta de
+ * consultoria. Cada linha vira uma tarefa sem prazo, visível no painel.
+ */
+export function extractWhatsappTaskList(text: string): string[] | null {
+  if (!text.includes('\n') || text.includes('?')) return null;
+  const tasks = text
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^(?:[-•*]|\d+[.)])\s*/, '')
+        .replace(/^priorit[áa]ri[oa]\s*[-:–—]\s*/i, '')
+    )
+    .filter(Boolean);
+  if (tasks.length < 2 || tasks.length > 8 || tasks.some((task) => task.length < 3)) return null;
+  return tasks.some((task) => TASK_ACTION_START.test(task)) ? tasks : null;
+}
+
+async function tryCreateWhatsappTaskList(contact: string, text: string): Promise<string | null> {
+  const tasks = extractWhatsappTaskList(text);
+  if (!tasks) return null;
+
+  const existing = await listTasks();
+  const created: string[] = [];
+  for (const taskText of tasks) {
+    const alreadyExists = existing.some(
+      (task) => !task.completedAt && task.text.trim().toLocaleLowerCase('pt-BR') === taskText.toLocaleLowerCase('pt-BR')
+    );
+    if (alreadyExists) continue;
+    const task = await createTask({
+      text: taskText,
+      // Tarefa sem horário: aparece em "Sem prazo" no painel, sem disparar WhatsApp.
+      remindAt: new Date().toISOString(),
+      hasReminder: false,
+      to: contact,
+      subagentId: 'captura-whatsapp',
+    });
+    recordUndo(contact, `a criação da tarefa "${task.text}"`, () => deleteTask(task.id), [
+      { kind: 'task.delete', id: task.id },
+    ]);
+    created.push(task.text);
+  }
+  if (created.length === 0) return '✅ Essas tarefas já estão registradas.';
+  const label = created.length === 1 ? 'tarefa' : 'tarefas';
+  return `✅ Criei ${created.length} ${label} sem prazo:\n${created.map((task) => `• ${task}`).join('\n')}`;
+}
+
 /**
  * Prioridades declaradas para amanhã são lembretes, não pedidos de planejamento.
  * A forma imperativa usada pelo Igor ("primeira coisa que vai fazer amanhã,
@@ -581,6 +632,19 @@ export async function handleMessage(
   // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
   // mensagem causar (ex: 4 lembretes criados de uma vez), não só a última escrita.
   beginUndoGroup(contact);
+
+  // Listas de tarefas do WhatsApp têm precedência sobre o roteamento por tema.
+  const whatsappTaskList = await tryCreateWhatsappTaskList(contact, text);
+  if (whatsappTaskList !== null) {
+    return {
+      reply: whatsappTaskList,
+      subagentId: 'captura-whatsapp',
+      subagentName: 'Tarefas',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'whatsapp-task-list',
+    };
+  }
 
   // Prioridades declaradas para amanhã têm precedência sobre o roteamento por
   // assunto. Assim, "plano de monetização IA" vira lembrete, não consultoria.

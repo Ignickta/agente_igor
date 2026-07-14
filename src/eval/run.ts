@@ -19,6 +19,7 @@ import {
   explicitDoneCount,
   isPureDoneConfirmation,
   extractTomorrowReminder,
+  extractWhatsappTaskList,
 } from '../agents/central';
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
@@ -113,6 +114,20 @@ function suiteTomorrowReminders(): void {
     'ignora pergunta sobre amanhã',
     extractTomorrowReminder('amanhã vou fazer o quê?') === null
   );
+}
+
+function suiteWhatsappTaskLists(): void {
+  suite('Listas do WhatsApp — viram tarefas, não consultoria');
+  const tasks = extractWhatsappTaskList(
+    'Melhorar inteligência de Maya da Klyvo\nMandar Codex fazer as redes sociais da Klyvo\nPrioritário - fazer a parte do plano IA'
+  );
+  check('lista-whatsapp', 'extrai as três linhas como tarefas', !!tasks && tasks.length === 3);
+  check(
+    'lista-whatsapp',
+    'remove o marcador de prioridade do texto',
+    tasks?.[2] === 'fazer a parte do plano IA'
+  );
+  check('lista-whatsapp', 'ignora mensagem em formato de pergunta', extractWhatsappTaskList('Fazer plano?\nMandar mensagem?') === null);
 }
 
 // ===================== Suíte B: atalho "feito" =====================
@@ -519,6 +534,7 @@ async function main(): Promise<void> {
 
   suiteAgendaRegex();
   suiteTomorrowReminders();
+  suiteWhatsappTaskLists();
   suiteDoneShortcut();
   suiteClaimsRegex();
   suiteKeywordRouting();
