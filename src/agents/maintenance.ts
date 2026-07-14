@@ -240,9 +240,10 @@ export async function getProfileCached(contact: string): Promise<string> {
 // ===================== Entradas do scheduler =====================
 
 /**
- * Job noturno, em três passos NESTA ordem: a reflexão extrai fatos/promessas do
- * dia; a consolidação deduplica o que ela salvou contra o pool; o perfil é
- * reconstruído já com a memória limpa da mesma noite.
+ * Job noturno, em três passos NESTA ordem: a reflexão extrai fatos duradouros
+ * do dia; a consolidação deduplica o que ela salvou contra o pool; o perfil é
+ * reconstruído já com a memória limpa da mesma noite. A reflexão não cria
+ * tarefas, lembretes ou horários.
  */
 export async function runMemoryMaintenance(): Promise<void> {
   if (!config.ownerPhone) {
@@ -251,8 +252,8 @@ export async function runMemoryMaintenance(): Promise<void> {
   }
   const contact = config.ownerPhone;
   try {
-    const { facts, reminders } = await reflectOnRecentExchanges(contact);
-    console.log(`[maintenance] reflexão: ${facts} fatos novos, ${reminders} follow-ups criados.`);
+    const { facts } = await reflectOnRecentExchanges(contact);
+    console.log(`[maintenance] reflexão: ${facts} fatos novos; nenhuma tarefa foi criada.`);
   } catch (err) {
     console.error('[maintenance] falha na reflexão diária:', err);
   }

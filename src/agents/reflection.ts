@@ -1,57 +1,31 @@
-import { config } from '../config';
 import { chatJson, ChatMessage } from '../services/openai';
-import { getConversationLog, listTasks, createTask } from '../services/firebase';
+import { getConversationLog } from '../services/firebase';
 import { rememberFact, formatEntry } from '../services/memory';
-import { dayKey, timeKey, addDays, parseLocalIso } from '../services/datetime';
 
 /**
- * Identificador de origem gravado em fatos e follow-ups criados pela reflexão
- * (no campo subagentId, que aqui marca a procedência, não um subagente real).
+ * Identificador de origem gravado em fatos pela reflexão (no campo subagentId,
+ * que aqui marca a procedência, não um subagente real).
  */
 export const REFLECTION_ORIGIN_ID = 'reflexao-diaria';
 
 /**
  * Reflexão diária: relê as conversas das últimas 24h e extrai o que ficou para
- * trás. O agente só salva fato quando lembra de chamar salvar_fato e só cria
- * lembrete quando o Igor pede — promessas soltas ("amanhã eu ligo pro João")
- * morriam na conversa. A reflexão fecha esse vazamento:
- *  - FATOS duradouros não capturados viram memória (e a consolidação, que roda
- *    logo depois na mesma noite, deduplica contra o que já existe).
- *  - PROMESSAS com ação futura sem lembrete viram follow-up automático.
+ * trás. Ela captura somente fatos duradouros que não foram salvos durante a
+ * conversa. Tarefas e lembretes exigem uma ação explícita do Igor na conversa
+ * ou no painel; a reflexão nunca inventa prazo, horário ou subtarefa.
  */
 
 interface ReflectionResult {
   fatos: string[];
-  promessas: { texto: string; quando_iso: string | null }[];
 }
 
 /** Schema estrito da reflexão (Structured Outputs). */
 const REFLECTION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['fatos', 'promessas'],
+  required: ['fatos'],
   properties: {
     fatos: { type: 'array', items: { type: 'string' } },
-    promessas: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['texto', 'quando_iso'],
-        properties: {
-          texto: {
-            type: 'string',
-            description:
-              'O que lembrar, na voz do lembrete, COM o contexto/motivo da conversa ' +
-              '(assunto, pessoa, projeto) — autoexplicativo dias depois, não só a ação.',
-          },
-          quando_iso: {
-            type: ['string', 'null'],
-            description: 'Data/hora LOCAL ISO 8601 sem offset (ex: 2026-06-13T09:00:00), ou null',
-          },
-        },
-      },
-    },
   },
 };
 
@@ -60,32 +34,11 @@ const WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Teto de caracteres das conversas no prompt (dias muito falados não estouram). */
 const MAX_CONVO_CHARS = 24000;
 const MAX_FACTS = 8;
-const MAX_PROMISES = 5;
-
-const REMINDER_STOPWORDS = new Set(['para', 'com', 'que', 'uma', 'isso', 'amanha', 'depois']);
-
-/** Evita que a reflexão reescreva uma prioridade já registrada como outra tarefa. */
-function isSameReminderIntent(candidate: string, existing: string): boolean {
-  const tokens = (value: string) =>
-    new Set(
-      value
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .match(/[a-z0-9]{2,}/g)
-        ?.filter((token) => !REMINDER_STOPWORDS.has(token)) ?? []
-    );
-  const a = tokens(candidate);
-  const b = tokens(existing);
-  let shared = 0;
-  for (const token of a) if (b.has(token)) shared++;
-  return shared >= 2;
-}
 
 /**
  * Roda a reflexão para um contato. Best-effort: nunca lança; retorna contagens
- * para o log do job. Lembretes de promessa respeitam o kill-switch de
- * proatividade (são mensagens futuras que o Igor não pediu explicitamente).
+ * para o log do job. O campo reminders é mantido como zero por compatibilidade
+ * com o scheduler e os logs antigos.
  */
 export async function reflectOnRecentExchanges(
   contact: string
@@ -102,50 +55,22 @@ export async function reflectOnRecentExchanges(
     .join('\n\n')
     .slice(-MAX_CONVO_CHARS); // corta pelo INÍCIO: o fim do dia é o mais fresco
 
-  // Lembretes que já existem — a reflexão não pode recriar o que a conversa
-  // já agendou (o agente costuma criar na hora via criar_lembrete).
-  const pendingTasks = (await listTasks()).filter((t) => !t.done);
-  const pendentes = pendingTasks
-    .slice(0, 30)
-    .map((t) => {
-      const d = new Date(t.remindAt);
-      return `- ${dayKey(d)} ${timeKey(d)}: ${t.text}`;
-    })
-    .join('\n');
-
-  const hoje = dayKey();
-  const amanha = addDays(hoje, 1);
-
   const system = `Você é a reflexão noturna do agente pessoal do Igor. Releia as conversas das
 últimas 24 horas e extraia SOMENTE:
 
 1. FATOS duradouros que valem memória de longo prazo: decisões tomadas, preferências
    reveladas, dados de projetos/clientes, mudanças de contexto. NÃO inclua trivialidades,
    suposições suas, nem coisas pontuais que perdem valor em poucos dias.
-2. PROMESSAS do Igor com ação futura clara ("vou ligar pro João amanhã", "semana que vem
-   reviso o contrato") que ainda NÃO têm lembrete — a lista de lembretes existentes está
-   abaixo; não repita nenhum deles, nem reformulado. Escreva o texto na forma de lembrete
-   INCLUINDO O CONTEXTO/MOTIVO da conversa, não só a ação seca: o lembrete deve fazer
-   sentido sozinho dias depois. Ex.: em vez de "Ligar para o João", escreva "Ligar para o
-   João sobre o orçamento da reforma da clínica que ele ia mandar". Puxe o porquê, o
-   assunto e quem/o quê estava envolvido a partir da conversa. NUNCA quebre uma única
-   prioridade/compromisso em subtarefas, nem crie uma versão mais específica dela: se ela já
-   estiver na lista de lembretes, devolva lista vazia para esse assunto.
 
-Para cada promessa, defina quando_iso (data e hora LOCAIS, ISO 8601 sem offset, ex:
-${amanha}T09:00:00) com o melhor momento para lembrar. Hoje é ${hoje}; amanhã é ${amanha} —
-parta SEMPRE destas datas. Sem prazo claro na fala, use null.
-
-Seja MUITO conservador: listas vazias são uma ótima resposta. No máximo ${MAX_FACTS} fatos e
-${MAX_PROMISES} promessas.`;
+NUNCA crie, sugira ou extraia tarefas, lembretes, horários, planos, prioridades ou subtarefas.
+Mesmo que o Igor tenha dito que fará algo amanhã, isso não é um fato de longo prazo. Em caso de
+dúvida, deixe a lista vazia. No máximo ${MAX_FACTS} fatos.`;
 
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
     {
       role: 'user',
-      content: `Conversas das últimas 24h:\n\n${convo}\n\nLembretes já existentes (NÃO repetir):\n${
-        pendentes || '(nenhum)'
-      }\n\nExtraia fatos e promessas:`,
+      content: `Conversas das últimas 24h:\n\n${convo}\n\nExtraia apenas fatos duradouros:`,
     },
   ];
 
@@ -168,33 +93,5 @@ ${MAX_PROMISES} promessas.`;
     }
   }
 
-  let reminders = 0;
-  if (config.proactiveNotifications) {
-    const promessas = Array.isArray(result.promessas) ? result.promessas : [];
-    for (const p of promessas.slice(0, MAX_PROMISES)) {
-      const texto = String(p?.texto || '').trim();
-      if (!texto) continue;
-      if (pendingTasks.some((task) => isSameReminderIntent(texto, task.text))) continue;
-      // Sem prazo (ou prazo no passado): hoje às 09:00; se 09:00 já passou
-      // (job rodando fora de hora), amanhã às 09:00.
-      let when = p?.quando_iso ? parseLocalIso(String(p.quando_iso)) : new Date(NaN);
-      if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
-        when = parseLocalIso(`${hoje}T09:00:00`);
-        if (when.getTime() <= Date.now()) when = parseLocalIso(`${amanha}T09:00:00`);
-      }
-      try {
-        await createTask({
-          text: texto,
-          remindAt: when.toISOString(),
-          to: contact,
-          subagentId: REFLECTION_ORIGIN_ID,
-        });
-        reminders++;
-      } catch (err) {
-        console.error('[reflection] falha ao criar follow-up:', err);
-      }
-    }
-  }
-
-  return { facts, reminders };
+  return { facts, reminders: 0 };
 }
