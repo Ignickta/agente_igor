@@ -8,6 +8,7 @@ import {
   recordMessage,
   recordRouteMiss,
   listTasks,
+  createTask,
   updateAgendaItem,
   getTask,
   updateTask,
@@ -26,6 +27,7 @@ import { getActiveItem, advanceTask } from './orchestrator';
 import { routeByEmbedding, hintFrom, EmbeddingRoute } from './embeddingRouter';
 import { routeByLearnedExample, learnRouteExample } from './routeShortcut';
 import { beginUndoGroup, recordUndo } from './undo';
+import { addDays, dayKey, parseLocalIso } from '../services/datetime';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
 const DONE_PHRASES = [
@@ -346,6 +348,68 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
 }
 
 /**
+ * Prioridades declaradas para amanhã são lembretes, não pedidos de planejamento.
+ * A forma imperativa usada pelo Igor ("primeira coisa que vai fazer amanhã,
+ * X") é deliberadamente aceita sem exigir as palavras "me lembra".
+ */
+export function extractTomorrowReminder(text: string): { text: string; firstThing: boolean } | null {
+  if (text.includes('?')) return null;
+  const clean = text.trim().replace(/[.!]+$/, '');
+  const patterns: Array<{ regex: RegExp; firstThing: boolean }> = [
+    {
+      regex: /^(?:a\s+)?primeira\s+coisa\s+(?:que\s+)?(?:(?:eu\s+)?vou|vai|tenho\s+que|preciso)\s+fazer\s+amanh[ãa]\s*[,;:—–-]?\s*(.+)$/i,
+      firstThing: true,
+    },
+    {
+      regex: /^(?:amanh[ãa]\s*[,;:—–-]?\s*)?primeira\s+coisa\s+amanh[ãa]\s*[,;:—–-]?\s*(.+)$/i,
+      firstThing: true,
+    },
+    {
+      regex: /^amanh[ãa]\s+(?:(?:eu\s+)?vou|preciso|tenho\s+que|devo)\s+(.+)$/i,
+      firstThing: false,
+    },
+  ];
+  for (const { regex, firstThing } of patterns) {
+    const match = clean.match(regex);
+    const reminder = match?.[1]?.trim().replace(/^[,;:—–-]+\s*/, '');
+    if (reminder && reminder.length >= 3) return { text: reminder, firstThing };
+  }
+  return null;
+}
+
+async function tryCreateTomorrowReminder(contact: string, text: string): Promise<string | null> {
+  const intent = extractTomorrowReminder(text);
+  if (!intent) return null;
+
+  const tomorrow = addDays(dayKey(), 1);
+  const remindAt = parseLocalIso(`${tomorrow}T${config.defaultReminderTime}:00`).toISOString();
+  const duplicate = (await listTasks()).find(
+    (task) =>
+      !task.completedAt &&
+      task.remindAt === remindAt &&
+      task.text.trim().toLocaleLowerCase('pt-BR') === intent.text.toLocaleLowerCase('pt-BR')
+  );
+  if (duplicate) {
+    return `✅ Esse lembrete já está salvo para amanhã às ${config.defaultReminderTime}: *${duplicate.text}*.`;
+  }
+
+  const created = await createTask({
+    text: intent.text,
+    remindAt,
+    to: contact,
+    subagentId: 'prioridade-direta',
+  });
+  recordUndo(
+    contact,
+    `a criação do lembrete "${created.text}"`,
+    () => deleteTask(created.id),
+    [{ kind: 'task.delete', id: created.id }]
+  );
+  const prefix = intent.firstThing ? ' como primeira coisa' : '';
+  return `✅ Lembrete salvo para amanhã às ${config.defaultReminderTime}${prefix}: *${created.text}*.`;
+}
+
+/**
  * Sinais de que o usuário está CORRIGINDO algo que o agente fez ou disse.
  * Quando detectado, o subagente é instruído a reconhecer, consertar e salvar a
  * lição na memória compartilhada — para o erro não se repetir.
@@ -517,6 +581,20 @@ export async function handleMessage(
   // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
   // mensagem causar (ex: 4 lembretes criados de uma vez), não só a última escrita.
   beginUndoGroup(contact);
+
+  // Prioridades declaradas para amanhã têm precedência sobre o roteamento por
+  // assunto. Assim, "plano de monetização IA" vira lembrete, não consultoria.
+  const tomorrowReminder = await tryCreateTomorrowReminder(contact, text);
+  if (tomorrowReminder !== null) {
+    return {
+      reply: tomorrowReminder,
+      subagentId: 'prioridade-direta',
+      subagentName: 'Lembretes',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'tomorrow-reminder',
+    };
+  }
 
   const naturalTaskCommand = await tryNaturalTaskCommand(contact, text);
   if (naturalTaskCommand !== null) {

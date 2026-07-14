@@ -62,6 +62,26 @@ const MAX_CONVO_CHARS = 24000;
 const MAX_FACTS = 8;
 const MAX_PROMISES = 5;
 
+const REMINDER_STOPWORDS = new Set(['para', 'com', 'que', 'uma', 'isso', 'amanha', 'depois']);
+
+/** Evita que a reflexão reescreva uma prioridade já registrada como outra tarefa. */
+function isSameReminderIntent(candidate: string, existing: string): boolean {
+  const tokens = (value: string) =>
+    new Set(
+      value
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .match(/[a-z0-9]{2,}/g)
+        ?.filter((token) => !REMINDER_STOPWORDS.has(token)) ?? []
+    );
+  const a = tokens(candidate);
+  const b = tokens(existing);
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared++;
+  return shared >= 2;
+}
+
 /**
  * Roda a reflexão para um contato. Best-effort: nunca lança; retorna contagens
  * para o log do job. Lembretes de promessa respeitam o kill-switch de
@@ -84,8 +104,8 @@ export async function reflectOnRecentExchanges(
 
   // Lembretes que já existem — a reflexão não pode recriar o que a conversa
   // já agendou (o agente costuma criar na hora via criar_lembrete).
-  const pendentes = (await listTasks())
-    .filter((t) => !t.done)
+  const pendingTasks = (await listTasks()).filter((t) => !t.done);
+  const pendentes = pendingTasks
     .slice(0, 30)
     .map((t) => {
       const d = new Date(t.remindAt);
@@ -108,7 +128,9 @@ export async function reflectOnRecentExchanges(
    INCLUINDO O CONTEXTO/MOTIVO da conversa, não só a ação seca: o lembrete deve fazer
    sentido sozinho dias depois. Ex.: em vez de "Ligar para o João", escreva "Ligar para o
    João sobre o orçamento da reforma da clínica que ele ia mandar". Puxe o porquê, o
-   assunto e quem/o quê estava envolvido a partir da conversa.
+   assunto e quem/o quê estava envolvido a partir da conversa. NUNCA quebre uma única
+   prioridade/compromisso em subtarefas, nem crie uma versão mais específica dela: se ela já
+   estiver na lista de lembretes, devolva lista vazia para esse assunto.
 
 Para cada promessa, defina quando_iso (data e hora LOCAIS, ISO 8601 sem offset, ex:
 ${amanha}T09:00:00) com o melhor momento para lembrar. Hoje é ${hoje}; amanhã é ${amanha} —
@@ -152,6 +174,7 @@ ${MAX_PROMISES} promessas.`;
     for (const p of promessas.slice(0, MAX_PROMISES)) {
       const texto = String(p?.texto || '').trim();
       if (!texto) continue;
+      if (pendingTasks.some((task) => isSameReminderIntent(texto, task.text))) continue;
       // Sem prazo (ou prazo no passado): hoje às 09:00; se 09:00 já passou
       // (job rodando fora de hora), amanhã às 09:00.
       let when = p?.quando_iso ? parseLocalIso(String(p.quando_iso)) : new Date(NaN);

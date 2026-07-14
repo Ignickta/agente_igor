@@ -18,6 +18,7 @@ import {
   routeByLLM,
   explicitDoneCount,
   isPureDoneConfirmation,
+  extractTomorrowReminder,
 } from '../agents/central';
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
@@ -89,6 +90,29 @@ function suiteAgendaRegex(): void {
   for (const t of naoDeveCasar) {
     check('agenda-regex', `NÃO casa: "${t}"`, !AGENDA_REGEX.test(t));
   }
+}
+
+function suiteTomorrowReminders(): void {
+  suite('Prioridades de amanhã — viram lembrete, não planejamento');
+  const first = extractTomorrowReminder(
+    'Primeira coisa que vai fazer amanhã, seguir o plano de monetização IA'
+  );
+  check(
+    'prioridade-amanha',
+    'reconhece prioridade em segunda pessoa',
+    !!first && first.firstThing && first.text === 'seguir o plano de monetização IA'
+  );
+  const commitment = extractTomorrowReminder('amanhã vou enviar a proposta para o cliente');
+  check(
+    'prioridade-amanha',
+    'reconhece compromisso explícito de amanhã',
+    !!commitment && !commitment.firstThing && commitment.text === 'enviar a proposta para o cliente'
+  );
+  check(
+    'prioridade-amanha',
+    'ignora pergunta sobre amanhã',
+    extractTomorrowReminder('amanhã vou fazer o quê?') === null
+  );
 }
 
 // ===================== Suíte B: atalho "feito" =====================
@@ -494,6 +518,7 @@ async function main(): Promise<void> {
   console.log(`🧪 Evals de regressão do agente-igor${live ? ' (com suíte LIVE)' : ''}`);
 
   suiteAgendaRegex();
+  suiteTomorrowReminders();
   suiteDoneShortcut();
   suiteClaimsRegex();
   suiteKeywordRouting();

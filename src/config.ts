@@ -135,6 +135,10 @@ export const config = {
   },
   ownerPhone: process.env.OWNER_PHONE || '',
   timezone: process.env.TZ || 'America/Sao_Paulo',
+  /** Hora usada para compromissos de amanhã sem horário explícito. */
+  defaultReminderTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(process.env.DEFAULT_REMINDER_TIME || '')
+    ? (process.env.DEFAULT_REMINDER_TIME as string)
+    : '09:00',
   adminToken: process.env.ADMIN_TOKEN || '',
   /**
    * Kill-switch das mensagens proativas (resumo noturno, revisão semanal,
