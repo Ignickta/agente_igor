@@ -7,7 +7,7 @@ import { extractFromImage, extractFromPdf } from './services/vision';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
-import { wantsAudioReply } from './agents/replyFormat';
+import { compactWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
@@ -211,20 +211,21 @@ async function handleResolvedText(from: string, text: string, isAudio: boolean):
   try {
     const { reply } = await handleMessage(from, text, isAudio);
     if (!reply) return;
+    const conciseReply = compactWhatsAppReply(reply);
 
     // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que
     // são transcritas na entrada). Só geramos áudio (TTS) quando o usuário pediu
     // explicitamente nesta mensagem; nesse caso o texto vai junto como registro.
     if (audioRequested) {
       try {
-        const audioBase64 = await textToSpeechBase64(reply);
+        const audioBase64 = await textToSpeechBase64(conciseReply);
         await sendAudio(from, audioBase64);
       } catch (ttsErr) {
         console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
       }
     }
     // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
-    await sendText(from, reply, 1200);
+    await sendText(from, conciseReply, 1200);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('[webhook] falha ao gerar/enviar resposta:', errMsg);

@@ -24,6 +24,7 @@ import {
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
 import { CLAIMS_ACTION_REGEX } from '../agents/subagents';
+import { compactWhatsAppReply, MAX_WHATSAPP_REPLY_CHARS } from '../agents/replyFormat';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import {
   weekRange,
@@ -128,6 +129,16 @@ function suiteWhatsappTaskLists(): void {
     tasks?.[2] === 'fazer a parte do plano IA'
   );
   check('lista-whatsapp', 'ignora mensagem em formato de pergunta', extractWhatsappTaskList('Fazer plano?\nMandar mensagem?') === null);
+}
+
+function suiteWhatsAppReplyLength(): void {
+  suite('Respostas de WhatsApp — limite rígido contra mensagens prolixas');
+  const short = '✅ Lembrete salvo para amanhã às 09:00.';
+  check('resposta-curta', 'preserva resposta dentro do limite', compactWhatsAppReply(short) === short);
+  const long = `${'Planejamento detalhado sem necessidade. '.repeat(30)}Fim.`;
+  const compact = compactWhatsAppReply(long);
+  check('resposta-curta', 'corta resposta longa no limite técnico', compact.length <= MAX_WHATSAPP_REPLY_CHARS);
+  check('resposta-curta', 'indica que a resposta foi encurtada', compact.endsWith('…'));
 }
 
 // ===================== Suíte B: atalho "feito" =====================
@@ -535,6 +546,7 @@ async function main(): Promise<void> {
   suiteAgendaRegex();
   suiteTomorrowReminders();
   suiteWhatsappTaskLists();
+  suiteWhatsAppReplyLength();
   suiteDoneShortcut();
   suiteClaimsRegex();
   suiteKeywordRouting();
