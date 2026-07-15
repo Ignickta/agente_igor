@@ -278,7 +278,9 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
     }
 
     const task = await findTaskByNaturalText(text, true);
-    if (!task) return null;
+    if (!task) {
+      return 'Não achei nenhuma tarefa pendente com esse título. Pode confirmar qual foi que você concluiu?';
+    }
     await markTaskDone(task.id);
     recordUndo(
       contact,
