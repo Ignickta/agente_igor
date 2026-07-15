@@ -67,8 +67,8 @@ function replyHint(text: string): string {
 /** Sufixo "o que está esperando na fila", quando houver. */
 function queueSuffix(held: Task[]): string {
   if (held.length === 0) return '';
-  const nomes = held.map((t) => `_${t.text}_`).join('; ');
-  return `\n\n📋 Na fila esperando você confirmar: ${nomes}.`;
+  const linhas = held.map((t, i) => `${i + 1}. _${t.text}_`).join('\n');
+  return `\n\n📋 Na fila esperando você confirmar:\n${linhas}`;
 }
 
 /**
