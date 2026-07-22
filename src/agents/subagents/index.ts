@@ -8,7 +8,6 @@ import {
   updateTask,
   deleteTask,
   markTaskDone,
-  getFacts,
   listSubagents,
   getRecentMemory,
   getAgendaForDay,
@@ -20,10 +19,16 @@ import {
   getPendingRouteSuggestion,
   markRouteSuggestionApplied,
   updateSubagent,
+  unarchiveSharedFact,
 } from '../../services/firebase';
 import { recordUndo, undoLast } from '../undo';
 import { getProfileCached } from '../maintenance';
-import { rememberFact, recallFacts, searchHistory } from '../../services/memory';
+import {
+  rememberFact,
+  recallFacts,
+  searchHistory,
+  neutralizeCommitmentFact,
+} from '../../services/memory';
 import { listAutomations, triggerAutomation } from '../../services/n8n';
 import { listConnectedApps, describeApp, queryApp } from '../../services/apps';
 import { research } from '../research';
@@ -657,18 +662,19 @@ export async function runSubagent(
   opts: { isCorrection?: boolean; crossContext?: string; ragContext?: string } = {}
 ): Promise<{ reply: string; toolCalls: ToolCallMetadata[] }> {
   // Memória de fatos: pool semântico COMPARTILHADO (relevância para a mensagem
-  // atual, entre todas as áreas) + fatos legados deste subagente, deduplicados.
-  // O perfil vivo (resumo consolidado pela manutenção noturna) entra sempre,
-  // mesmo quando a mensagem não "puxa" nenhum fato por similaridade.
+  // atual, entre todas as áreas), banco ÚNICO com embedding. Os fatos legados
+  // (factsCol, sem embedding e invisíveis no painel) foram unificados nesse pool
+  // pela migração; não são mais lidos à parte para não ressuscitarem fatos que
+  // o usuário não consegue ver nem apagar. O perfil vivo (resumo consolidado
+  // pela manutenção noturna) entra sempre, mesmo sem fato puxado por similaridade.
   let facts: string[] = [];
   let profile = '';
   if (contact) {
-    const [shared, legacy, prof] = await Promise.all([
-      recallFacts(contact, userText, 8).catch(() => [] as string[]),
-      getFacts(contact, subagent.id, 8),
+    const [shared, prof] = await Promise.all([
+      recallFacts(contact, userText, 12).catch(() => [] as string[]),
       getProfileCached(contact),
     ]);
-    facts = [...new Set([...shared, ...legacy])].slice(0, 12);
+    facts = shared.slice(0, 12);
     profile = prof;
   }
   const now = new Date();
@@ -1092,6 +1098,12 @@ async function executeTool(
       for (const item of linkedDone) {
         await updateAgendaItem(item.id, { status: 'done', completedAt: Date.now() });
       }
+      // Arquiva o fato de memória que descreve o MESMO compromisso, se houver —
+      // assim a proatividade e o recall param de cobrar algo já feito (era o caso
+      // do "fornecedor de móveis"). Best-effort; nunca bloqueia a conclusão.
+      const archivedFact = contact
+        ? await neutralizeCommitmentFact(contact, task.text)
+        : null;
       recordUndo(
         contact,
         `a conclusão do lembrete "${task.text}"`,
@@ -1103,6 +1115,7 @@ async function executeTool(
               completedAt: item.completedAt ?? null,
             });
           }
+          if (archivedFact) await unarchiveSharedFact(archivedFact.id);
         },
         [
           { kind: 'task.update', id, data: { done: task.done, completedAt: null } },

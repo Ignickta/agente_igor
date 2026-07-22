@@ -4,7 +4,6 @@ import { sendText } from '../services/evolution';
 import {
   listTasks,
   listSubagents,
-  getFacts,
   getAgendaForDay,
   getAgendaInRange,
   createAgendaItem,

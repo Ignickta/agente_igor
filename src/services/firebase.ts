@@ -180,6 +180,42 @@ export async function getFacts(
   return snap.docs.map((d) => (d.data() as { text: string }).text);
 }
 
+/** Um fato legado com metadados suficientes para migrar/apagar/exibir. */
+export interface LegacyFact {
+  id: string;
+  subagentId: string;
+  text: string;
+  createdAt: number;
+}
+
+/**
+ * Varre TODOS os subagentes de um contato e devolve os fatos legados
+ * (memory/{contato}/agents/{sub}/facts). Base da migração para o banco único de
+ * SharedFacts e da exposição no painel — nada aqui apaga.
+ */
+export async function listLegacyFacts(contact: string): Promise<LegacyFact[]> {
+  const agents = await memoryCol.doc(contact).collection('agents').listDocuments();
+  const out: LegacyFact[] = [];
+  for (const ag of agents) {
+    const snap = await ag.collection('facts').get();
+    for (const doc of snap.docs) {
+      const d = doc.data() as { text?: string; createdAt?: number };
+      if (!d.text) continue;
+      out.push({ id: doc.id, subagentId: ag.id, text: d.text, createdAt: d.createdAt ?? 0 });
+    }
+  }
+  return out.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** Apaga UM fato legado pelo caminho exato (contato/subagente/id). */
+export async function deleteLegacyFact(
+  contact: string,
+  subagentId: string,
+  factId: string
+): Promise<void> {
+  await factsCol(contact, subagentId).doc(factId).delete();
+}
+
 // ===================== Tarefas =====================
 
 function taskHasReminder(task: Task): boolean {
@@ -411,6 +447,11 @@ export async function getSharedFacts(contact: string, limit = 400): Promise<Shar
 /** Arquiva um fato (sai do recall, mas continua no banco — reversível). */
 export async function archiveSharedFact(id: string): Promise<void> {
   await sharedFactsCol.doc(id).set({ archived: true, archivedAt: Date.now() }, { merge: true });
+}
+
+/** Desarquiva um fato (volta ao recall). Usado para desfazer arquivamentos. */
+export async function unarchiveSharedFact(id: string): Promise<void> {
+  await sharedFactsCol.doc(id).set({ archived: false }, { merge: true });
 }
 
 /** Atualiza os dados de um fato (por exemplo, texto e embedding). */

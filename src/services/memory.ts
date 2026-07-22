@@ -5,6 +5,8 @@ import {
   archiveSharedFact,
   saveConversationEntry,
   getConversationLog,
+  listLegacyFacts,
+  deleteLegacyFact,
   ConversationEntry,
   SharedFact,
 } from './firebase';
@@ -235,6 +237,78 @@ export async function rememberFact(
     createdAt: Date.now(),
   });
   return { saved: ok };
+}
+
+/**
+ * Migra os fatos LEGADOS (memory/{contato}/agents/{sub}/facts, sem embedding e
+ * invisíveis no painel) para o banco único de SharedFacts. Reusa rememberFact,
+ * então cada fato entra com embedding e passa pela dedup/reconciliação — e o
+ * legado é apagado após migrar, deixando um só banco de verdade. Idempotente:
+ * rodar de novo não duplica (a dedup barra) e não sobra legado.
+ */
+export async function migrateLegacyFacts(
+  contact: string
+): Promise<{ migrated: number; deduped: number; deleted: number }> {
+  const legacy = await listLegacyFacts(contact);
+  let migrated = 0;
+  let deduped = 0;
+  let deleted = 0;
+  for (const f of legacy) {
+    try {
+      const { saved } = await rememberFact(contact, f.subagentId, f.text);
+      if (saved) migrated++;
+      else deduped++; // já existia no banco novo (ou redundante) — só descarta o legado
+      await deleteLegacyFact(contact, f.subagentId, f.id);
+      deleted++;
+    } catch (err) {
+      console.error(`[memory] falha ao migrar fato legado ${f.id}:`, err);
+    }
+  }
+  if (deleted) {
+    console.log(
+      `[memory] migração de fatos legados (${contact}): ${migrated} migrados, ` +
+        `${deduped} já existentes, ${deleted} legados removidos.`
+    );
+  }
+  return { migrated, deduped, deleted };
+}
+
+/**
+ * Quando uma tarefa é CONCLUÍDA, arquiva o fato de memória que descreve o MESMO
+ * compromisso — evita o "fantasma" em que o lembrete some mas o fato fica
+ * (ex.: "prioridade máxima falar com o fornecedor" continuava sendo cobrado
+ * mesmo depois de feito). Só arquiva quando a similaridade é alta o bastante
+ * para ser claramente o mesmo assunto (DEDUP_SIMILARITY); fatos apenas
+ * relacionados ficam. Best-effort: qualquer erro é engolido — nunca deve
+ * atrapalhar a conclusão da tarefa em si.
+ *
+ * Retorna { id, text } do fato arquivado (para log/undo) ou null se nada casou.
+ */
+export async function neutralizeCommitmentFact(
+  contact: string,
+  taskText: string
+): Promise<{ id: string; text: string } | null> {
+  const clean = taskText.trim();
+  if (!clean) return null;
+  try {
+    const embedding = await embed(clean);
+    if (!embedding.length) return null;
+    const existing = await getSharedFacts(contact);
+    const best = existing
+      .filter((f) => f.embedding?.length)
+      .map((f) => ({ f, sim: cosine(embedding, f.embedding) }))
+      .sort((a, b) => b.sim - a.sim)[0];
+    if (!best || best.sim < DEDUP_SIMILARITY) return null;
+    await archiveSharedFact(best.f.id);
+    console.log(
+      `[memory] fato de compromisso arquivado após conclusão da tarefa ` +
+        `(sim=${best.sim.toFixed(2)}): "${best.f.text.slice(0, 60)}"`
+    );
+    return { id: best.f.id, text: best.f.text };
+  } catch (err) {
+    console.error('[memory] neutralizeCommitmentFact falhou (ignorado):', err);
+    return null;
+  }
 }
 
 // ===================== Trocas recentes GLOBAIS (entre subagentes) =====================
