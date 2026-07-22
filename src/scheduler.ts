@@ -93,10 +93,19 @@ async function maybeNudgeActive(active: Task, held: Task[]): Promise<void> {
 }
 
 /**
- * Fila SEQUENCIAL de lembretes, por contato: só um lembrete fica "ativo" por
- * vez. Enquanto o Igor não confirmar o ativo (feito/adiar/apagar), os próximos
- * seguram — sem metralhar mensagem. O ativo é re-cobrado uma vez por turno; ao
- * confirmar, o próximo da fila dispara no tick seguinte (≤1 min).
+ * Fila SEQUENCIAL de lembretes, por contato — mas o PRIMEIRO disparo de um
+ * lembrete no seu horário NUNCA é segurado.
+ *
+ * Um lembrete que o Igor agendou com hora marcada (as 20:00) é um compromisso,
+ * não spam: quando dá a hora, ele TOCA — mesmo que outro lembrete já disparado
+ * ainda esteja sem confirmação. O que a fila segura é só a RE-cobrança
+ * ("ainda pendente: X"), limitada a uma vez por turno, para não metralhar.
+ *
+ * Ordem por contato a cada tick:
+ *  1) Se há lembrete vencido que ainda não disparou (`due`), dispara o mais
+ *     próximo do horário. É o compromisso do usuário — tem prioridade.
+ *  2) Só quando não há nada novo a disparar, re-cobra o lembrete ativo (o mais
+ *     antigo disparado e sem confirmação), no máximo uma vez por turno.
  */
 async function processReminderQueue(): Promise<void> {
   const [due, blockers] = await Promise.all([getDueTasks(), getFiredUnconfirmed(dayKey())]);
@@ -111,28 +120,33 @@ async function processReminderQueue(): Promise<void> {
     myDue.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
     const myBlockers = blockers.filter((t) => contactOf(t) === contact);
 
-    if (myBlockers.length > 0) {
-      // Fila travada: o mais antigo sem confirmação é o ativo; os demais
-      // disparados + os vencidos ainda não enviados esperam com ele.
-      const [active, ...restBlockers] = myBlockers;
-      await maybeNudgeActive(active, [...restBlockers, ...myDue]);
+    const next = myDue[0];
+    if (next) {
+      // PRIMEIRO disparo do lembrete no horário: sempre acontece. Reivindica
+      // ANTES de enviar (marca como enviado, ou reagenda se recorrente) de
+      // forma atômica — se outra instância chegou primeiro, não envia; é isso
+      // que evita o lembrete em dobro. Os já-disparados sem confirmação (e os
+      // demais vencidos) aparecem como "na fila", sem nova mensagem própria.
+      if (!(await claimDueTask(next))) continue;
+      await sendText(
+        contact,
+        `⏰ Lembrete: ${next.text}\n\n${replyHint(next.text)}` +
+          queueSuffix([...myDue.slice(1), ...myBlockers])
+      );
+      console.log(
+        `[scheduler] lembrete enviado: ${next.id}${next.recurrence ? ' (recorrente, reagendado)' : ''}` +
+          (myDue.length + myBlockers.length > 1
+            ? ` — ${myDue.length + myBlockers.length - 1} na fila aguardando confirmação`
+            : '')
+      );
       continue;
     }
 
-    const next = myDue[0];
-    if (!next) continue;
-    // Reivindica ANTES de enviar: marca como enviado (ou reagenda, se
-    // recorrente) de forma atômica. Se outra instância chegou primeiro,
-    // não envia — é isso que evita o lembrete em dobro.
-    if (!(await claimDueTask(next))) continue;
-    await sendText(
-      contact,
-      `⏰ Lembrete: ${next.text}\n\n${replyHint(next.text)}` + queueSuffix(myDue.slice(1))
-    );
-    console.log(
-      `[scheduler] lembrete enviado: ${next.id}${next.recurrence ? ' (recorrente, reagendado)' : ''}` +
-        (myDue.length > 1 ? ` — ${myDue.length - 1} na fila aguardando confirmação` : '')
-    );
+    // Nada novo para tocar: só então re-cobra o ativo (uma vez por turno).
+    if (myBlockers.length > 0) {
+      const [active, ...restBlockers] = myBlockers;
+      await maybeNudgeActive(active, restBlockers);
+    }
   }
 }
 
