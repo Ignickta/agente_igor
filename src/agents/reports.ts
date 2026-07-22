@@ -6,7 +6,6 @@ import {
   getPendingTasks,
   getCompletedTasksBetween,
   getAgendaForDay,
-  getFacts,
   getMetrics,
   listTasks,
 } from '../services/firebase';
@@ -165,31 +164,35 @@ export async function runProactiveCheck(): Promise<void> {
   for (const sub of subs) {
     try {
       const myTasks = pending.filter((t) => t.subagentId === sub.id);
-      // A proatividade genérica já gerou ruído quando o modelo extrapolou a
-      // partir de memória antiga. Só interrompe o Igor se existir tarefa
-      // pendente real nesta área; fatos entram apenas como contexto auxiliar.
+      // A proatividade extrapolava a partir de fatos de memória antiga (ex.:
+      // ressuscitava "prioridade máxima falar com o fornecedor" muito depois de
+      // resolvido). Agora só olha tarefas pendentes REAIS: sem tarefa, sem aviso;
+      // fatos não entram mais no prompt para não virarem cobrança fantasma.
       if (myTasks.length === 0) continue;
-      const facts = await getFacts(config.ownerPhone, sub.id, 10);
 
       const messages: ChatMessage[] = [
         {
           role: 'system',
           content:
             `${sub.prompt}\n\nVocê é o subagente "${sub.name}". Verifique se há algo RELEVANTE ` +
-            'para avisar o Igor proativamente agora (prazo chegando, tarefa parada há muito tempo, ' +
-            'algo importante da sua área). Se SIM, escreva UMA mensagem curta de WhatsApp começando ' +
-            'com o nome da área entre colchetes. Se NÃO houver nada que valha a pena, responda ' +
-            'exatamente "NADA".\n' +
-            'IMPORTANTE: nesta verificação você NÃO tem ferramentas — você não consegue criar ' +
-            'lembrete, agendar nem alterar nada. Por isso, NUNCA prometa ação ("vou te lembrar", ' +
-            '"agendei", "deixei marcado"): apenas AVISE ou SUGIRA; quem decide e pede é o Igor.',
+            'para avisar o Igor proativamente agora, com base SOMENTE nas tarefas pendentes reais ' +
+            'listadas abaixo (prazo chegando, tarefa parada há muito tempo). Se SIM, escreva UMA ' +
+            'mensagem curta de WhatsApp começando com o nome da área entre colchetes. Se NÃO houver ' +
+            'nada que valha a pena, responda exatamente "NADA".\n' +
+            'REGRAS RÍGIDAS:\n' +
+            '1) Baseie-se APENAS na lista de tarefas pendentes abaixo. NÃO invente, deduza nem ' +
+            'ressuscite compromissos, prazos ou "prioridades" que não estejam nessa lista — ' +
+            'especialmente coisas que você acha que lembra do passado. Se não está na lista de ' +
+            'pendências, para você NÃO existe e NÃO deve ser mencionado.\n' +
+            '2) Nesta verificação você NÃO tem ferramentas — não cria lembrete, não agenda, não ' +
+            'altera nada. Por isso NUNCA prometa ação ("vou te lembrar", "agendei", "deixei ' +
+            'marcado"): apenas AVISE ou SUGIRA; quem decide e pede é o Igor.',
         },
         {
           role: 'user',
           content:
-            `Data/hora atual: ${nowIso}\n\nTarefas pendentes desta área:\n` +
-            (myTasks.map((t) => `- "${t.text}" (lembrar em ${t.remindAt})`).join('\n') || '(nenhuma)') +
-            `\n\nFatos que você sabe:\n${facts.map((f) => `- ${f}`).join('\n') || '(nenhum)'}`,
+            `Data/hora atual: ${nowIso}\n\nTarefas pendentes desta área (a ÚNICA fonte válida):\n` +
+            (myTasks.map((t) => `- "${t.text}" (lembrar em ${t.remindAt})`).join('\n') || '(nenhuma)'),
         },
       ];
       const out = (await chat(messages, { temperature: 0.4 })).trim();
