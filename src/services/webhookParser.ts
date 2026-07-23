@@ -27,6 +27,22 @@ export async function parseWebhook(body: any): Promise<IncomingMessage | null> {
   const text: string | undefined =
     message.conversation || message.extendedTextMessage?.text;
 
+  // Mensagem CITADA (o Igor respondeu marcando outra): o texto do que ele citou
+  // fica em contextInfo.quotedMessage, não no texto que ele digitou. Sem isso,
+  // "marca esse como feito" citando um item não tem a que se referir. Extrai o
+  // texto da citação (vários formatos possíveis) para anexar como contexto.
+  const quoted = message.extendedTextMessage?.contextInfo?.quotedMessage;
+  const quotedText: string | undefined = quoted
+    ? (
+        quoted.conversation ||
+        quoted.extendedTextMessage?.text ||
+        quoted.imageMessage?.caption ||
+        quoted.videoMessage?.caption ||
+        quoted.documentMessage?.caption ||
+        undefined
+      )?.slice(0, 800)
+    : undefined;
+
   // Áudio: audioMessage (inclui PTT/voz). O base64 pode vir embutido no webhook
   // em vários lugares dependendo da config da instância, ou precisa ser baixado.
   const audio = message.audioMessage;
@@ -98,7 +114,7 @@ export async function parseWebhook(body: any): Promise<IncomingMessage | null> {
   }
 
   if (text) {
-    return { from, pushName, text, isAudio: false };
+    return { from, pushName, text, isAudio: false, ...(quotedText ? { quotedText } : {}) };
   }
 
   return null;

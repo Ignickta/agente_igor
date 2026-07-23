@@ -749,7 +749,8 @@ Se nenhum encaixar perfeitamente, escolha o mais próximo.`,
 export async function handleMessage(
   contact: string,
   text: string,
-  fromAudio = false
+  fromAudio = false,
+  quotedText?: string
 ): Promise<{
   reply: string;
   subagentId: string;
@@ -985,8 +986,17 @@ export async function handleMessage(
     );
   }
 
+  // Se o Igor respondeu CITANDO outra mensagem, dá a referência à LLM: "isso",
+  // "essa tarefa", "marca esse como feito" passam a ter a que se referir. Só
+  // enriquece o texto que vai ao modelo — os atalhos acima já rodaram com o
+  // texto puro, sem o ruído da citação.
+  const userText =
+    quotedText && quotedText.trim()
+      ? `[Respondendo a esta mensagem citada: "${quotedText.trim()}"]\n\n${text}`
+      : text;
+
   const start = Date.now();
-  const { reply, toolCalls } = await runSubagent(target, text, memory, fromAudio, contact, 0, {
+  const { reply, toolCalls } = await runSubagent(target, userText, memory, fromAudio, contact, 0, {
     isCorrection,
     ...(crossContext ? { crossContext } : {}),
     ...(ragHits.length ? { ragContext: ragHits.join('\n\n') } : {}),

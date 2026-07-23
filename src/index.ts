@@ -158,22 +158,30 @@ async function processIncoming(body: unknown): Promise<void> {
 
   if (debounceable) {
     const isAudio = msg.isAudio;
+    const quotedText = msg.quotedText;
     enqueueMessage(msg.from, text, (merged) => {
       processInContactQueue(msg.from, () =>
-        handleResolvedText(msg.from, merged, isAudio)
+        handleResolvedText(msg.from, merged, isAudio, quotedText)
       ).catch((err) => console.error('[webhook] erro ao processar lote:', err));
     });
     return;
   }
 
-  await processInContactQueue(msg.from, () => handleResolvedText(msg.from, text, msg.isAudio));
+  await processInContactQueue(msg.from, () =>
+    handleResolvedText(msg.from, text, msg.isAudio, msg.quotedText)
+  );
 }
 
 /**
  * Processa um texto já resolvido (transcrito/extraído e, quando aplicável,
  * agrupado pela rajada): modo foco → roteamento pelo agente → resposta.
  */
-async function handleResolvedText(from: string, text: string, isAudio: boolean): Promise<void> {
+async function handleResolvedText(
+  from: string,
+  text: string,
+  isAudio: boolean,
+  quotedText?: string
+): Promise<void> {
   // F3: modo foco. Pedido de foco entra direto; pedido de SAIR encerra; durante
   // o foco, mensagens não urgentes são seguradas com um aviso curto. Comandos
   // administrativos ("/...") e mensagens urgentes NUNCA são bloqueados — o
@@ -209,7 +217,7 @@ async function handleResolvedText(from: string, text: string, isAudio: boolean):
 
   // Roteia pelo agente central e responde
   try {
-    const { reply } = await handleMessage(from, text, isAudio);
+    const { reply } = await handleMessage(from, text, isAudio, quotedText);
     if (!reply) return;
     const conciseReply = compactWhatsAppReply(reply);
 

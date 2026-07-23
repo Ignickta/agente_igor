@@ -195,4 +195,10 @@ export interface IncomingMessage {
   fileName?: string;
   /** Legenda enviada junto com a mídia. */
   caption?: string;
+  /**
+   * Texto da mensagem CITADA quando o Igor responde/marca outra mensagem no
+   * WhatsApp (extendedTextMessage.contextInfo.quotedMessage). Dá à LLM a
+   * referência de "isso", "essa tarefa", "marca esse como feito".
+   */
+  quotedText?: string;
 }
