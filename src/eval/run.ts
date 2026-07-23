@@ -19,6 +19,7 @@ import {
   routeByLLM,
   explicitDoneCount,
   isPureDoneConfirmation,
+  looksLikeAgendaDoneConfirmation,
   extractTomorrowReminder,
   extractWhatsappTaskList,
   hasPlanningHeaderWithDay,
@@ -231,6 +232,29 @@ function suiteDoneShortcut(): void {
     check('feito', `quantidade explícita: "${text}"`, explicitDoneCount(text) === count);
   }
   check('feito', 'confirmação singular não inventa quantidade', explicitDoneCount('feito') === null);
+
+  // Âncora de roteamento: uma confirmação de conclusão curta vai ao ORQUESTRADOR
+  // (que tem as ferramentas de concluir); uma frase de NEGÓCIO que só por acaso
+  // contém "acabei/pronto/já fiz" segue para o subagente de assunto.
+  const ancoraAgenda = [
+    'Já foi feito',
+    'Já fiz a tarefa',
+    'concluí a tarefa das 9h',
+    'terminei',
+    'feito ✅',
+  ];
+  for (const t of ancoraAgenda) {
+    check('feito', `âncora→orquestrador: "${t}"`, looksLikeAgendaDoneConfirmation(t));
+  }
+  const naoAncora = [
+    'acabei de mandar o relatório pro cliente', // conversa de vendas
+    'pronto pra reunião de vendas amanhã', // assunto, não conclusão de item
+    'já fiz o orçamento do paciente novo e mandei por email', // odonto
+    'terminei a análise do concorrente?', // pergunta
+  ];
+  for (const t of naoAncora) {
+    check('feito', `NÃO vira âncora de agenda: "${t}"`, !looksLikeAgendaDoneConfirmation(t));
+  }
 }
 
 // ===================== Suíte C: guarda anti-alucinação =====================

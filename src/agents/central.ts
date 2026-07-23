@@ -127,6 +127,26 @@ export function isPureDoneConfirmation(text: string): boolean {
   return leftoverContentWords(lower).length === 0;
 }
 
+/**
+ * True quando a mensagem é uma confirmação de conclusão CURTA e quase-pura o
+ * suficiente para ser tratada como "concluí um item da agenda" — e portanto
+ * roteada ao orquestrador, que tem as ferramentas de concluir. Aceita um resto
+ * pequeno de conteúdo ("a tarefa das 9h" → resto ["9h"]) mas rejeita frases de
+ * assunto que só por acaso contêm um verbo de conclusão ("acabei de mandar o
+ * relatório pro cliente"). Assim a âncora de agenda não sequestra conversa de
+ * negócio. Exportada para os evals de regressão.
+ */
+export function looksLikeAgendaDoneConfirmation(text: string): boolean {
+  const lower = text.trim().toLowerCase();
+  if (lower.includes('?')) return false;
+  if (lower.length > 60) return false; // frase longa é assunto, não confirmação
+  if (!DONE_REGEX.test(lower)) return false;
+  // Depois de tirar as frases de conclusão e os fillers, uma confirmação de
+  // agenda deixa no máximo 2 palavras de "alvo" (ex: "tarefa das 9h", "item 2").
+  // Uma frase de negócio deixa muito mais ("mandar relatório cliente").
+  return leftoverContentWords(lower).length <= 2;
+}
+
 /** Quantidade explícita numa confirmação plural ("feito os 2", "fiz ambos"). */
 export function explicitDoneCount(text: string): number | null {
   const lower = text.trim().toLowerCase();
@@ -310,13 +330,19 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
     }
 
     // "feito"/"terminei" puro (sem citar tarefa) responde à última cobrança;
-    // se citar um título, tem que casar de verdade — senão pergunta.
+    // se citar um título, tem que casar de verdade.
     const task = await findTaskByNaturalText(text, {
       requireContentMatch: true,
       fallbackToLatestFired: true,
     });
+    // Nada casou com CERTEZA. Em vez de responder uma negativa fixa ("não achei
+    // esse título") — que é o atalho decidindo sem contexto e errando —, RECUA:
+    // devolve null para a mensagem seguir à LLM/orquestrador, que enxerga a
+    // agenda e o histórico do dia e resolve "concluí a tarefa das 9h" com
+    // contexto. Era exatamente o bug: a tarefa citava o cronograma (citação do
+    // WhatsApp poluía o texto), o score não batia, e o bot mentia "não achei".
     if (!task) {
-      return 'Não achei nenhuma tarefa pendente com esse título. Pode confirmar qual foi que você concluiu?';
+      return null;
     }
     await markTaskDone(task.id);
     recordUndo(
@@ -793,7 +819,20 @@ export async function handleMessage(
   //    ("e amanhã?") fiquem no mesmo assunto.
   let target: Subagent | null = null;
   let via = 'agenda-regex';
-  if (AGENDA_REGEX.test(text) || SCHEDULE_HINT_REGEX.test(text)) {
+  // Confirmação de conclusão ("já fiz", "concluí a tarefa") que o atalho NÃO
+  // resolveu com certeza recua até aqui: precisa ir ao ORQUESTRADOR, o único com
+  // as ferramentas de concluir tarefa (concluir_lembrete / concluir_tarefa_atual
+  // + listar_lembretes para achar a certa). Sem esta âncora, "já foi feito"
+  // cairia no roteamento por tema e poderia ir a um subagente de assunto que não
+  // consegue concluir nada — foi o bug do "não achei nenhuma tarefa".
+  //
+  // CRITÉRIO ESTREITO de propósito: só uma confirmação CURTA e quase-pura ("já
+  // fiz", "concluí a tarefa das 9h") vira âncora de agenda. Uma frase de negócio
+  // que POR ACASO tem "acabei/pronto/já fiz" ("acabei de mandar o relatório pro
+  // cliente", "já fiz o orçamento do paciente") continua indo ao subagente de
+  // assunto — senão a âncora sequestraria conversa que não é de agenda.
+  const isDoneConfirmation = looksLikeAgendaDoneConfirmation(text);
+  if (AGENDA_REGEX.test(text) || SCHEDULE_HINT_REGEX.test(text) || isDoneConfirmation) {
     target =
       subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
       subagents.find((s) => /agenda/i.test(s.name)) ??
