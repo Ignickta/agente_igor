@@ -277,6 +277,24 @@ async function findTaskByNaturalText(
   return null;
 }
 
+/**
+ * True quando um pedido de adiamento traz um DESTINO temporal específico
+ * (horário como "15h"/"14:30", período como "de tarde", ou um dia como "sexta"/
+ * "dia 25"/"25/07") — exceto o "+1 hora", que o atalho sabe aplicar sozinho.
+ * Quando true, o atalho de adiamento recua para a LLM, que remarca no horário/
+ * dia EXATO pedido via editar_lembrete. Exportada para os evals de regressão.
+ */
+export function postponeHasSpecificTarget(text: string): boolean {
+  const isPlusOneHour = /\b(1h|uma hora|1 hora)\b/i.test(text);
+  const hasSpecificTime = /\b(\d{1,2}\s*(?:h|hs|horas?|:\s*\d{2})|meio[- ]dia|meia[- ]noite|de\s+(?:manh[ãa]|tarde|noite)|pela\s+(?:manh[ãa]|tarde|noite))\b/i.test(
+    text
+  );
+  const hasSpecificDay = /\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|semana que vem|pr[óo]xima semana|dia\s+\d{1,2}|\d{1,2}[\/.]\d{1,2})\b/i.test(
+    text
+  );
+  return (hasSpecificTime && !isPlusOneHour) || hasSpecificDay;
+}
+
 async function tryNaturalTaskCommand(contact: string, text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
   if (lower.includes('?')) return null;
@@ -375,17 +393,29 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
   // errada. O adiamento também só age sobre uma tarefa que o texto REALMENTE
   // cita; sem alvo claro, passa para a LLM.
   if (/\b(adia|adiar|adie|adiar?\s+(?:pra|para)|remarca|remarcar|empurra|posterga|mais tarde)\b/i.test(text)) {
+    // RECUA se o Igor especificou um DESTINO temporal (horário ou dia): o atalho
+    // só sabe fazer "+1h" e "+1 dia às 09:00" — qualquer outro alvo ("adia pra
+    // 15h", "remarca pra sexta", "de tarde") era DESCARTADO e a tarefa caía nas
+    // 9h do dia seguinte, ignorando o pedido. Nesses casos, deixa a LLM tratar
+    // via editar_lembrete, que respeita o horário/dia exato. Fica com o atalho
+    // só o adiamento genérico ("adia isso", "empurra pra amanhã", "+1h").
+    const isPlusOneHour = /\b(1h|uma hora|1 hora)\b/i.test(text);
+    if (postponeHasSpecificTarget(text)) return null;
+
     const task = await findTaskByNaturalText(text, {
       requireContentMatch: true,
       fallbackToLatestFired: true,
     });
     if (!task) return null;
-    const next = new Date(task.remindAt);
-    if (/\b(1h|uma hora|1 hora)\b/i.test(text)) {
-      next.setHours(next.getHours() + 1);
+    // Aritmética de data no fuso do Igor (não no do servidor, que é UTC no
+    // container): +1h desloca o instante; "amanhã 09:00" recompõe a partir do
+    // dia LOCAL do lembrete via parseLocalIso.
+    let next: Date;
+    if (isPlusOneHour) {
+      next = new Date(new Date(task.remindAt).getTime() + 3600_000);
     } else {
-      next.setDate(next.getDate() + 1);
-      next.setHours(9, 0, 0, 0);
+      const nextDay = addDays(dayKey(new Date(task.remindAt)), 1);
+      next = parseLocalIso(`${nextDay}T09:00:00`);
     }
     await updateTask(task.id, {
       remindAt: next.toISOString(),

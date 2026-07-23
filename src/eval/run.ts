@@ -20,6 +20,7 @@ import {
   explicitDoneCount,
   isPureDoneConfirmation,
   looksLikeAgendaDoneConfirmation,
+  postponeHasSpecificTarget,
   extractTomorrowReminder,
   extractWhatsappTaskList,
   hasPlanningHeaderWithDay,
@@ -254,6 +255,37 @@ function suiteDoneShortcut(): void {
   ];
   for (const t of naoAncora) {
     check('feito', `NÃO vira âncora de agenda: "${t}"`, !looksLikeAgendaDoneConfirmation(t));
+  }
+}
+
+function suitePostponeTarget(): void {
+  suite('Adiamento — horário/dia específico recua para a LLM (não cai nas 9h)');
+
+  // Com destino específico: o atalho recua (postponeHasSpecificTarget=true),
+  // deixando a LLM remarcar no horário/dia EXATO via editar_lembrete.
+  const recua = [
+    'adia o boleto pra 15h',
+    'remarca a reunião pra 14:30',
+    'empurra isso pra sexta',
+    'adia pra segunda de manhã',
+    'posterga o dentista pra de tarde',
+    'remarca pro dia 25',
+    'adia pra 25/07',
+  ];
+  for (const t of recua) {
+    check('adiar', `recua p/ LLM (alvo específico): "${t}"`, postponeHasSpecificTarget(t));
+  }
+
+  // Genérico: o atalho SABE aplicar ("+1h" ou "+1 dia às 9h") — não recua.
+  const aplica = [
+    'adia isso',
+    'empurra pra amanhã',
+    'adia 1h',
+    'deixa pra depois',
+    'posterga uma hora',
+  ];
+  for (const t of aplica) {
+    check('adiar', `atalho aplica (genérico): "${t}"`, !postponeHasSpecificTarget(t));
   }
 }
 
@@ -630,6 +662,7 @@ async function main(): Promise<void> {
   suiteShortcutSafety();
   suiteWhatsAppReplyLength();
   suiteDoneShortcut();
+  suitePostponeTarget();
   suiteClaimsRegex();
   suiteKeywordRouting();
   suiteDatetime();
