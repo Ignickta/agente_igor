@@ -14,12 +14,14 @@
  */
 import {
   AGENDA_REGEX,
+  SCHEDULE_HINT_REGEX,
   routeByKeywords,
   routeByLLM,
   explicitDoneCount,
   isPureDoneConfirmation,
   extractTomorrowReminder,
   extractWhatsappTaskList,
+  hasPlanningHeaderWithDay,
 } from '../agents/central';
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
@@ -129,6 +131,61 @@ function suiteWhatsappTaskLists(): void {
     tasks?.[2] === 'fazer a parte do plano IA'
   );
   check('lista-whatsapp', 'ignora mensagem em formato de pergunta', extractWhatsappTaskList('Fazer plano?\nMandar mensagem?') === null);
+}
+
+/**
+ * Regressões dos atalhos que agiam com baixa confiança e sequestravam mensagens
+ * que não eram para eles (lista com dia virava sem-prazo; "nome amanhã 10h"
+ * adiava a tarefa errada). A estratégia passou a priorizar a LLM: na dúvida, o
+ * atalho recua e a mensagem segue para quem tem contexto/ferramenta.
+ */
+function suiteShortcutSafety(): void {
+  suite('Atalhos não sequestram mensagens ambíguas');
+
+  // 1) Lista com cabeçalho de dia NÃO vira captura sem prazo — vai para a LLM.
+  check(
+    'atalho-seguro',
+    'cabeçalho "Planejamento para sábado" é reconhecido como plano com dia',
+    hasPlanningHeaderWithDay('Planejamento para sabado\nmelhorar a landing\nfazer trafego')
+  );
+  check(
+    'atalho-seguro',
+    'lista com cabeçalho de dia NÃO é capturada como tarefas sem prazo',
+    extractWhatsappTaskList('Planejamento para sabado\nmelhorar a landing\nfazer insta') === null
+  );
+  check(
+    'atalho-seguro',
+    'lista comum (sem dia no cabeçalho) continua sendo capturada',
+    (extractWhatsappTaskList('Melhorar a landing da ibnix\nFazer insta para ibnix')?.length ?? 0) === 2
+  );
+  check(
+    'atalho-seguro',
+    'linha solta que menciona dia não é confundida com cabeçalho de plano',
+    !hasPlanningHeaderWithDay('Comprar pão')
+  );
+
+  // 2) "Nome + dia + hora" tem cara de agendamento → orquestrador (LLM), não
+  //    consultoria e nunca o atalho de adiar (que mexia na tarefa errada).
+  check(
+    'atalho-seguro',
+    'reconhece agendamento por horário: "elexandre amanha as 10 horas"',
+    SCHEDULE_HINT_REGEX.test('elexandre amanha as 10 horas')
+  );
+  check(
+    'atalho-seguro',
+    'reconhece "falar com fulano sexta 14:30"',
+    SCHEDULE_HINT_REGEX.test('falar com fulano sexta 14:30')
+  );
+  check(
+    'atalho-seguro',
+    'conversa comum com um horário de passagem NÃO vira agendamento',
+    !SCHEDULE_HINT_REGEX.test('o boleto de 10 reais venceu')
+  );
+  check(
+    'atalho-seguro',
+    'menção a dia sem hora NÃO vira agendamento por horário',
+    !SCHEDULE_HINT_REGEX.test('foi um sábado tranquilo')
+  );
 }
 
 function suiteWhatsAppReplyLength(): void {
@@ -546,6 +603,7 @@ async function main(): Promise<void> {
   suiteAgendaRegex();
   suiteTomorrowReminders();
   suiteWhatsappTaskLists();
+  suiteShortcutSafety();
   suiteWhatsAppReplyLength();
   suiteDoneShortcut();
   suiteClaimsRegex();

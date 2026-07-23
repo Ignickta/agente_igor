@@ -199,29 +199,61 @@ function taskScore(queryWords: string[], taskText: string): number {
   return hits.length / queryWords.length;
 }
 
-async function findTaskByNaturalText(query: string, fallbackToLatestFired = false) {
-  const queryWords = normalizeTaskText(query);
+/**
+ * Palavras que servem só de "moldura" do comando (verbos de adiar/concluir,
+ * advérbios de tempo, preposições) — presentes em quase toda frase de ação e,
+ * por isso, INÚTEIS para identificar QUAL tarefa o Igor citou. Sem removê-las,
+ * "elexandre amanhã às 10 horas" casaria com qualquer tarefa por causa de
+ * "amanhã"/"horas", e o atalho adiaria a errada. Só o resto (o "conteúdo" que
+ * aponta para a tarefa) conta no score.
+ */
+const COMMAND_FRAME_WORDS = new Set([
+  'adia', 'adiar', 'adie', 'adiado', 'amanha', 'amanhã', 'hoje', 'agora',
+  'mais', 'tarde', 'cedo', 'depois', 'antes', 'hora', 'horas', 'minuto',
+  'minutos', 'dia', 'dias', 'semana', 'mes', 'mês', 'para', 'pra', 'pro',
+  'concluir', 'concluido', 'concluído', 'feito', 'terminei', 'terminado',
+  'apaga', 'apague', 'remove', 'remova', 'descarta', 'descarte', 'cancela',
+  'cancele', 'marca', 'marque', 'deixa', 'deixe', 'coloca', 'coloque',
+]);
+
+/**
+ * Localiza a tarefa que o Igor citou numa frase natural de comando.
+ *
+ * `requireContentMatch` (padrão): só devolve tarefa quando o texto tem
+ * palavras de CONTEÚDO (fora a moldura do comando) que casam com o título de
+ * uma tarefa existente. Se a frase não aponta para nenhuma tarefa conhecida —
+ * ex: "elexandre amanhã às 10 horas", que é um pedido de CRIAR algo novo —
+ * devolve null, e a mensagem segue para a LLM decidir em vez de o atalho
+ * adivinhar (e adiar/concluir a tarefa errada).
+ *
+ * `fallbackToLatestFired` (só para respostas a uma cobrança de lembrete, onde
+ * o alvo é óbvio pelo contexto): quando não há conteúdo que case, assume o
+ * último lembrete disparado sem confirmação.
+ */
+async function findTaskByNaturalText(
+  query: string,
+  opts: { requireContentMatch?: boolean; fallbackToLatestFired?: boolean } = {}
+) {
+  const { requireContentMatch = true, fallbackToLatestFired = false } = opts;
+  // Só as palavras de CONTEÚDO — a moldura do comando não identifica tarefa.
+  const queryWords = normalizeTaskText(query).filter((w) => !COMMAND_FRAME_WORDS.has(w));
   const candidates = (await listTasks()).filter((t) => !t.completedAt);
+  const latestFired = () =>
+    candidates.filter((t) => t.done).sort((a, b) => b.remindAt.localeCompare(a.remindAt))[0] ?? null;
+
   if (queryWords.length === 0) {
-    if (!fallbackToLatestFired) return null;
-    return (
-      candidates
-        .filter((t) => t.done)
-        .sort((a, b) => b.remindAt.localeCompare(a.remindAt))[0] ?? null
-    );
+    // Sem conteúdo: só resolve por fallback quando o contexto garante o alvo
+    // (resposta a uma cobrança). Caso contrário, deixa a LLM tratar.
+    return fallbackToLatestFired ? latestFired() : null;
   }
   const ranked = candidates
     .map((task) => ({ task, score: taskScore(queryWords, task.text) }))
     .filter((item) => item.score >= 0.5)
     .sort((a, b) => b.score - a.score || a.task.remindAt.localeCompare(b.task.remindAt));
   if (ranked[0]?.task) return ranked[0].task;
-  if (fallbackToLatestFired) {
-    return (
-      candidates
-        .filter((t) => t.done)
-        .sort((a, b) => b.remindAt.localeCompare(a.remindAt))[0] ?? null
-    );
-  }
+  // Havia conteúdo, mas nada casou. Só cai no fallback quando explicitamente
+  // pedido E não estamos exigindo match de conteúdo — nunca adivinha por conta.
+  if (fallbackToLatestFired && !requireContentMatch) return latestFired();
   return null;
 }
 
@@ -277,7 +309,12 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
       return `✅ Marquei como ${candidates.length > 1 ? 'concluídos' : 'concluído'}:\n${lines}`;
     }
 
-    const task = await findTaskByNaturalText(text, true);
+    // "feito"/"terminei" puro (sem citar tarefa) responde à última cobrança;
+    // se citar um título, tem que casar de verdade — senão pergunta.
+    const task = await findTaskByNaturalText(text, {
+      requireContentMatch: true,
+      fallbackToLatestFired: true,
+    });
     if (!task) {
       return 'Não achei nenhuma tarefa pendente com esse título. Pode confirmar qual foi que você concluiu?';
     }
@@ -292,7 +329,9 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
   }
 
   if (/\b(apaga|apague|remove|remova|descarta|descarte|cancela|cancele)\b/i.test(text)) {
-    const task = await findTaskByNaturalText(text, true);
+    // Apagar exige saber O QUÊ: só age quando o texto casa com uma tarefa. Sem
+    // alvo claro, retorna null e a LLM pede o esclarecimento.
+    const task = await findTaskByNaturalText(text, { requireContentMatch: true });
     if (!task) return null;
     await deleteTask(task.id);
     recordUndo(
@@ -304,8 +343,16 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
     return `🗑️ Removi: *${task.text}*.`;
   }
 
-  if (/\b(adia|adiar|adie|amanh[ãa]|mais tarde)\b/i.test(text)) {
-    const task = await findTaskByNaturalText(text, true);
+  // Gatilho de adiamento: exige um verbo de adiar EXPLÍCITO (ou "mais tarde").
+  // "amanhã" sozinho NÃO ativa — "elexandre amanhã às 10h" é criar algo novo,
+  // não adiar; deixar o mero "amanhã" disparar fazia o atalho adiar a tarefa
+  // errada. O adiamento também só age sobre uma tarefa que o texto REALMENTE
+  // cita; sem alvo claro, passa para a LLM.
+  if (/\b(adia|adiar|adie|adiar?\s+(?:pra|para)|remarca|remarcar|empurra|posterga|mais tarde)\b/i.test(text)) {
+    const task = await findTaskByNaturalText(text, {
+      requireContentMatch: true,
+      fallbackToLatestFired: true,
+    });
     if (!task) return null;
     const next = new Date(task.remindAt);
     if (/\b(1h|uma hora|1 hora)\b/i.test(text)) {
@@ -352,12 +399,38 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
 const TASK_ACTION_START = /^(melhorar|mandar|fazer|criar|enviar|ligar|pagar|resolver|revisar|definir|escrever|estudar|organizar|comprar|finalizar|corrigir|integrar|abrir|instalar|preparar|publicar|montar|seguir|atualizar|implementar)\b/i;
 
 /**
+ * Cabeçalho de PLANEJAMENTO com um dia: a primeira linha de uma lista que diz
+ * PARA QUANDO são as tarefas seguintes — "Planejamento para sábado", "Metas de
+ * segunda", "Tarefas de amanhã", "Plano dia 25". Quando existe, a lista NÃO é
+ * uma captura sem prazo: as tarefas têm data, e montar o cronograma daquele dia
+ * é trabalho da LLM (que resolve "sábado" → data e agenda cada item). Detectar
+ * isso faz a captura simples recuar e deixar a LLM assumir.
+ */
+const PLANNING_HEADER =
+  /^\s*(?:planejamento|plano|planej[ae]r|agenda|cronograma|metas?|objetivos?|tarefas?|afazeres|to-?do|lista)\b.*\b(?:hoje|amanh[ãa]|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|semana|fim de semana|dia\s+\d{1,2}|\d{1,2}[\/.]\d{1,2})\b/i;
+
+/**
+ * True quando a primeira linha da mensagem é um cabeçalho de planejamento com
+ * dia. Nesse caso a mensagem deve ir para a LLM montar o plano, não virar
+ * captura de tarefas sem prazo.
+ */
+export function hasPlanningHeaderWithDay(text: string): boolean {
+  const firstLine = text.split(/\r?\n/)[0]?.trim() ?? '';
+  return PLANNING_HEADER.test(firstLine);
+}
+
+/**
  * Uma lista enviada em linhas separadas no WhatsApp é uma captura de tarefas.
  * Ela não deve cair em um subagente de assunto e virar apenas uma resposta de
  * consultoria. Cada linha vira uma tarefa sem prazo, visível no painel.
+ *
+ * EXCEÇÃO: se a primeira linha é um cabeçalho de planejamento com um dia
+ * ("Planejamento para sábado"), as tarefas TÊM prazo — a LLM monta o
+ * cronograma daquele dia. A captura simples recua (retorna null).
  */
 export function extractWhatsappTaskList(text: string): string[] | null {
   if (!text.includes('\n') || text.includes('?')) return null;
+  if (hasPlanningHeaderWithDay(text)) return null;
   const tasks = text
     .split(/\r?\n/)
     .map((line) =>
@@ -499,6 +572,17 @@ function isRouteCorrectionText(text: string): boolean {
  */
 export const AGENDA_REGEX =
   /\b(agenda|agendar?|agende|cronograma|compromissos?|lembretes?|me lembra|remarcar?|remarque|reagendar?|reagende|adiar?|adia|hor[áa]rios?|encaixar?|encaixe|reorganizar?|reorganize|planeja(r)? (o |meu )?dia|minha (tarde|manh[ãa]|semana|noite)|meu (dia|m[êe]s))\b/i;
+
+/**
+ * Cara de AGENDAMENTO por horário explícito: um dia (hoje/amanhã/dia da semana)
+ * combinado com uma hora ("às 10h", "10 horas", "14:30"). Frases assim ("falar
+ * com o Alexandre amanhã às 10h") são pedidos de criar lembrete/evento, mesmo
+ * sem as palavras "agenda"/"lembra" — devem ir ao orquestrador, que tem as
+ * ferramentas, e não virar resposta consultiva. Exige os DOIS sinais (dia + hora)
+ * para não capturar conversa comum que só menciona um horário de passagem.
+ */
+export const SCHEDULE_HINT_REGEX =
+  /\b(hoje|amanh[ãa]|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|depois de amanh[ãa])\b.*\b(\d{1,2}\s*(?:h|hs|horas?|:\s*\d{2})|meio[- ]dia|meia[- ]noite)\b|\b(\d{1,2}\s*(?:h|hs|horas?|:\s*\d{2}))\b.*\b(hoje|amanh[ãa]|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)\b/i;
 
 /**
  * Última rota por contato, para dar continuidade a mensagens curtas/ambíguas
@@ -709,7 +793,7 @@ export async function handleMessage(
   //    ("e amanhã?") fiquem no mesmo assunto.
   let target: Subagent | null = null;
   let via = 'agenda-regex';
-  if (AGENDA_REGEX.test(text)) {
+  if (AGENDA_REGEX.test(text) || SCHEDULE_HINT_REGEX.test(text)) {
     target =
       subagents.find((s) => s.name === ORCHESTRATOR_NAME) ??
       subagents.find((s) => /agenda/i.test(s.name)) ??
