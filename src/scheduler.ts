@@ -29,6 +29,7 @@ import { runSmartProactiveCheck } from './agents/proactiveInsights';
 import { sendRouteLearningReport } from './agents/routeLearning';
 import { syncCalendarRange } from './agents/calendarSync';
 import { calendarEnabled } from './services/googleCalendar';
+import { rememberAsk } from './agents/pendingPrompt';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -84,8 +85,12 @@ async function maybeNudgeActive(active: Task, held: Task[]): Promise<void> {
   const mesmoTurno = dayKey(new Date(last)) === dayKey() && turnoOf(last) === turnoAtual;
   if (mesmoTurno) return; // já cobramos neste turno
   await updateTask(active.id, { lastNudgeAt: now });
+  const to = active.to || config.ownerPhone;
+  // A re-cobrança é uma pergunta fechada sobre UM lembrete: registra o alvo
+  // para que "sim", "fiz", "ainda não" sejam lidos como resposta a ELE.
+  await rememberAsk(to, [{ taskId: active.id, title: active.text, index: 1 }]);
   await sendText(
-    active.to || config.ownerPhone,
+    to,
     `⏰ Ainda pendente: *${active.text}*\n\nConseguiu fazer? ${replyHint(active.text)}` +
       queueSuffix(held)
   );
@@ -128,6 +133,10 @@ async function processReminderQueue(): Promise<void> {
       // que evita o lembrete em dobro. Os já-disparados sem confirmação (e os
       // demais vencidos) aparecem como "na fila", sem nova mensagem própria.
       if (!(await claimDueTask(next))) continue;
+      // O lembrete que acabou de tocar é a pergunta no ar: a próxima mensagem
+      // do Igor ("feito", "adia", "sim") responde a ELE, não ao que estava na
+      // fila atrás.
+      await rememberAsk(contact, [{ taskId: next.id, title: next.text, index: 1 }]);
       await sendText(
         contact,
         `⏰ Lembrete: ${next.text}\n\n${replyHint(next.text)}` +

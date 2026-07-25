@@ -9,6 +9,7 @@ import {
   FocusSession,
   ActionRecord,
   PersistedUndo,
+  PendingPrompt,
 } from '../types';
 
 if (!admin.apps.length) {
@@ -37,6 +38,7 @@ const routeSuggestionsCol = db.collection('route_suggestions');
 const settingsCol = db.collection('settings');
 const actionsCol = db.collection('actions');
 const routeExamplesCol = db.collection('route_examples');
+const pendingPromptsCol = db.collection('pending_prompts');
 
 function withoutUndefined<T extends Record<string, unknown>>(data: T): T {
   return Object.fromEntries(
@@ -804,6 +806,40 @@ export async function getExpiredFocusSessions(now = Date.now()): Promise<FocusSe
   return snap.docs
     .map((d) => d.data() as FocusSession)
     .filter((s) => s.endsAt <= now);
+}
+
+// ===================== Perguntas pendentes =====================
+
+/**
+ * Registra a pergunta fechada que acabou de ser enviada ao contato, com os
+ * itens que ela colocou em jogo. Sobrescreve qualquer pergunta anterior: só a
+ * última cobrança está "no ar" — responder a uma pergunta de três turnos atrás
+ * não é um caso real, e manter várias abertas só multiplicaria a chance de
+ * casar a resposta com a pergunta errada.
+ */
+export async function setPendingPrompt(prompt: PendingPrompt): Promise<void> {
+  await pendingPromptsCol.doc(prompt.contact).set(withoutUndefined({ ...prompt }));
+}
+
+/** Pergunta pendente do contato, ou null se não houver / já ter expirado. */
+export async function getPendingPrompt(contact: string): Promise<PendingPrompt | null> {
+  if (!contact) return null;
+  const doc = await pendingPromptsCol.doc(contact).get();
+  if (!doc.exists) return null;
+  const prompt = doc.data() as PendingPrompt;
+  if (prompt.expiresAt <= Date.now()) return null;
+  return prompt;
+}
+
+/** Marca que já pedimos desambiguação desta pergunta (para não pedir de novo). */
+export async function markPendingPromptClarified(contact: string): Promise<void> {
+  await pendingPromptsCol.doc(contact).set({ clarifiedAt: Date.now() }, { merge: true });
+}
+
+/** Encerra a pergunta pendente do contato (respondida ou descartada). */
+export async function clearPendingPrompt(contact: string): Promise<void> {
+  if (!contact) return;
+  await pendingPromptsCol.doc(contact).delete();
 }
 
 // ===================== Configurações de proatividade =====================

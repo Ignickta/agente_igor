@@ -13,7 +13,8 @@ import {
   getTask,
   updateTask,
 } from '../services/firebase';
-import { AgendaItem } from '../types';
+import { AgendaItem, PendingPromptTarget } from '../types';
+import { rememberAsk } from './pendingPrompt';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
 import {
@@ -572,6 +573,13 @@ export async function advanceTask(item: AgendaItem): Promise<void> {
  * vez (marca `nudgedAt`) se ele foi feito, agrupando os atrasados numa só
  * mensagem — um backlog (ex: app reiniciado no meio do dia) não dispara rajada.
  * O que ficar sem resposta continua pendente e entra no follow-up das 20:30.
+ *
+ * A pergunta cobre TODOS os itens vencidos, inclusive os que nasceram de um
+ * lembrete (taskId), numerados. Antes eles eram excluídos por medo de rajada, e
+ * o efeito era pior: o Igor recebia uma pergunta sobre 1 de 5 itens e respondia
+ * "sim" achando que cobria o dia todo. A lista numerada é registrada como
+ * pergunta pendente — a resposta ("sim", "1 e 3", "só a chamada") é lida contra
+ * ela em vez de ser classificada por regex sobre o texto solto.
  */
 export async function processTimeBasedTransitions(): Promise<void> {
   const date = dayKey();
@@ -587,24 +595,32 @@ export async function processTimeBasedTransitions(): Promise<void> {
     await updateAgendaItem(item.id, { nudgedAt: Date.now() });
   }
 
-  // Itens que nasceram de um LEMBRETE (taskId) não ganham mensagem própria de
-  // fim de bloco: a fila sequencial de lembretes já cobra a tarefa ativa uma
-  // vez por turno — mandar "o horário terminou" em cima disso era a rajada de
-  // mensagens que fazia o Igor ignorar tudo. Só eventos puros (sem lembrete)
-  // continuam recebendo o aviso.
-  const toAsk = overdue.filter((i) => !i.taskId);
-  if (toAsk.length === 0 || !config.ownerPhone) return;
+  if (!config.ownerPhone) return;
+
+  const toAsk = [...overdue].sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const targets: PendingPromptTarget[] = toAsk.map((i, idx) => ({
+    ...(i.taskId ? { taskId: i.taskId } : {}),
+    agendaItemId: i.id,
+    title: i.title,
+    index: idx + 1,
+  }));
 
   const linhas = toAsk
-    .sort((a, b) => a.startTime.localeCompare(b.startTime))
-    .map((i) => `• *${i.title}* (${i.startTime}–${i.endTime})`)
+    .map((i, idx) => `${idx + 1}. *${i.title}* (${i.startTime}–${i.endTime})`)
     .join('\n');
   const plural = toAsk.length > 1;
+
+  // Registra a pergunta ANTES de enviar: se o Igor responder num piscar de
+  // olhos, o estado já existe para a resposta casar.
+  await rememberAsk(config.ownerPhone, targets);
+
   await sendText(
     config.ownerPhone,
-    `⏰ O horário ${plural ? 'destes itens' : 'deste item'} da agenda terminou:\n${linhas}\n\n` +
-      `Conseguiu fazer? Me diga o que concluiu que eu marco ✅. ` +
-      `O que ficar sem resposta continua pendente e eu te lembro à noite.`
+    `⏰ Terminou o horário ${plural ? 'destes itens' : 'deste item'}:\n${linhas}\n\n` +
+      (plural
+        ? `Quais você fez? Responda com os números (ex: *1 e 3*), *todos*, ou *nenhum*.`
+        : `Você fez? Responda *sim* ou *não*.`) +
+      `\n\n_O que ficar sem resposta continua pendente e eu te lembro à noite._`
   );
 }
 

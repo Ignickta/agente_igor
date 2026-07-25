@@ -40,7 +40,14 @@ import {
 import { parseLocalIso, addDays, weekdayOf, dayKey, timeKey, nextOccurrence } from '../services/datetime';
 import { parseEventWindow, CalendarEvent } from '../services/googleCalendar';
 import { diffMirror, MirrorItem } from '../agents/calendarSync';
-import { Subagent } from '../types';
+import { Subagent, PendingPrompt } from '../types';
+import {
+  targetsOf,
+  formatTargets,
+  interpretAnswer,
+  PromptAnswer,
+  PENDING_PROMPT_TTL_MS,
+} from '../agents/pendingPrompt';
 
 // ===================== Mini-framework =====================
 
@@ -187,6 +194,68 @@ function suiteShortcutSafety(): void {
     'atalho-seguro',
     'menção a dia sem hora NÃO vira agendamento por horário',
     !SCHEDULE_HINT_REGEX.test('foi um sábado tranquilo')
+  );
+}
+
+function suitePendingPrompt(): void {
+  suite('Pergunta pendente — respostas resolvem contra o que foi perguntado');
+
+  const prompt: PendingPrompt = {
+    contact: '55x',
+    kind: 'confirm_done',
+    targets: [
+      { agendaItemId: 'a1', title: 'Planejamento para sábado', index: 1 },
+      { agendaItemId: 'a2', taskId: 't2', title: 'Chamada com Elexandre', index: 2 },
+      { agendaItemId: 'a3', title: 'Terminar configs da Workana', index: 3 },
+    ],
+    askedAt: Date.now(),
+    expiresAt: Date.now() + PENDING_PROMPT_TTL_MS,
+  };
+  const answer = (over: Partial<PromptAnswer>): PromptAnswer => ({
+    acao: 'concluir',
+    indices: [],
+    todos: false,
+    resto: '',
+    ...over,
+  });
+
+  check(
+    'pergunta-pendente',
+    '"todos" abrange os três itens cobrados',
+    targetsOf(prompt, answer({ todos: true })).length === 3
+  );
+  check(
+    'pergunta-pendente',
+    'índices 1 e 3 resolvem exatamente esses dois itens',
+    targetsOf(prompt, answer({ indices: [1, 3] }))
+      .map((t) => t.index)
+      .join(',') === '1,3'
+  );
+  // Índice inventado pelo modelo não pode virar "então é tudo" — sem alvo
+  // resolvido, o fluxo pede desambiguação em vez de concluir no chute.
+  check(
+    'pergunta-pendente',
+    'índice fora da lista não resolve nenhum alvo',
+    targetsOf(prompt, answer({ indices: [9] })).length === 0
+  );
+  check(
+    'pergunta-pendente',
+    'índice válido entre inválidos resolve só o válido',
+    targetsOf(prompt, answer({ indices: [2, 42] }))
+      .map((t) => t.index)
+      .join(',') === '2'
+  );
+  check(
+    'pergunta-pendente',
+    'lista numerada é exibida na ordem em que foi cobrada',
+    formatTargets(prompt.targets).startsWith('1. Planejamento para sábado')
+  );
+  // A pergunta caduca: responder "sim" no dia seguinte não pode concluir a
+  // cobrança de ontem.
+  check(
+    'pergunta-pendente',
+    'TTL da pergunta é de horas, não de dias',
+    PENDING_PROMPT_TTL_MS > 0 && PENDING_PROMPT_TTL_MS <= 12 * 60 * 60 * 1000
   );
 }
 
@@ -650,6 +719,90 @@ async function suiteLiveEmbedding(): Promise<void> {
   );
 }
 
+/**
+ * Interpretação REAL (LLM) das respostas a uma cobrança. Os casos vêm do
+ * print de 25/07/2026, em que o agente ignorou as duas respostas do Igor:
+ * "Sim" (não casava com nenhuma DONE_PHRASE) e "Planejamento para sábado
+ * também" (era capturado como pedido de REORGANIZAR o dia).
+ */
+async function suiteLivePendingPrompt(): Promise<void> {
+  suite('LIVE — respostas a cobrança são interpretadas contra a pergunta');
+
+  const varios: PendingPrompt = {
+    contact: '55x',
+    kind: 'confirm_done',
+    targets: [
+      { agendaItemId: 'a1', title: 'Planejamento para sábado', index: 1 },
+      { agendaItemId: 'a2', title: 'Chamada com Elexandre', index: 2 },
+      { agendaItemId: 'a3', title: 'Terminar configs da Workana', index: 3 },
+    ],
+    askedAt: Date.now(),
+    expiresAt: Date.now() + PENDING_PROMPT_TTL_MS,
+  };
+  const umSo: PendingPrompt = {
+    ...varios,
+    targets: [{ agendaItemId: 'a2', title: 'Chamada com Elexandre', index: 1 }],
+  };
+
+  // 1) "Sim" para VÁRIOS itens é ambíguo — deve pedir desambiguação, não
+  //    concluir os três no chute.
+  const sim = await interpretAnswer(varios, 'Sim');
+  check(
+    'live-pergunta',
+    '"Sim" sobre 3 itens é ambíguo ou abrangente (nunca "não é resposta")',
+    !!sim && sim.acao !== 'nao_e_resposta',
+    sim ? JSON.stringify(sim) : 'null'
+  );
+
+  // 2) "Sim" para UM item é confirmação direta.
+  const simUm = await interpretAnswer(umSo, 'Sim');
+  check(
+    'live-pergunta',
+    '"Sim" sobre 1 item conclui',
+    simUm?.acao === 'concluir',
+    simUm ? JSON.stringify(simUm) : 'null'
+  );
+
+  // 3) O caso que quebrou: citar o TÍTULO é responder sobre aquele item, não
+  //    pedir para planejar o dia de novo.
+  const tambem = await interpretAnswer(varios, 'Planejamento para sábado também');
+  check(
+    'live-pergunta',
+    '"Planejamento para sábado também" conclui o item 1 (não vira pedido de plano)',
+    tambem?.acao === 'concluir' && (tambem.todos || tambem.indices.includes(1)),
+    tambem ? JSON.stringify(tambem) : 'null'
+  );
+
+  // 4) Seleção parcial por número.
+  const parcial = await interpretAnswer(varios, 'fiz o 1 e o 3, o resto não');
+  check(
+    'live-pergunta',
+    '"fiz o 1 e o 3" seleciona exatamente esses dois',
+    parcial?.acao === 'concluir' &&
+      !parcial.todos &&
+      parcial.indices.sort().join(',') === '1,3',
+    parcial ? JSON.stringify(parcial) : 'null'
+  );
+
+  // 5) Negativa não pode concluir nada.
+  const nao = await interpretAnswer(varios, 'não deu tempo de nenhum');
+  check(
+    'live-pergunta',
+    '"não deu tempo de nenhum" não conclui',
+    !!nao && nao.acao !== 'concluir',
+    nao ? JSON.stringify(nao) : 'null'
+  );
+
+  // 6) Mudança de assunto sai do fluxo da pergunta e volta ao roteamento normal.
+  const outro = await interpretAnswer(varios, 'me manda um resumo do mercado de odonto');
+  check(
+    'live-pergunta',
+    'assunto novo é "nao_e_resposta" (segue o fluxo normal)',
+    outro?.acao === 'nao_e_resposta',
+    outro ? JSON.stringify(outro) : 'null'
+  );
+}
+
 // ===================== Main =====================
 
 async function main(): Promise<void> {
@@ -660,6 +813,7 @@ async function main(): Promise<void> {
   suiteTomorrowReminders();
   suiteWhatsappTaskLists();
   suiteShortcutSafety();
+  suitePendingPrompt();
   suiteWhatsAppReplyLength();
   suiteDoneShortcut();
   suitePostponeTarget();
@@ -672,6 +826,7 @@ async function main(): Promise<void> {
   if (live) {
     await suiteLiveRouting();
     await suiteLiveEmbedding();
+    await suiteLivePendingPrompt();
   }
 
   console.log(`\n${'='.repeat(50)}`);

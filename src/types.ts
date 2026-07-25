@@ -121,6 +121,47 @@ export interface AgendaItem {
   gcalEventId?: string;
 }
 
+/** Um item concreto que uma pergunta pendente colocou em jogo. */
+export interface PendingPromptTarget {
+  /** Id do item de agenda, quando o alvo veio da agenda. */
+  agendaItemId?: string;
+  /** Id da Task (lembrete), quando o alvo veio de um lembrete. */
+  taskId?: string;
+  /** Título exibido ao Igor — é por ele que a resposta em texto casa. */
+  title: string;
+  /** Posição na lista numerada enviada no WhatsApp (1-based). */
+  index: number;
+}
+
+/**
+ * Pergunta fechada em aberto, aguardando resposta do Igor. Documento único por
+ * contato na collection `pending_prompts`.
+ *
+ * É o estado que faltava: sem ele, "sim" / "os dois primeiros" / "esse não"
+ * chegavam ao roteador como mensagens soltas e eram classificadas por regex
+ * sobre o texto isolado — que não tem como saber a que pergunta respondem.
+ * Guardando O QUE foi perguntado e SOBRE QUAIS itens, a resposta volta a ter
+ * referente e é interpretada contra ele.
+ */
+export interface PendingPrompt {
+  /** Contato (telefone) = id do documento. */
+  contact: string;
+  /** Que pergunta foi feita. Hoje só a cobrança de conclusão. */
+  kind: 'confirm_done';
+  /** Itens efetivamente cobrados, na ordem em que foram numerados. */
+  targets: PendingPromptTarget[];
+  askedAt: number;
+  /** Depois disso a pergunta caduca e a mensagem volta ao fluxo normal. */
+  expiresAt: number;
+  /**
+   * Epoch ms de quando pedimos desambiguação ("todos?") por causa de um "sim"
+   * genérico sobre vários itens. Só pedimos UMA vez: se a resposta seguinte
+   * continuar ambígua, não insistimos — vira pergunta em loop, exatamente o
+   * excesso de mensagens que faz o Igor parar de responder.
+   */
+  clarifiedAt?: number | null;
+}
+
 /**
  * Sessão de "modo foco": durante [startedAt, endsAt] só mensagens urgentes são
  * processadas. Documento único por contato na collection `focus`.

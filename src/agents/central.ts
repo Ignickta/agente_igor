@@ -27,6 +27,7 @@ import { getActiveItem, advanceTask } from './orchestrator';
 import { routeByEmbedding, hintFrom, EmbeddingRoute } from './embeddingRouter';
 import { routeByLearnedExample, learnRouteExample } from './routeShortcut';
 import { beginUndoGroup, recordUndo } from './undo';
+import { handlePendingAnswer } from './pendingPrompt';
 import { addDays, dayKey, parseLocalIso } from '../services/datetime';
 
 /** Frases curtas que indicam conclusão da tarefa atual (atalho do híbrido). */
@@ -775,6 +776,37 @@ export async function handleMessage(
   // Cada mensagem abre um grupo de undo: "desfaz" reverte TUDO que esta
   // mensagem causar (ex: 4 lembretes criados de uma vez), não só a última escrita.
   beginUndoGroup(contact);
+
+  // 0.1) RESPOSTA A UMA PERGUNTA PENDENTE — vem antes de TODOS os atalhos.
+  //
+  // Quando o agente acabou de perguntar "quais destes você concluiu?", a
+  // próxima mensagem é uma resposta e precisa ser lida CONTRA aquela pergunta.
+  // Sem isso, "sim" não casava com nenhuma DONE_PHRASE (é filler) e
+  // "Planejamento para sábado também" era capturado pelo PLANNING_HEADER e
+  // virava um pedido de REORGANIZAR o dia — em vez de "esse item também está
+  // feito". Era o bug do print: o Igor respondia e o agente ignorava.
+  const pendingAnswer = await handlePendingAnswer(contact, text);
+  if (pendingAnswer) {
+    // A resposta pode trazer um assunto novo colado ("fiz o 1. e agenda X pra
+    // amanhã"): a parte respondida já foi aplicada, e o resto segue o fluxo
+    // normal como se fosse uma mensagem própria.
+    if (pendingAnswer.leftover) {
+      const followUp = await handleMessage(contact, pendingAnswer.leftover, fromAudio, quotedText);
+      return {
+        ...followUp,
+        reply: `${pendingAnswer.reply}\n\n${followUp.reply}`.trim(),
+        routedBy: `pending-prompt+${followUp.routedBy}`,
+      };
+    }
+    return {
+      reply: pendingAnswer.reply,
+      subagentId: 'orchestrator',
+      subagentName: 'Orquestrador Geral',
+      toolCalls: [],
+      elapsedMs: 0,
+      routedBy: 'pending-prompt',
+    };
+  }
 
   // Listas de tarefas do WhatsApp têm precedência sobre o roteamento por tema.
   const whatsappTaskList = await tryCreateWhatsappTaskList(contact, text);
