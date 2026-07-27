@@ -238,10 +238,11 @@ export function startScheduler(): void {
     async () => {
       try {
         await withJobLock('daily_schedule', dayKey(), async () => {
-          // O que ficou de ontem sem confirmação rola para hoje ANTES de gerar
-          // o cronograma — assim os blocos do dia já nascem com as pendências.
-          await rollOverPendingTasks();
-          await sendDailySchedule();
+          // O que ficou de ontem é SOLTO do horário antes de gerar o cronograma
+          // (não entra sozinho na agenda de hoje) e vai junto do bom dia como
+          // pergunta — quem decide se volta para hoje é o Igor.
+          const carriedOver = await rollOverPendingTasks();
+          await sendDailySchedule(dayKey(), carriedOver);
           console.log('[scheduler] cronograma do dia enviado.');
         });
       } catch (err) {

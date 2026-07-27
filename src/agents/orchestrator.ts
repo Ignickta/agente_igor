@@ -13,8 +13,8 @@ import {
   getTask,
   updateTask,
 } from '../services/firebase';
-import { AgendaItem, PendingPromptTarget } from '../types';
-import { rememberAsk } from './pendingPrompt';
+import { AgendaItem, PendingPromptTarget, Task } from '../types';
+import { rememberAsk, isNudgeSuspended } from './pendingPrompt';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
 import {
@@ -24,7 +24,6 @@ import {
   weekdayOf,
   nextOccurrence,
   dateLabelPt,
-  parseLocalIso,
 } from '../services/datetime';
 import { getMaxDailyWorkMinutes, isNotificationEnabled } from '../services/settings';
 
@@ -461,7 +460,7 @@ export async function upcomingView(days = 7, ref = dayKey()): Promise<string> {
 }
 
 /** Gera (se necessário) e envia o cronograma do dia ao dono via WhatsApp. */
-export async function sendDailySchedule(date = dayKey()): Promise<void> {
+export async function sendDailySchedule(date = dayKey(), carriedOver: Task[] = []): Promise<void> {
   if (!config.ownerPhone) {
     console.warn('[orchestrator] OWNER_PHONE ausente — cronograma não enviado.');
     return;
@@ -471,11 +470,25 @@ export async function sendDailySchedule(date = dayKey()): Promise<void> {
     return;
   }
   const items = await generateDailySchedule(date);
-  const text =
+
+  // O que sobrou de ontem entra como PERGUNTA, não como agenda: soltamos essas
+  // tarefas do horário na liberação das 07:00, e é o Igor quem decide se elas
+  // voltam hoje. Numeradas, para ele responder "1 e 3".
+  const pergunta =
+    carriedOver.length > 0
+      ? `\n\n📋 Ficaram de antes (sem horário):\n` +
+        carriedOver.map((t, i) => `${i + 1}. *${t.text}*`).join('\n') +
+        `\n\n_Quer que eu coloque algum hoje? Responda com os números (ex: *1 e 3*), *todos*, ou *nenhum*._`
+      : '';
+
+  const base =
     items.length > 0
       ? `Bom dia, Igor! ☀️\n\n${formatSchedule(items, date)}`
-      : 'Bom dia, Igor! ☀️ Sua agenda de hoje está livre. O que você quer planejar?';
-  await sendText(config.ownerPhone, text);
+      : carriedOver.length > 0
+        ? 'Bom dia, Igor! ☀️ Sua agenda de hoje está livre.'
+        : 'Bom dia, Igor! ☀️ Sua agenda de hoje está livre. O que você quer planejar?';
+
+  await sendText(config.ownerPhone, base + pergunta);
   console.log(`[orchestrator] cronograma de ${date} enviado (${items.length} itens).`);
 
   // F4: se o dia estiver sobrecarregado, avisa e sugere realocações.
@@ -572,7 +585,14 @@ export async function advanceTask(item: AgendaItem): Promise<void> {
  * disso, quando o slot de um item termina sem confirmação, pergunta UMA única
  * vez (marca `nudgedAt`) se ele foi feito, agrupando os atrasados numa só
  * mensagem — um backlog (ex: app reiniciado no meio do dia) não dispara rajada.
- * O que ficar sem resposta continua pendente e entra no follow-up das 20:30.
+ *
+ * SUSPENSÃO: a cobrança é uma pergunta por vez, e o dia inteiro depende dela.
+ * Se o Igor não responder à primeira, o agente FICA QUIETO até o fim do dia —
+ * nada de cobrar 10:45, 11:45, 14:45 e 15:45 em sequência sobre um dia que
+ * claramente não aconteceu. O silêncio é a informação: o dia travou, e quem
+ * decide o que fazer com ele é o Igor, no fechamento da noite (20:30). Sem
+ * isso, o agente metralhava perguntas sobre blocos posteriores enquanto o
+ * primeiro sequer tinha começado.
  *
  * A pergunta cobre TODOS os itens vencidos, inclusive os que nasceram de um
  * lembrete (taskId), numerados. Antes eles eram excluídos por medo de rajada, e
@@ -588,6 +608,20 @@ export async function processTimeBasedTransitions(): Promise<void> {
 
   const overdue = items.filter((i) => i.status !== 'done' && i.endTime <= now && !i.nudgedAt);
   if (overdue.length === 0) return;
+
+  // Já perguntamos hoje e o Igor não respondeu? Então a cobrança está suspensa:
+  // marca os novos vencidos como "já cobrados" (para não estourarem em rajada
+  // quando ele responder) e não manda mensagem nenhuma. Eles entram no
+  // fechamento das 20:30, que é onde o dia é decidido de uma vez.
+  if (config.ownerPhone && (await isNudgeSuspended(config.ownerPhone, date))) {
+    for (const item of overdue) {
+      await updateAgendaItem(item.id, { nudgedAt: Date.now() });
+    }
+    console.log(
+      `[orchestrator] cobrança suspensa (pergunta de hoje sem resposta) — ${overdue.length} item(ns) silenciados até o fechamento.`
+    );
+    return;
+  }
 
   // Marca ANTES de enviar: se o envio falhar, melhor não perguntar do que
   // perguntar em loop a cada minuto.
@@ -625,31 +659,50 @@ export async function processTimeBasedTransitions(): Promise<void> {
 }
 
 /**
- * Rolagem diária (07:00): tarefa que ficou para trás vai para HOJE, no mesmo
- * horário — tanto a que disparou e nunca foi confirmada quanto a que ficou
- * segurada na fila e nem chegou a tocar. Rearma o disparo (done=false) e zera
- * os marcadores da fila; conta como adiamento no detector de procrastinação.
+ * Liberação diária (07:00): tarefa que ficou para trás SOLTA do horário e vira
+ * pendente sem prazo (`hasReminder: false`). Ela NÃO entra na agenda de hoje
+ * sozinha — o bom dia pergunta se o Igor quer trazê-la, e só a resposta dele
+ * agenda.
+ *
+ * Antes isso era uma rolagem automática: a tarefa era reescrita para hoje no
+ * mesmo horário, todo dia, indefinidamente. O efeito era duplamente ruim. Um
+ * sábado que não aconteceu virava um domingo idêntico, depois uma segunda
+ * idêntica, sem ninguém nunca ter decidido isso. E como cada rolagem
+ * incrementava `postponedCount`, no terceiro dia o detector de procrastinação
+ * acusava o Igor de ter adiado 3x algo que só o cron havia empurrado — o
+ * sistema cobrava pelo adiamento que ele mesmo fez.
+ *
+ * Soltar o horário mantém a tarefa viva (ela continua pendente e aparece na
+ * lista), mas devolve a decisão para quem é dela. `postponedCount` fica
+ * intocado: passar do dia não é adiar, é só não ter feito.
+ *
  * Recorrentes ficam de fora (reagendam sozinhas) e concluídas também.
+ * Retorna as tarefas soltas, para o bom dia poder perguntar sobre elas.
  */
-export async function rollOverPendingTasks(): Promise<number> {
+export async function rollOverPendingTasks(): Promise<Task[]> {
   const today = dayKey();
   const stale = (await listTasks()).filter(
-    (t) => !t.recurrence && !t.completedAt && dayKey(new Date(t.remindAt)) < today
+    (t) =>
+      !t.recurrence &&
+      !t.completedAt &&
+      t.hasReminder !== false &&
+      dayKey(new Date(t.remindAt)) < today
   );
   for (const t of stale) {
-    const time = timeKey(new Date(t.remindAt));
     await updateTask(t.id, {
-      remindAt: parseLocalIso(`${today}T${time}:00`).toISOString(),
+      // Sem prazo: não dispara, não fica "atrasada", não é cobrada.
+      hasReminder: false,
       done: false,
       firedAt: null,
       lastNudgeAt: null,
-      postponedCount: (t.postponedCount ?? 0) + 1,
     });
   }
   if (stale.length > 0) {
-    console.log(`[orchestrator] rolagem diária: ${stale.length} tarefa(s) movida(s) para hoje.`);
+    console.log(
+      `[orchestrator] liberação diária: ${stale.length} tarefa(s) solta(s) do horário — aguardando decisão do Igor.`
+    );
   }
-  return stale.length;
+  return stale;
 }
 
 /**

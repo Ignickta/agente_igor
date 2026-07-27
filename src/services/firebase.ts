@@ -831,6 +831,18 @@ export async function getPendingPrompt(contact: string): Promise<PendingPrompt |
   return prompt;
 }
 
+/**
+ * A pergunta pendente do contato IGNORANDO o TTL de resposta. A suspensão da
+ * cobrança diária dura até a virada do dia, não as 6h em que uma resposta
+ * ainda é interpretada como resposta — por isso ela não pode usar
+ * `getPendingPrompt`, que devolve null assim que o prompt expira.
+ */
+export async function getPendingPromptRaw(contact: string): Promise<PendingPrompt | null> {
+  if (!contact) return null;
+  const doc = await pendingPromptsCol.doc(contact).get();
+  return doc.exists ? (doc.data() as PendingPrompt) : null;
+}
+
 /** Marca que já pedimos desambiguação desta pergunta (para não pedir de novo). */
 export async function markPendingPromptClarified(contact: string): Promise<void> {
   await pendingPromptsCol.doc(contact).set({ clarifiedAt: Date.now() }, { merge: true });

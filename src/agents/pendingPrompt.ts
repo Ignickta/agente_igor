@@ -4,6 +4,7 @@ import { PendingPrompt, PendingPromptTarget } from '../types';
 import {
   setPendingPrompt,
   getPendingPrompt,
+  getPendingPromptRaw,
   clearPendingPrompt,
   markPendingPromptClarified,
   getAgendaItem,
@@ -74,6 +75,28 @@ export async function rememberAsk(
     expiresAt: now + PENDING_PROMPT_TTL_MS,
     clarifiedAt: null,
   });
+}
+
+/**
+ * A cobrança do dia está suspensa? True quando JÁ perguntamos hoje "você fez?"
+ * e o Igor ainda não respondeu.
+ *
+ * A regra combinada é: uma pergunta em aberto por vez. Enquanto ela não for
+ * respondida, o agente não cobra mais nada no dia — o dia fica suspenso, e a
+ * decisão sobre ele acontece no fechamento da noite. Sem essa trava, cada bloco
+ * vencido gerava a sua própria cobrança e o Igor recebia quatro perguntas sobre
+ * um dia em que não tinha feito nem a primeira tarefa.
+ *
+ * Só conta a pergunta de HOJE (`askedAt` no dia local): uma pergunta de ontem
+ * que morreu sem resposta não pode silenciar o dia seguinte. Note que isso é
+ * mais restrito que o TTL de 6h do prompt — aqui a suspensão vale até a
+ * virada do dia, mesmo que o prompt já tenha expirado para fins de resposta.
+ */
+export async function isNudgeSuspended(contact: string, date = dayKey()): Promise<boolean> {
+  if (!contact) return false;
+  const prompt = await getPendingPromptRaw(contact);
+  if (!prompt || prompt.kind !== 'confirm_done') return false;
+  return dayKey(new Date(prompt.askedAt)) === date;
 }
 
 /**

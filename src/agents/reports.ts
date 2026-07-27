@@ -10,6 +10,8 @@ import {
   listTasks,
 } from '../services/firebase';
 import { weekRange } from './orchestrator';
+import { rememberAsk } from './pendingPrompt';
+import { PendingPromptTarget } from '../types';
 import { CLAIMS_ACTION_REGEX } from './subagents';
 import { dayKey, addDays, dayStartMs, timeKey, dateLabelPt } from '../services/datetime';
 import { isNotificationEnabled } from '../services/settings';
@@ -22,11 +24,19 @@ function canNotify(): boolean {
 // ===================== Follow-up de pendências (20h30) =====================
 
 /**
- * Acompanhamento do dia: lembretes que DISPARARAM hoje mas nunca foram
- * confirmados como feitos (done sem completedAt) + itens da AGENDA do dia cujo
- * horário passou sem confirmação (eles não são mais auto-concluídos). Pergunta
- * ao Igor o que concluiu — a resposta cai no fluxo normal, onde o agente marca
- * com concluir_lembrete/concluir_tarefa_atual ou adia com editar_lembrete.
+ * Fechamento do dia: lembretes que DISPARARAM hoje mas nunca foram confirmados
+ * como feitos (done sem completedAt) + itens da AGENDA do dia cujo horário
+ * passou sem confirmação (eles não são mais auto-concluídos).
+ *
+ * Esta é a ÚNICA cobrança garantida do dia. Durante o dia, o agente pergunta no
+ * máximo uma vez: se o Igor não responde, a cobrança fica suspensa
+ * (`isNudgeSuspended`) e todos os blocos seguintes chegam silenciosamente aqui.
+ * Por isso o fechamento é numerado e registrado como pergunta pendente — é aqui
+ * que o dia inteiro é decidido de uma vez ("1 e 3", "todos", "nenhum"), em vez
+ * de item por item ao longo do dia.
+ *
+ * Não promete adiar nada: o que não foi feito solta do horário na virada do dia
+ * e só volta para a agenda se o Igor pedir.
  */
 export async function sendPendingFollowUp(): Promise<void> {
   if (!canNotify()) return;
@@ -49,17 +59,38 @@ export async function sendPendingFollowUp(): Promise<void> {
 
   if (fired.length === 0 && agendaPending.length === 0) return;
 
+  // Numeração única e contínua sobre as duas listas — é por ela que "1 e 3"
+  // resolve, então targets e texto precisam sair da MESMA ordem.
+  const targets: PendingPromptTarget[] = [
+    ...fired.map((t) => ({ taskId: t.id, title: t.text })),
+    ...agendaPending.map((i) => ({
+      ...(i.taskId ? { taskId: i.taskId } : {}),
+      agendaItemId: i.id,
+      title: i.title,
+    })),
+  ].map((t, idx) => ({ ...t, index: idx + 1 }));
+
   const linhas = [
-    ...fired.map((t) => `• ${t.text}`),
-    ...agendaPending.map((i) => `• ${i.title} (${i.startTime}–${i.endTime})`),
-  ].join('\n');
+    ...fired.map((t) => t.text),
+    ...agendaPending.map((i) => `${i.title} (${i.startTime}–${i.endTime})`),
+  ]
+    .map((label, idx) => `${idx + 1}. *${label}*`)
+    .join('\n');
+
+  const plural = targets.length > 1;
+
+  // Registra ANTES de enviar: se o Igor responder num piscar de olhos, o estado
+  // já existe para a resposta casar.
+  await rememberAsk(config.ownerPhone, targets);
+
   const text =
-    `🔁 *Acompanhamento do dia*\n\nEsses itens de hoje ainda estão sem confirmação — conseguiu fazer?\n${linhas}\n\n` +
-    `_Me diz o que concluiu que eu marco ✅. O que não deu, posso adiar pra amanhã._`;
+    `🔁 *Fechando o dia*\n\nEsses itens de hoje ficaram sem confirmação:\n${linhas}\n\n` +
+    (plural
+      ? `Quais você fez? Responda com os números (ex: *1 e 3*), *todos*, ou *nenhum*.`
+      : `Você fez? Responda *sim* ou *não*.`) +
+    `\n\n_O que não deu, sem problema: solta do horário e fica te esperando decidir._`;
   await sendText(config.ownerPhone, text);
-  console.log(
-    `[reports] follow-up de pendências enviado (${fired.length + agendaPending.length} itens).`
-  );
+  console.log(`[reports] fechamento do dia enviado (${targets.length} itens).`);
 }
 
 // ===================== F1: resumo diário noturno (22h) =====================
