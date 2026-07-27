@@ -239,16 +239,28 @@ export async function createTask(data: Omit<Task, 'id' | 'createdAt' | 'done'>):
 /**
  * Tarefas pendentes que já passaram do horário de lembrar.
  *
- * Usa apenas um filtro de igualdade (`done == false`) — que não exige índice
- * composto no Firestore — e filtra por horário em memória. O volume de tarefas
- * pendentes é pequeno, então isso é eficiente e evita a necessidade de índice.
+ * O filtro de horário vai NA QUERY, não em memória. Esta função roda no tick de
+ * cada minuto: filtrar em memória significa ler a coleção `tasks` inteira 1.440
+ * vezes por dia, e o Firestore cobra por documento lido. Com ~40 tarefas isso
+ * dava ~55 mil leituras/dia e estourava a cota diária (o backend passava a
+ * morrer no boot com RESOURCE_EXHAUSTED). Com o `where` de horário, o caso
+ * comum — nenhum lembrete vencido — lê zero documento.
+ *
+ * `taskHasReminder` continua em memória porque depende de comparar `remindAt`
+ * com `createdAt`, o que não se expressa em query; mas aí já opera sobre o
+ * punhado de vencidos, não sobre a coleção toda.
+ *
+ * Exige índice composto (done ASC, remindAt ASC) — ver firestore.indexes.json.
  */
 export async function getDueTasks(): Promise<Task[]> {
   const nowIso = new Date().toISOString();
-  const snap = await tasksCol.where('done', '==', false).get();
+  const snap = await tasksCol
+    .where('done', '==', false)
+    .where('remindAt', '<=', nowIso)
+    .get();
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as Task))
-    .filter((t) => taskHasReminder(t) && t.remindAt <= nowIso);
+    .filter((t) => taskHasReminder(t));
 }
 
 /**
@@ -346,9 +358,30 @@ export async function getCompletedTasksBetween(start: number, end: number): Prom
  * Lembretes que JÁ DISPARARAM hoje e ainda não foram confirmados pelo usuário
  * (done sem completedAt, remindAt no dia local `today`). São os "bloqueadores"
  * da fila sequencial: enquanto existir um, os próximos lembretes seguram.
+ *
+ * Como `getDueTasks`, roda no tick de cada minuto e por isso NÃO pode varrer
+ * todas as concluídas — elas só acumulam com o tempo (ver comentário lá sobre a
+ * cota estourada). A query recorta `remindAt` numa janela de ±1 dia em torno de
+ * hoje, o que basta para descartar o histórico antigo.
+ *
+ * A janela é folgada de propósito: `today` é um dia no fuso local
+ * (`config.timezone`) e `remindAt` é ISO/UTC, então as bordas não coincidem. O
+ * `dayKey` exato continua sendo aplicado em memória logo abaixo — a query só
+ * corta volume, quem decide o dia é o filtro de sempre.
+ *
+ * Exige índice composto (done ASC, remindAt ASC) — ver firestore.indexes.json.
  */
 export async function getFiredUnconfirmed(today: string): Promise<Task[]> {
-  const snap = await tasksCol.where('done', '==', true).get();
+  const dayMs = 86_400_000;
+  const ref = new Date(`${today}T12:00:00Z`).getTime();
+  const from = new Date(ref - dayMs).toISOString();
+  const to = new Date(ref + dayMs).toISOString();
+
+  const snap = await tasksCol
+    .where('done', '==', true)
+    .where('remindAt', '>=', from)
+    .where('remindAt', '<=', to)
+    .get();
   return snap.docs
     .map((d) => ({ id: d.id, ...d.data() } as Task))
     .filter((t) => !t.completedAt && dayKey(new Date(t.remindAt)) === today)

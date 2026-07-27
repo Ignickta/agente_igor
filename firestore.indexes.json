@@ -1,0 +1,18 @@
+{
+  "comment": [
+    "Índices compostos exigidos pelas queries do scheduler (tick de cada minuto).",
+    "Sem eles, getDueTasks/getFiredUnconfirmed falham com FAILED_PRECONDITION.",
+    "Deploy: firebase deploy --only firestore:indexes"
+  ],
+  "indexes": [
+    {
+      "collectionGroup": "tasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "done", "order": "ASCENDING" },
+        { "fieldPath": "remindAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
