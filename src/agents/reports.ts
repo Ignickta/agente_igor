@@ -158,7 +158,10 @@ export async function sendWeeklyReview(): Promise<void> {
           role: 'system',
           content:
             'Resuma em até 3 bullets curtos os destaques da semana a partir das tarefas ' +
-            'concluídas. Português do Brasil, direto, sem enrolação.',
+            'concluídas. Português do Brasil, direto, sem enrolação. NUNCA junte tarefas ' +
+            'diferentes num mesmo bullet com barra ou vírgula ("hotel / custos / anamnese") — ' +
+            'cada bullet fala de UMA tarefa, com o título como o Igor escreveu. Se não couber ' +
+            'tudo, escolha as 3 mais relevantes e ignore o resto.',
         },
         { role: 'user', content: completed.map((t) => `- ${t.text}`).join('\n') },
       ];
@@ -217,7 +220,10 @@ export async function runProactiveCheck(): Promise<void> {
             'pendências, para você NÃO existe e NÃO deve ser mencionado.\n' +
             '2) Nesta verificação você NÃO tem ferramentas — não cria lembrete, não agenda, não ' +
             'altera nada. Por isso NUNCA prometa ação ("vou te lembrar", "agendei", "deixei ' +
-            'marcado"): apenas AVISE ou SUGIRA; quem decide e pede é o Igor.',
+            'marcado"): apenas AVISE ou SUGIRA; quem decide e pede é o Igor.\n' +
+            '3) Cite cada tarefa pelo título EXATO da lista, uma por item. NUNCA funda várias ' +
+            'numa só com barra ou vírgula ("logística / custos / hotel") para economizar espaço: ' +
+            'isso cria uma tarefa que não existe. Se for muita coisa, fale só das mais urgentes.',
         },
         {
           role: 'user',
