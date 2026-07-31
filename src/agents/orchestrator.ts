@@ -26,6 +26,7 @@ import {
   dateLabelPt,
 } from '../services/datetime';
 import { getMaxDailyWorkMinutes, isNotificationEnabled } from '../services/settings';
+import { proactiveMuted } from './pause';
 
 // Reexporta para callers que já importavam dayKey/etc. do orchestrator.
 export { dayKey, addDays, weekdayOf };
@@ -469,6 +470,10 @@ export async function sendDailySchedule(date = dayKey(), carriedOver: Task[] = [
     console.log('[orchestrator] cronograma do dia desativado nas configurações — não enviado.');
     return;
   }
+  if (await proactiveMuted(config.ownerPhone)) {
+    console.log('[orchestrator] tudo pausado — cronograma do dia não enviado.');
+    return;
+  }
   const items = await generateDailySchedule(date);
 
   // O que sobrou de ontem entra como PERGUNTA, não como agenda: soltamos essas
@@ -608,6 +613,11 @@ export async function processTimeBasedTransitions(): Promise<void> {
 
   const overdue = items.filter((i) => i.status !== 'done' && i.endTime <= now && !i.nudgedAt);
   if (overdue.length === 0) return;
+
+  // Tudo pausado: sai sem enviar E sem marcar `nudgedAt`. Marcar aqui seria
+  // engolir o item de vez — ele entraria como "já cobrado" e nunca mais
+  // apareceria. Deixando intacto, a agenda volta do jeito que estava no retomar.
+  if (config.ownerPhone && (await proactiveMuted(config.ownerPhone))) return;
 
   // Já perguntamos hoje e o Igor não respondeu? Então a cobrança está suspensa:
   // marca os novos vencidos como "já cobrados" (para não estourarem em rajada

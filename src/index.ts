@@ -9,6 +9,7 @@ import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
 import { compactWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
+import { isPauseRequest, isResumeRequest, enterPause, leavePause } from './agents/pause';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
@@ -182,6 +183,27 @@ async function handleResolvedText(
   isAudio: boolean,
   quotedText?: string
 ): Promise<void> {
+  // Pausa das proativas ("segura tudo aí" / "pode voltar"). Vem ANTES do foco
+  // de propósito: são coisas diferentes (a pausa barra o que o agente ENVIA
+  // sozinho, o foco barra o que CHEGA), e quem está em foco precisa conseguir
+  // pausar do mesmo jeito. Falha aqui não pode derrubar o atendimento.
+  try {
+    if (isResumeRequest(text)) {
+      const reply = await leavePause(from);
+      await sendText(from, reply, 800);
+      return;
+    }
+    if (isPauseRequest(text)) {
+      const reply = await enterPause(from, text);
+      await sendText(from, reply, 800);
+      return;
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('[webhook] erro na pausa (seguindo fluxo normal):', errMsg);
+    recordError(`Erro na pausa: ${errMsg}`);
+  }
+
   // F3: modo foco. Pedido de foco entra direto; pedido de SAIR encerra; durante
   // o foco, mensagens não urgentes são seguradas com um aviso curto. Comandos
   // administrativos ("/...") e mensagens urgentes NUNCA são bloqueados — o

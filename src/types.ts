@@ -177,6 +177,29 @@ export interface FocusSession {
 }
 
 /**
+ * Pausa das mensagens PROATIVAS (lembretes, transições da agenda, cobranças,
+ * relatórios). Diferente do modo foco, que barra o que ENTRA e expira sozinho:
+ * a pausa barra o que SAI e não tem prazo — só termina quando o dono mandar
+ * voltar. Documento único por contato na collection `pauses`.
+ *
+ * Nada é adiado nem remarcado enquanto vigora: os horários originais das
+ * tarefas ficam intactos e o que vencer no período é apenas engolido, para ser
+ * apresentado como lista no retomar.
+ */
+export interface PauseState {
+  /** Contato (telefone) dono da pausa = id do documento. */
+  contact: string;
+  /** Início da pausa em epoch ms. */
+  startedAt: number;
+  /** False = pausa vigente. True = já retomada (mantido para histórico). */
+  resumed: boolean;
+  /** Quando foi retomada, em epoch ms. */
+  resumedAt?: number;
+  /** Texto original do pedido, para conferência no log/painel. */
+  reason?: string;
+}
+
+/**
  * Uma operação inversa serializável. É a versão declarativa do que a closure
  * `revert` do undo faria, para sobreviver a um restart do backend (a closure em
  * memória se perde; este payload no Firestore não).

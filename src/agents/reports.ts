@@ -15,10 +15,15 @@ import { PendingPromptTarget } from '../types';
 import { CLAIMS_ACTION_REGEX } from './subagents';
 import { dayKey, addDays, dayStartMs, timeKey, dateLabelPt } from '../services/datetime';
 import { isNotificationEnabled } from '../services/settings';
+import { proactiveMuted } from './pause';
 
-/** True se as notificações proativas estão ligadas e há dono configurado. */
-function canNotify(): boolean {
-  return config.proactiveNotifications && !!config.ownerPhone;
+/**
+ * True se dá para mandar mensagem proativa agora: notificações ligadas, dono
+ * configurado e o dono NÃO está com tudo pausado ("segura tudo aí").
+ */
+async function canNotify(): Promise<boolean> {
+  if (!config.proactiveNotifications || !config.ownerPhone) return false;
+  return !(await proactiveMuted(config.ownerPhone));
 }
 
 // ===================== Follow-up de pendências (20h30) =====================
@@ -39,7 +44,7 @@ function canNotify(): boolean {
  * e só volta para a agenda se o Igor pedir.
  */
 export async function sendPendingFollowUp(): Promise<void> {
-  if (!canNotify()) return;
+  if (!(await canNotify())) return;
   const today = dayKey();
   const fired = (await listTasks()).filter(
     (t) => t.done && !t.completedAt && dayKey(new Date(t.remindAt)) === today
@@ -100,7 +105,7 @@ export async function sendPendingFollowUp(): Promise<void> {
  * de amanhã (por prioridade na agenda).
  */
 export async function sendNightlySummary(): Promise<void> {
-  if (!canNotify() || !isNotificationEnabled('eveningSummary')) return;
+  if (!(await canNotify()) || !isNotificationEnabled('eveningSummary')) return;
   const today = dayKey();
   const start = dayStartMs(today);
   const end = Date.now();
@@ -137,7 +142,7 @@ export async function sendNightlySummary(): Promise<void> {
  * destaques da semana (resumidos pelo LLM a partir das tarefas concluídas).
  */
 export async function sendWeeklyReview(): Promise<void> {
-  if (!canNotify() || !isNotificationEnabled('weeklyReview')) return;
+  if (!(await canNotify()) || !isNotificationEnabled('weeklyReview')) return;
   const { start, end } = weekRange();
   const startMs = dayStartMs(start);
   const endMs = dayStartMs(end) + 86400000;
@@ -190,7 +195,7 @@ export async function sendWeeklyReview(): Promise<void> {
  * a pena — o modelo responde "NADA" quando não há nada a dizer.
  */
 export async function runProactiveCheck(): Promise<void> {
-  if (!canNotify()) return;
+  if (!(await canNotify())) return;
   const subs = await listSubagents();
   const pending = await getPendingTasks();
   const nowIso = new Date().toISOString();
@@ -260,7 +265,7 @@ export async function runProactiveCheck(): Promise<void> {
  * itens pendentes da área.
  */
 export async function sendSubagentWeeklyReports(): Promise<void> {
-  if (!canNotify() || !isNotificationEnabled('subagentReports')) return;
+  if (!(await canNotify()) || !isNotificationEnabled('subagentReports')) return;
   const subs = await listSubagents();
   const metrics = await getMetrics(7);
   const pending = await getPendingTasks();

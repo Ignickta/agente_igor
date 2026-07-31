@@ -2,6 +2,7 @@ import { config } from '../config';
 import { chatJson } from '../services/openai';
 import { sendText } from '../services/evolution';
 import { listSubagents, getRouteMisses, saveRouteSuggestion } from '../services/firebase';
+import { proactiveMuted } from './pause';
 
 /**
  * F9: aprendizado de erros de roteamento. A detecção (central.ts) registra
@@ -68,6 +69,7 @@ interface RouteAnalysis {
  */
 export async function sendRouteLearningReport(): Promise<void> {
   if (!config.ownerPhone || !config.proactiveNotifications) return;
+  if (await proactiveMuted(config.ownerPhone)) return;
 
   const misses = await getRouteMisses(Date.now() - 7 * 86400000);
   if (misses.length === 0) return;
