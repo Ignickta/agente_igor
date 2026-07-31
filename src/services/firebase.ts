@@ -7,6 +7,7 @@ import {
   Task,
   AgendaItem,
   FocusSession,
+  PauseState,
   ActionRecord,
   PersistedUndo,
   PendingPrompt,
@@ -30,6 +31,7 @@ const memoryCol = db.collection('memory');
 const metricsCol = db.collection('metrics');
 const agendaCol = db.collection('agenda');
 const focusCol = db.collection('focus');
+const pausesCol = db.collection('pauses');
 const sharedFactsCol = db.collection('shared_facts');
 const conversationLogCol = db.collection('conversation_log');
 const jobLocksCol = db.collection('job_locks');
@@ -839,6 +841,58 @@ export async function getExpiredFocusSessions(now = Date.now()): Promise<FocusSe
   return snap.docs
     .map((d) => d.data() as FocusSession)
     .filter((s) => s.endsAt <= now);
+}
+
+// ===================== Pausa das proativas =====================
+
+/**
+ * Cache do estado de pausa por contato. O scheduler consulta a pausa a cada
+ * tick de minuto, em vários jobs: sem cache seria uma leitura por job por
+ * minuto, por contato, o dia inteiro — caminho conhecido para estourar a cota
+ * do Firestore. TTL curto porque o custo de errar é baixo e limitado: no pior
+ * caso um lembrete escapa (ou é engolido) nos segundos seguintes ao comando.
+ * Toda escrita invalida o contato na hora, então o caso comum é exato.
+ */
+const pauseCache = new Map<string, { at: number; state: PauseState | null }>();
+const PAUSE_CACHE_TTL_MS = 30 * 1000;
+
+/** Inicia a pausa das proativas de um contato (sem prazo: só sai no retomar). */
+export async function startPause(contact: string, reason?: string): Promise<PauseState> {
+  const state: PauseState = { contact, startedAt: Date.now(), resumed: false };
+  if (reason) state.reason = reason.slice(0, 500);
+  await pausesCol.doc(contact).set(state);
+  pauseCache.set(contact, { at: Date.now(), state });
+  return state;
+}
+
+/**
+ * Pausa VIGENTE do contato, ou null se ele não está pausado. Best-effort: uma
+ * falha de leitura devolve null (proativas seguem) em vez de lançar — silenciar
+ * o agente por erro de infra seria pior do que uma mensagem a mais.
+ */
+export async function getActivePause(contact: string): Promise<PauseState | null> {
+  if (!contact) return null;
+  const hit = pauseCache.get(contact);
+  if (hit && Date.now() - hit.at < PAUSE_CACHE_TTL_MS) return hit.state;
+  try {
+    const doc = await pausesCol.doc(contact).get();
+    const data = doc.exists ? (doc.data() as PauseState) : null;
+    const state = data && !data.resumed ? data : null;
+    pauseCache.set(contact, { at: Date.now(), state });
+    return state;
+  } catch (err) {
+    console.error('[firebase] falha ao ler pausa (seguindo sem pausa):', err);
+    return null;
+  }
+}
+
+/** Encerra a pausa do contato. Retorna false se ele não estava pausado. */
+export async function endPause(contact: string): Promise<boolean> {
+  const active = await getActivePause(contact);
+  if (!active) return false;
+  await pausesCol.doc(contact).set({ resumed: true, resumedAt: Date.now() }, { merge: true });
+  pauseCache.set(contact, { at: Date.now(), state: null });
+  return true;
 }
 
 // ===================== Perguntas pendentes =====================

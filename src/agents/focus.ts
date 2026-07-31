@@ -8,6 +8,7 @@ import {
   endFocus,
   getExpiredFocusSessions,
 } from '../services/firebase';
+import { proactiveMuted } from './pause';
 
 /** Default de duração do foco quando o usuário não especifica (minutos). */
 const DEFAULT_FOCUS_MINUTES = 60;
@@ -134,6 +135,14 @@ export async function processFocusExpirations(): Promise<void> {
   if (!config.proactiveNotifications) return;
   const expired = await getExpiredFocusSessions();
   for (const s of expired) {
+    // Com tudo pausado, encerra a sessão em silêncio: o foco expirar é um
+    // evento do relógio, não algo que o dono pediu agora. As mensagens seguradas
+    // ficam na fila e saem no "sair do foco" ou no retomar.
+    if (await proactiveMuted(s.contact)) {
+      await endFocus(s.contact);
+      console.log(`[focus] foco encerrado em silêncio (pausado) para ${s.contact}`);
+      continue;
+    }
     await endFocus(s.contact);
     await sendText(s.contact, `✅ *Modo foco encerrado.* Como foi?${flushHeld(s.contact)}`);
     console.log(`[focus] foco encerrado para ${s.contact}`);

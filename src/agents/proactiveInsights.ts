@@ -5,6 +5,7 @@ import { effectiveSettings } from '../services/settings';
 import { sendText } from '../services/evolution';
 import { dayKey } from '../services/datetime';
 import { PROCRASTINATION_THRESHOLD } from './orchestrator';
+import { proactiveMuted } from './pause';
 
 /**
  * Proatividade ESPERTA: avisos derivados de sinais que o sistema já coleta
@@ -148,6 +149,7 @@ export function buildInsightMessages(insights: ProactiveInsights): string[] {
  */
 export async function runSmartProactiveCheck(): Promise<void> {
   if (!config.proactiveNotifications || !config.ownerPhone) return;
+  if (await proactiveMuted(config.ownerPhone)) return;
   const insights = await gatherInsights();
   const messages = buildInsightMessages(insights);
   for (const msg of messages) {
