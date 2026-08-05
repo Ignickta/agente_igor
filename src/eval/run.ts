@@ -41,6 +41,7 @@ import { parseLocalIso, addDays, weekdayOf, dayKey, timeKey, nextOccurrence } fr
 import { parseEventWindow, CalendarEvent } from '../services/googleCalendar';
 import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent, PendingPrompt } from '../types';
+import { taskAllowedDuringPause } from '../agents/pause';
 import {
   targetsOf,
   formatTargets,
@@ -125,6 +126,28 @@ function suiteTomorrowReminders(): void {
     'prioridade-amanha',
     'ignora pergunta sobre amanhã',
     extractTomorrowReminder('amanhã vou fazer o quê?') === null
+  );
+}
+
+function suitePauseExceptions(): void {
+  suite('Pausa — novos lembretes são exceções explícitas');
+  const base = {
+    id: 'task-1',
+    text: 'Mandar mensagem para Alisson',
+    remindAt: '2026-08-04T12:00:00.000Z',
+    to: 'owner',
+    done: false,
+    createdAt: Date.now(),
+  };
+  check(
+    'pausa-excecao',
+    'lembrete antigo permanece bloqueado',
+    !taskAllowedDuringPause(base)
+  );
+  check(
+    'pausa-excecao',
+    'lembrete criado durante a pausa pode tocar',
+    taskAllowedDuringPause({ ...base, bypassPause: true })
   );
 }
 
@@ -811,6 +834,7 @@ async function main(): Promise<void> {
 
   suiteAgendaRegex();
   suiteTomorrowReminders();
+  suitePauseExceptions();
   suiteWhatsappTaskLists();
   suiteShortcutSafety();
   suitePendingPrompt();

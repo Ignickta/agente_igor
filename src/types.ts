@@ -35,6 +35,11 @@ export interface Task {
   hasReminder?: boolean;
   /** Para quem enviar (telefone Evolution). */
   to: string;
+  /**
+   * Permite o disparo mesmo durante uma pausa global das proativas.
+   * Só é definido para lembretes criados explicitamente durante a pausa.
+   */
+  bypassPause?: boolean;
   done: boolean;
   createdAt: number;
   /** Duração estimada em minutos (sugerida pelo LLM na criação). */

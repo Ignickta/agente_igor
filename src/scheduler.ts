@@ -30,7 +30,7 @@ import { sendRouteLearningReport } from './agents/routeLearning';
 import { syncCalendarRange } from './agents/calendarSync';
 import { calendarEnabled } from './services/googleCalendar';
 import { rememberAsk } from './agents/pendingPrompt';
-import { proactiveMuted } from './agents/pause';
+import { proactiveMuted, taskAllowedDuringPause } from './agents/pause';
 
 /**
  * Executa `fn` somente se esta instância vencer a trava distribuída do job no
@@ -125,11 +125,15 @@ async function processReminderQueue(): Promise<void> {
     // Contato pausado: nada sai. Note que NÃO reivindicamos nem reagendamos as
     // tarefas — elas seguem vencidas, com o horário original intacto, e voltam
     // a ser tratadas no primeiro tick depois do retomar. É o oposto de adiar.
-    if (await proactiveMuted(contact)) continue;
-
-    const myDue = due.filter((t) => contactOf(t) === contact);
+    const paused = await proactiveMuted(contact);
+    const permitida = (t: Task) => !paused || taskAllowedDuringPause(t);
+    const myDue = due.filter((t) => contactOf(t) === contact && permitida(t));
     myDue.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
-    const myBlockers = blockers.filter((t) => contactOf(t) === contact);
+    const myBlockers = blockers.filter((t) => contactOf(t) === contact && permitida(t));
+
+    // Em pausa, itens antigos continuam silenciosos. Lembretes criados depois
+    // dela seguem normalmente como exceções explícitas do usuário.
+    if (myDue.length === 0 && myBlockers.length === 0) continue;
 
     const next = myDue[0];
     if (next) {

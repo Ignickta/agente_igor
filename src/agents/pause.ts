@@ -78,6 +78,11 @@ export async function proactiveMuted(contact: string): Promise<boolean> {
   return (await getActivePause(contact)) !== null;
 }
 
+/** Lembretes criados durante a pausa são exceções pontuais autorizadas. */
+export function taskAllowedDuringPause(task: Task): boolean {
+  return task.bypassPause === true;
+}
+
 /** Entra em pausa. Retorna a resposta a enviar. */
 export async function enterPause(contact: string, text: string): Promise<string> {
   const already = await getActivePause(contact);

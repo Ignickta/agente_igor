@@ -58,6 +58,7 @@ import {
   deleteCalendarEvent,
 } from '../../services/googleCalendar';
 import type OpenAI from 'openai';
+import { proactiveMuted } from '../pause';
 
 /** Nome do subagente que recebe as ferramentas de orquestração da agenda. */
 export const ORCHESTRATOR_NAME = 'Agenda / Orquestrador';
@@ -945,11 +946,15 @@ async function executeTool(
       }
       // F5: estima a duração da tarefa (best-effort; não bloqueia se falhar).
       const estimatedMinutes = await estimateDurationMinutes(texto, 'task');
+      // Pedir um novo lembrete durante uma pausa é autorização explícita para
+      // ESTE item tocar. A pausa das cobranças antigas continua intacta.
+      const bypassPause = await proactiveMuted(contact || config.ownerPhone);
       const created = await createTask({
         text: texto,
         remindAt: when.toISOString(),
         to: contact || config.ownerPhone,
         subagentId,
+        ...(bypassPause ? { bypassPause: true } : {}),
         ...(estimatedMinutes ? { estimatedMinutes } : {}),
         ...(recValida ? { recurrence: recValida } : {}),
       });
@@ -961,7 +966,10 @@ async function executeTool(
         ? ` Estimo ~${estimatedMinutes} min — me avise se quiser ajustar.`
         : '';
       const rec = recValida ? ` Recorrência: ${recValida.replace('_', ' ')}.` : '';
-      return `Lembrete criado para ${quandoBr}: "${texto}".${rec}${dur}`;
+      const pauseNote = bypassPause
+        ? ' A pausa geral continua ativa, mas este novo lembrete está autorizado a tocar.'
+        : '';
+      return `Lembrete criado para ${quandoBr}: "${texto}".${rec}${dur}${pauseNote}`;
     }
 
     if (call.function.name === 'listar_lembretes') {
