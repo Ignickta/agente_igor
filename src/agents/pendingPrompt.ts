@@ -265,8 +265,33 @@ export async function handlePendingAnswer(
   contact: string,
   text: string
 ): Promise<PromptOutcome | null> {
-  const prompt = await getPendingPrompt(contact);
-  if (!prompt) return null;
+  const storedPrompt = await getPendingPrompt(contact);
+  if (!storedPrompt) return null;
+
+  // O painel, o WhatsApp e a agenda podem concluir um alvo enquanto uma
+  // pergunta antiga ainda está aberta. Antes de interpretar "sim"/"não",
+  // descarta alvos que já foram concluídos em qualquer uma das superfícies.
+  const liveTargets: PendingPromptTarget[] = [];
+  for (const target of storedPrompt.targets) {
+    const [item, task] = await Promise.all([
+      target.agendaItemId ? getAgendaItem(target.agendaItemId) : null,
+      target.taskId ? getTask(target.taskId) : null,
+    ]);
+    const agendaDone = Boolean(item && item.status === 'done');
+    const taskDone = Boolean(task && (task.done || task.completedAt));
+    if (!agendaDone && !taskDone) liveTargets.push(target);
+  }
+  if (liveTargets.length === 0) {
+    await clearPendingPrompt(contact);
+    return null;
+  }
+  const prompt: PendingPrompt = {
+    ...storedPrompt,
+    targets: liveTargets.map((target, index) => ({ ...target, index: index + 1 })),
+  };
+  if (liveTargets.length !== storedPrompt.targets.length) {
+    await setPendingPrompt(prompt);
+  }
 
   const answer = await interpretAnswer(prompt, text);
   // Sem interpretação utilizável, a pergunta continua no ar e a mensagem segue
