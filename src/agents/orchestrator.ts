@@ -207,6 +207,19 @@ export async function generateDailySchedule(
       const pb = taskPlans.get(b.id)?.priority ?? 3;
       return pa - pb || a.createdAt - b.createdAt;
     });
+    // Estimativas independentes são feitas em paralelo. Fazer uma chamada por
+    // vez fazia planejamentos maiores ultrapassarem o timeout do painel.
+    const aiEstimates = new Map<string, number | undefined>();
+    await Promise.all(
+      sorted.map(async (task) => {
+        const manual = taskPlans.get(task.id)?.estimatedMinutes;
+        if (manual && manual > 0) return;
+        aiEstimates.set(
+          task.id,
+          task.estimatedMinutes || (await estimateDurationMinutes(task.text, 'task'))
+        );
+      })
+    );
     let cursor = dayStart;
     let plannedMinutes = 0;
 
@@ -214,7 +227,7 @@ export async function generateDailySchedule(
       const plan = taskPlans.get(task.id);
       // Zero/ausente significa "A definir (IA)". Reaproveita a estimativa já
       // calculada na criação da tarefa e, nas antigas, consulta o estimador.
-      const aiEstimate = task.estimatedMinutes || (await estimateDurationMinutes(task.text, 'task'));
+      const aiEstimate = aiEstimates.get(task.id);
       const duration = Math.min(
         480,
         Math.max(15, plan?.estimatedMinutes && plan.estimatedMinutes > 0 ? plan.estimatedMinutes : aiEstimate || 45)
