@@ -136,7 +136,13 @@ export async function learnUserPatterns(days = 28): Promise<string> {
 export async function generateDailySchedule(
   date = dayKey(),
   force = false,
-  opts: { startTime?: string; endTime?: string; maxMinutes?: number; taskIds?: string[] } = {}
+  opts: {
+    startTime?: string;
+    endTime?: string;
+    maxMinutes?: number;
+    taskIds?: string[];
+    tasks?: { id: string; priority?: number; estimatedMinutes?: number }[];
+  } = {}
 ): Promise<AgendaItem[]> {
   // F10: traz os eventos do Google Calendar ANTES de planejar — eles entram
   // como itens fixos e o modelo encaixa as tarefas em volta. Best-effort.
@@ -148,13 +154,18 @@ export async function generateDailySchedule(
   // bloco (o "escolho tudo ou só alguns"). Sem lista = comportamento antigo:
   // todas as pendentes do dia. Uma lista vazia também cai no "todas" (o front
   // manda undefined quando quer tudo).
-  const selected = opts.taskIds && opts.taskIds.length > 0 ? new Set(opts.taskIds) : null;
+  const taskPlans = new Map((opts.tasks || []).map((task) => [task.id, task]));
+  const selectedIds = opts.tasks?.length ? opts.tasks.map((task) => task.id) : opts.taskIds;
+  const selected = selectedIds && selectedIds.length > 0 ? new Set(selectedIds) : null;
 
   // Tarefas pendentes cujo lembrete cai no dia alvo (data LOCAL: remindAt é
   // ISO UTC, e cortar a string colocaria lembretes após as 21h no dia seguinte).
-  const allDayTasks = (await listTasks()).filter(
-    (t) => !t.done && dayKey(new Date(t.remindAt)) === date && (!selected || selected.has(t.id))
-  );
+  const allDayTasks = (await listTasks()).filter((t) => {
+    if (t.done || (selected && !selected.has(t.id))) return false;
+    // O planejador explícito pode escolher qualquer tarefa pendente, inclusive
+    // as sem prazo. O fluxo legado continua limitado às tarefas do dia.
+    return taskPlans.size > 0 || dayKey(new Date(t.remindAt)) === date;
+  });
 
   // Só encaixa o que ainda NÃO está representado na agenda (por taskId ou
   // título igual) — é isso que torna a geração incremental e idempotente.
@@ -173,6 +184,62 @@ export async function generateDailySchedule(
   // sem horário definido sobrariam para o LLM — mas hoje toda task tem hora, então
   // todas entram como bloco fixo aqui e o modelo só preenche eventuais lacunas.
   const fixedFromTasks: AgendaItem[] = [];
+
+  // No planejador, prioridade/duração vêm da escolha do usuário e os horários
+  // são calculados dentro do expediente, contornando blocos já existentes.
+  if (taskPlans.size > 0) {
+    const toMinutes = (time: string) => {
+      const [hour, minute] = time.split(':').map(Number);
+      return hour * 60 + minute;
+    };
+    const toTime = (minutes: number) =>
+      `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+    const dayStart = toMinutes(opts.startTime || '08:00');
+    const dayEnd = toMinutes(opts.endTime || '19:00');
+    const maxMinutes = opts.maxMinutes || dayEnd - dayStart;
+    const occupied = existing
+      .filter((item) => item.status !== 'done')
+      .map((item) => ({ start: toMinutes(item.startTime), end: toMinutes(item.endTime) }))
+      .sort((a, b) => a.start - b.start);
+    const sorted = [...pendingForDay].sort((a, b) => {
+      const pa = taskPlans.get(a.id)?.priority ?? 3;
+      const pb = taskPlans.get(b.id)?.priority ?? 3;
+      return pa - pb || a.createdAt - b.createdAt;
+    });
+    let cursor = dayStart;
+    let plannedMinutes = 0;
+
+    for (const task of sorted) {
+      const plan = taskPlans.get(task.id);
+      const duration = Math.min(480, Math.max(15, plan?.estimatedMinutes || task.estimatedMinutes || 45));
+      if (plannedMinutes + duration > maxMinutes) continue;
+      let start = cursor;
+      for (const block of occupied) {
+        if (start + duration <= block.start) break;
+        if (start < block.end && start + duration > block.start) start = block.end;
+      }
+      if (start + duration > dayEnd) continue;
+      const item = await createAgendaItem({
+        title: task.text,
+        date,
+        startTime: toTime(start),
+        endTime: toTime(start + duration),
+        priority: Math.min(5, Math.max(2, plan?.priority || 3)),
+        type: 'task',
+        createdBy: 'agent',
+        estimatedMinutes: duration,
+        ...(task.subagentId ? { subagentId: task.subagentId } : {}),
+        taskId: task.id,
+      });
+      fixedFromTasks.push(item);
+      occupied.push({ start, end: start + duration });
+      occupied.sort((a, b) => a.start - b.start);
+      cursor = start + duration;
+      plannedMinutes += duration;
+    }
+    return getAgendaForDay(date);
+  }
+
   for (const t of pendingForDay) {
     const startTime = timeKey(new Date(t.remindAt));
     const dur = t.estimatedMinutes && t.estimatedMinutes > 0 ? t.estimatedMinutes : 45;

@@ -638,15 +638,33 @@ adminRouter.post('/agenda/generate', async (req, res) => {
     const date = (req.query.date as string)?.trim() || dayKey();
     const force = req.query.force === 'true';
     const maxMinutesRaw = Number(req.query.maxMinutes);
-    const rawIds = (req.body as Record<string, unknown> | undefined)?.taskIds;
+    const body = req.body as Record<string, unknown> | undefined;
+    const rawIds = body?.taskIds;
     const taskIds = Array.isArray(rawIds)
       ? rawIds.map((id) => String(id)).filter(Boolean)
+      : undefined;
+    const tasks = Array.isArray(body?.tasks)
+      ? body.tasks
+          .map((entry) => {
+            const task = entry as Record<string, unknown>;
+            const id = String(task.id || '').trim();
+            if (!id) return null;
+            const priority = Number(task.priority);
+            const estimatedMinutes = Number(task.estimatedMinutes);
+            return {
+              id,
+              priority: Number.isFinite(priority) ? priority : undefined,
+              estimatedMinutes: Number.isFinite(estimatedMinutes) ? estimatedMinutes : undefined,
+            };
+          })
+          .filter((task): task is NonNullable<typeof task> => task !== null)
       : undefined;
     const items = await generateDailySchedule(date, force, {
       startTime: (req.query.startTime as string) || undefined,
       endTime: (req.query.endTime as string) || undefined,
       maxMinutes: Number.isFinite(maxMinutesRaw) && maxMinutesRaw > 0 ? maxMinutesRaw : undefined,
       taskIds,
+      tasks,
     });
     res.json({ date, count: items.length, items });
   } catch (err) {
