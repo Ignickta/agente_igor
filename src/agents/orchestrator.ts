@@ -14,6 +14,7 @@ import {
   updateTask,
 } from '../services/firebase';
 import { AgendaItem, PendingPromptTarget, Task } from '../types';
+import { estimateDurationMinutes } from './estimate';
 import { rememberAsk, isNudgeSuspended } from './pendingPrompt';
 import { calibrationSummary } from './estimate';
 import { syncCalendarRange } from './calendarSync';
@@ -211,7 +212,13 @@ export async function generateDailySchedule(
 
     for (const task of sorted) {
       const plan = taskPlans.get(task.id);
-      const duration = Math.min(480, Math.max(15, plan?.estimatedMinutes || task.estimatedMinutes || 45));
+      // Zero/ausente significa "A definir (IA)". Reaproveita a estimativa já
+      // calculada na criação da tarefa e, nas antigas, consulta o estimador.
+      const aiEstimate = task.estimatedMinutes || (await estimateDurationMinutes(task.text, 'task'));
+      const duration = Math.min(
+        480,
+        Math.max(15, plan?.estimatedMinutes && plan.estimatedMinutes > 0 ? plan.estimatedMinutes : aiEstimate || 45)
+      );
       if (plannedMinutes + duration > maxMinutes) continue;
       let start = cursor;
       for (const block of occupied) {
