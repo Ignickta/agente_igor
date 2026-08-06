@@ -741,6 +741,16 @@ adminRouter.put('/agenda/:id', async (req, res) => {
     }
     await updateAgendaItem(req.params.id, update);
 
+    // Agenda e Tarefas representam o mesmo compromisso quando há taskId.
+    // Concluir/reabrir em qualquer tela precisa manter os dois lados iguais.
+    if (existing.taskId && update.status !== undefined) {
+      if (update.status === 'done') {
+        await markTaskDone(existing.taskId);
+      } else if (update.status === 'pending' && existing.status === 'done') {
+        await updateTask(existing.taskId, { done: false, completedAt: null });
+      }
+    }
+
     // Propaga para o LEMBRETE que originou este bloco: mover/renomear o bloco
     // pelo painel também move/renomeia o lembrete — mesma regra do
     // editar_item_agenda via WhatsApp (evita o lembrete tocar no dia/horário
