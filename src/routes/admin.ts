@@ -12,6 +12,8 @@ import {
   updateTask,
   deleteTask,
   markTaskDone,
+  getDueTasks,
+  getFiredUnconfirmed,
   getMetrics,
   getAgendaForDay,
   getAgendaItem,
@@ -420,6 +422,20 @@ adminRouter.get('/tasks', async (req, res) => {
   }
 
   res.json(tasks);
+});
+
+// Contagem de pendências (atrasadas + disparadas sem confirmação) para o
+// badge do menu. Usa as mesmas queries filtradas do scheduler (`where` no
+// Firestore) em vez de `listTasks()` — evita ler a coleção inteira a cada
+// poll de 2min do painel, que já estourou a cota diária do Firestore antes.
+adminRouter.get('/tasks/pending-count', async (req, res) => {
+  try {
+    const [due, fired] = await Promise.all([getDueTasks(), getFiredUnconfirmed(dayKey())]);
+    res.json({ count: due.length + fired.length });
+  } catch (err) {
+    console.error('[tasks] erro ao contar pendências:', err);
+    res.status(500).json({ error: 'Erro ao contar pendências' });
+  }
 });
 
 // Estatísticas de uso para o dashboard.
