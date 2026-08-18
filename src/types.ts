@@ -52,6 +52,8 @@ export interface Task {
   postponedCount?: number;
   /** Epoch ms de quando o lembrete foi ENVIADO (disparou). null = ainda não. */
   firedAt?: number | null;
+  /** true enquanto um lembrete enviado ainda aguarda confirmação do usuário. */
+  awaitingConfirmation?: boolean;
   /**
    * Epoch ms do último re-lembrete de turno ("ainda pendente: X"). A fila
    * sequencial re-cobra a tarefa ativa no máximo uma vez por turno

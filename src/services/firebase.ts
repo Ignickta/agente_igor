@@ -271,7 +271,10 @@ export async function getDueTasks(): Promise<Task[]> {
  * aprendizado de padrões.
  */
 export async function markTaskDone(id: string): Promise<void> {
-  await tasksCol.doc(id).set({ done: true, completedAt: Date.now() }, { merge: true });
+  await tasksCol.doc(id).set(
+    { done: true, completedAt: Date.now(), awaitingConfirmation: false },
+    { merge: true }
+  );
 }
 
 /**
@@ -280,7 +283,10 @@ export async function markTaskDone(id: string): Promise<void> {
  * deve inflar a contagem de tarefas concluídas nos relatórios.
  */
 export async function markReminderSent(id: string): Promise<void> {
-  await tasksCol.doc(id).set({ done: true }, { merge: true });
+  await tasksCol.doc(id).set(
+    { done: true, completedAt: null, awaitingConfirmation: true },
+    { merge: true }
+  );
 }
 
 /**
@@ -306,7 +312,12 @@ export async function claimDueTask(task: Task): Promise<boolean> {
         });
       } else {
         if (current.done) return false;
-        tx.update(ref, { done: true, firedAt: Date.now() });
+        tx.update(ref, {
+          done: true,
+          completedAt: null,
+          firedAt: Date.now(),
+          awaitingConfirmation: true,
+        });
       }
       return true;
     });
@@ -390,6 +401,20 @@ export async function getFiredUnconfirmed(today: string): Promise<Task[]> {
     .sort((a, b) => a.remindAt.localeCompare(b.remindAt));
 }
 
+/**
+ * Todos os lembretes já enviados que ainda aguardam confirmação.
+ *
+ * O estado explícito mantém esta consulta proporcional apenas às pendências,
+ * sem varrer tarefas concluídas nem limitar o resultado ao dia atual.
+ */
+export async function getAwaitingConfirmationTasks(): Promise<Task[]> {
+  const snap = await tasksCol.where('awaitingConfirmation', '==', true).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .filter((t) => !t.completedAt)
+    .sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+}
+
 /** Todas as tarefas pendentes (done == false), sem filtro de horário. */
 export async function getPendingTasks(): Promise<Task[]> {
   const snap = await tasksCol.where('done', '==', false).get();
@@ -415,7 +440,9 @@ export async function updateTask(
   id: string,
   data: Partial<Omit<Task, 'id' | 'createdAt'>>
 ): Promise<void> {
-  await tasksCol.doc(id).set(data, { merge: true });
+  const normalized = { ...data } as Partial<Task>;
+  if (data.done === false || data.completedAt) normalized.awaitingConfirmation = false;
+  await tasksCol.doc(id).set(normalized, { merge: true });
 }
 
 export async function deleteTask(id: string): Promise<void> {

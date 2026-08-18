@@ -14,6 +14,7 @@ import {
   markTaskDone,
   getDueTasks,
   getFiredUnconfirmed,
+  getAwaitingConfirmationTasks,
   getMetrics,
   getAgendaForDay,
   getAgendaItem,
@@ -430,8 +431,15 @@ adminRouter.get('/tasks', async (req, res) => {
 // poll de 2min do painel, que já estourou a cota diária do Firestore antes.
 adminRouter.get('/tasks/pending-count', async (req, res) => {
   try {
-    const [due, fired] = await Promise.all([getDueTasks(), getFiredUnconfirmed(dayKey())]);
-    res.json({ count: due.length + fired.length });
+    const [due, awaiting, legacyToday] = await Promise.all([
+      getDueTasks(),
+      getAwaitingConfirmationTasks(),
+      // Compatibilidade com lembretes disparados antes da criação do campo
+      // awaitingConfirmation. O recorte diário evita um full scan.
+      getFiredUnconfirmed(dayKey()),
+    ]);
+    const ids = new Set([...due, ...awaiting, ...legacyToday].map((task) => task.id));
+    res.json({ count: ids.size });
   } catch (err) {
     console.error('[tasks] erro ao contar pendências:', err);
     res.status(500).json({ error: 'Erro ao contar pendências' });
