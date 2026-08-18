@@ -382,7 +382,7 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 
 adminRouter.post('/tasks', async (req, res) => {
   try {
-    const { text, remindAt, to, subagentId } = req.body;
+    const { text, remindAt, to, subagentId, priority } = req.body;
     if (!text) {
       return res.status(400).json({ error: 'text é obrigatório' });
     }
@@ -393,6 +393,7 @@ adminRouter.post('/tasks', async (req, res) => {
       hasReminder,
       to: to || config.ownerPhone,
       ...(subagentId ? { subagentId } : {}),
+      ...(priority !== undefined ? { priority: Number(priority) } : {}),
     });
     res.status(201).json(task);
   } catch (err) {
@@ -482,9 +483,10 @@ adminRouter.put('/tasks/:id', async (req, res) => {
   const existing = await getTask(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tarefa não encontrada' });
 
-  const { text, remindAt, done, subagentId, to, hasReminder } = req.body;
+  const { text, remindAt, done, subagentId, to, hasReminder, priority } = req.body;
   const update: Record<string, unknown> = {};
   if (text !== undefined) update.text = text;
+  if (priority !== undefined) update.priority = Number(priority);
   if (hasReminder === false) update.hasReminder = false;
   if (remindAt !== undefined) {
     update.remindAt = remindAt;

@@ -44,6 +44,8 @@ export interface Task {
   createdAt: number;
   /** Duração estimada em minutos (sugerida pelo LLM na criação). */
   estimatedMinutes?: number;
+  /** Prioridade: 2 = alta, 3 = média (padrão), 4 = baixa. Mesma escala da agenda. */
+  priority?: number;
   /** Quando foi concluída (epoch ms), para relatórios/aprendizado. null = não. */
   completedAt?: number | null;
   /** Recorrência: o lembrete se reagenda em vez de morrer ao disparar. null = sem. */
