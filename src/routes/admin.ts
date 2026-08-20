@@ -793,6 +793,11 @@ adminRouter.post('/agenda/generate', async (req, res) => {
     const { items, skipped } = await generateDailySchedule(date, force, {
       startTime: (req.query.startTime as string) || undefined,
       endTime: (req.query.endTime as string) || undefined,
+      // String vazia é intencional: significa "não reservar almoço".
+      ...(req.query.lunchStart !== undefined
+        ? { lunchStart: String(req.query.lunchStart) }
+        : {}),
+      ...(req.query.lunchEnd !== undefined ? { lunchEnd: String(req.query.lunchEnd) } : {}),
       maxMinutes: Number.isFinite(maxMinutesRaw) && maxMinutesRaw > 0 ? maxMinutesRaw : undefined,
       taskIds,
       tasks,

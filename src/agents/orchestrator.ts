@@ -125,6 +125,10 @@ export async function learnUserPatterns(days = 28): Promise<string> {
   }
 }
 
+/** Janela de almoço padrão reservada no planejamento do dia. */
+export const DEFAULT_LUNCH_START = process.env.LUNCH_START || '12:00';
+export const DEFAULT_LUNCH_END = process.env.LUNCH_END || '13:00';
+
 /** Tarefa que o planejador não conseguiu encaixar, e por quê. */
 export interface SkippedTask {
   id: string;
@@ -161,6 +165,9 @@ export async function generateDailySchedule(
     startTime?: string;
     endTime?: string;
     maxMinutes?: number;
+    /** Janela de almoço reservada (HH:mm). Vazio desliga a reserva. */
+    lunchStart?: string;
+    lunchEnd?: string;
     taskIds?: string[];
     tasks?: { id: string; priority?: number; estimatedMinutes?: number }[];
   } = {}
@@ -222,6 +229,20 @@ export async function generateDailySchedule(
       .filter((item) => item.status !== 'done')
       .map((item) => ({ start: toMinutes(item.startTime), end: toMinutes(item.endTime) }))
       .sort((a, b) => a.start - b.start);
+
+    // Almoço entra como espaço ocupado, não como bloco na agenda: o dia não
+    // deve ser planejado por cima dele, mas ele também não é uma tarefa a
+    // confirmar. Passar vazio desliga a reserva.
+    const lunchStart = opts.lunchStart ?? DEFAULT_LUNCH_START;
+    const lunchEnd = opts.lunchEnd ?? DEFAULT_LUNCH_END;
+    if (lunchStart && lunchEnd) {
+      const ini = toMinutes(lunchStart);
+      const fim = toMinutes(lunchEnd);
+      if (Number.isFinite(ini) && Number.isFinite(fim) && fim > ini) {
+        occupied.push({ start: ini, end: fim });
+        occupied.sort((a, b) => a.start - b.start);
+      }
+    }
     // Tarefa com hora marcada não é realocada: o horário é escolha do Igor.
     // Ela vira bloco fixo e entra como espaço ocupado, para o encaixe das
     // demais desviar dela. Sem isso, um lembrete das 15h era jogado para as

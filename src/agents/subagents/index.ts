@@ -421,6 +421,19 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             description:
               'Se true, envia o cronograma pelo WhatsApp além de retornar. Padrão false.',
           },
+          limite_horas: {
+            type: 'number',
+            description:
+              'Quantas horas de trabalho o dia pode receber. Use quando ele responder que ' +
+              'QUER encaixar mais do que coube ("pode esticar", "coloca tudo"): chame de novo ' +
+              'com um limite maior. Padrão = o limite configurado por ele.',
+          },
+          sem_almoco: {
+            type: 'boolean',
+            description:
+              'Se true, não reserva a janela de almoço. Só use se ele disser que não vai ' +
+              'almoçar nesse dia.',
+          },
         },
         required: [],
       },
@@ -1410,8 +1423,13 @@ async function executeTool(
         priority: t.priority ?? 3,
         estimatedMinutes: t.estimatedMinutes ?? 0,
       }));
+      const limiteHoras = Number(args.limite_horas);
       const { items, skipped } = await generateDailySchedule(data, false, {
-        maxMinutes: getMaxDailyWorkMinutes(),
+        maxMinutes:
+          Number.isFinite(limiteHoras) && limiteHoras > 0
+            ? Math.round(limiteHoras * 60)
+            : getMaxDailyWorkMinutes(),
+        ...(args.sem_almoco === true ? { lunchStart: '', lunchEnd: '' } : {}),
         ...(paraEncaixar.length ? { tasks: paraEncaixar } : {}),
       });
       const criados = items.filter((i) => !jaNaAgenda.some((j) => j.id === i.id));
@@ -1422,10 +1440,12 @@ async function executeTool(
         `\n\n(${jaNaAgenda.length} ${jaNaAgenda.length === 1 ? 'bloco já existia' : 'blocos já existiam'}` +
         `; ${criados.length} ${criados.length === 1 ? 'novo encaixado' : 'novos encaixados'} agora.)`;
       // O que não coube precisa ser dito: calado, o dia só "terminava cedo".
+      const horasFora = Math.ceil(skipped.reduce((acc, t) => acc + t.minutes, 0) / 60);
       const fora = skipped.length
         ? `\n\n⚠️ Não couberam no limite de carga do dia (${skipped.length}): ` +
           skipped.map((t) => `${t.title} (${t.minutes}min)`).join('; ') +
-          '. Diga se quer esticar o dia ou passar para amanhã.'
+          `. PERGUNTE a ele se quer encaixar mesmo assim; se ele aceitar, chame ` +
+          `gerar_cronograma de novo com limite_horas maior (precisaria de ~${horasFora}h a mais).`
         : '';
       const overload = await detectOverload(data);
       return overload
