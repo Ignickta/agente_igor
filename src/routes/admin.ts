@@ -32,6 +32,7 @@ import {
   listActions,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
+import { enterPause, leavePause } from '../agents/pause';
 import { generateDailySchedule, advanceTask, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
 import { getConnectionState } from '../services/evolution';
@@ -153,6 +154,41 @@ async function proactiveDiagnosis() {
     blockers,
   };
 }
+
+// Pausa das mensagens proativas — o mesmo estado do "segura tudo aí" do
+// WhatsApp, para o painel poder ligar e desligar sem precisar conversar.
+adminRouter.get('/pause', async (_req, res) => {
+  try {
+    const pause = config.ownerPhone ? await getActivePause(config.ownerPhone) : null;
+    res.json({
+      paused: !!pause,
+      since: pause ? new Date(pause.startedAt).toISOString() : null,
+      reason: pause?.reason ?? null,
+    });
+  } catch (err) {
+    console.error('[pause] erro ao ler estado:', err);
+    res.status(500).json({ error: 'Erro ao ler estado da pausa' });
+  }
+});
+
+adminRouter.post('/pause', async (req, res) => {
+  try {
+    if (!config.ownerPhone) {
+      res.status(400).json({ error: 'OWNER_PHONE não configurado.' });
+      return;
+    }
+    const paused = req.body?.paused === true;
+    // Reusa o mesmo caminho do WhatsApp: o resumo do que ficou parado e a
+    // mensagem de confirmação saem idênticos, venha o pedido de onde vier.
+    const message = paused
+      ? await enterPause(config.ownerPhone, 'Pausado pelo painel')
+      : await leavePause(config.ownerPhone);
+    res.json({ paused, message });
+  } catch (err) {
+    console.error('[pause] erro ao alternar:', err);
+    res.status(500).json({ error: 'Erro ao alterar a pausa' });
+  }
+});
 
 adminRouter.get('/metrics', async (req, res) => {
   try {
