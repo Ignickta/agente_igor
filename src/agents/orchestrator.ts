@@ -3,6 +3,7 @@ import { chat, chatJson, ChatMessage } from '../services/openai';
 import { sendText } from '../services/evolution';
 import {
   listTasks,
+  taskHasReminder,
   listSubagents,
   getAgendaForDay,
   getAgendaInRange,
@@ -221,7 +222,36 @@ export async function generateDailySchedule(
       .filter((item) => item.status !== 'done')
       .map((item) => ({ start: toMinutes(item.startTime), end: toMinutes(item.endTime) }))
       .sort((a, b) => a.start - b.start);
-    const sorted = [...pendingForDay].sort((a, b) => {
+    // Tarefa com hora marcada não é realocada: o horário é escolha do Igor.
+    // Ela vira bloco fixo e entra como espaço ocupado, para o encaixe das
+    // demais desviar dela. Sem isso, um lembrete das 15h era jogado para as
+    // 08:00 pelo planejador.
+    const comHora = pendingForDay.filter(
+      (t) => taskHasReminder(t) && dayKey(new Date(t.remindAt)) === date
+    );
+    for (const t of comHora) {
+      const startTime = timeKey(new Date(t.remindAt));
+      const dur = t.estimatedMinutes && t.estimatedMinutes > 0 ? t.estimatedMinutes : 45;
+      const startMin = toMinutes(startTime);
+      const item = await createAgendaItem({
+        title: t.text,
+        date,
+        startTime,
+        endTime: toTime(Math.min(24 * 60 - 1, startMin + dur)),
+        priority: 1,
+        type: 'task',
+        createdBy: 'user',
+        ...(t.estimatedMinutes ? { estimatedMinutes: t.estimatedMinutes } : {}),
+        ...(t.subagentId ? { subagentId: t.subagentId } : {}),
+        taskId: t.id,
+      });
+      fixedFromTasks.push(item);
+      occupied.push({ start: startMin, end: startMin + dur });
+    }
+    occupied.sort((a, b) => a.start - b.start);
+
+    const comHoraIds = new Set(comHora.map((t) => t.id));
+    const sorted = [...pendingForDay].filter((t) => !comHoraIds.has(t.id)).sort((a, b) => {
       const pa = taskPlans.get(a.id)?.priority ?? 3;
       const pb = taskPlans.get(b.id)?.priority ?? 3;
       return pa - pb || a.createdAt - b.createdAt;

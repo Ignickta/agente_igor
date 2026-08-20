@@ -22,6 +22,7 @@ import {
   updateSubagent,
   unarchiveSharedFact,
 } from '../../services/firebase';
+import { getMaxDailyWorkMinutes } from '../../services/settings';
 import { recordUndo, undoLast } from '../undo';
 import { getProfileCached } from '../maintenance';
 import {
@@ -402,8 +403,12 @@ const ORCHESTRATOR_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'gerar_cronograma',
       description:
-        'Gera (ou mostra) o cronograma do dia a partir das tarefas pendentes e prioridade ' +
-        'calculada, e envia ao Igor. Use quando ele pedir para planejar/montar/ver o dia.',
+        'Monta o cronograma do dia NA AGENDA de verdade, encaixando as tarefas pendentes ' +
+        '(inclusive as sem prazo) nos horários livres, e devolve como ficou. É INCREMENTAL: ' +
+        'o que já está na agenda é preservado e serve de restrição — chamar de novo não ' +
+        'duplica nem apaga nada. Use SEMPRE que ele pedir para planejar/montar/organizar o ' +
+        'dia; nunca escreva um cronograma de cabeça, porque só o que passa por aqui aparece ' +
+        'no painel dele.',
       parameters: {
         type: 'object',
         properties: {
@@ -718,6 +723,13 @@ Estilo (braço direito do Igor — consultivo, não tagarela):
   despeje o manual inteiro de uma vez.
 - LIMITE DE TAMANHO: sua resposta final deve ter no máximo 480 caracteres. Comece pela
   decisão, confirmação ou resposta útil; se precisar aprofundar, pare e pergunte antes.
+- CRONOGRAMA SÓ PELA FERRAMENTA: planejar/organizar/montar o dia significa chamar
+  gerar_cronograma. NUNCA escreva você mesmo uma sequência de horários ("8h faça X,
+  9h faça Y") — o que você escreve na conversa não existe na agenda do Igor, e ele
+  descobre isso ao abrir o painel e ver o dia vazio. Antes de sugerir qualquer
+  horário, chame a ferramenta e RELATE o que ela devolveu. Ela é incremental e
+  informa quantos blocos já existiam: se o dia já estava montado, diga isso em vez
+  de fingir que acabou de montar, e não organize de novo sem ele pedir.
 - EXCEÇÃO — LISTA COMPLETA PEDIDA: quando o Igor pedir explicitamente TUDO ("mostre
   todos", "lista completa", "quero ver o resto", ou um "sim" respondendo à sua oferta de
   mostrar o restante), liste TODOS os itens que a ferramenta devolveu, um por linha, e
@@ -1379,8 +1391,36 @@ async function executeTool(
         await sendDailySchedule(data);
         return `Cronograma de ${data} gerado e enviado pelo WhatsApp.`;
       }
-      const { items, skipped } = await generateDailySchedule(data);
+      // Antes: a chamada sem tarefas caía no fluxo legado, que só criava bloco
+      // para lembrete com hora marcada NO dia. Com a lista toda sem prazo, nada
+      // era criado, o modelo respondia um cronograma inventado e o painel do
+      // Igor continuava vazio. Agora as pendentes vão explicitamente para o
+      // planejador, que as encaixa nos buracos da agenda existente.
+      const jaNaAgenda = await getAgendaForDay(data);
+      // Só entram as sem prazo e as marcadas para ESTE dia: uma tarefa agendada
+      // para sexta não pode ser puxada para hoje só porque ele pediu o dia.
+      const pendentes = (await listTasks()).filter(
+        (t) =>
+          !t.completedAt &&
+          !t.done &&
+          (!taskHasReminder(t) || dayKey(new Date(t.remindAt)) === data)
+      );
+      const paraEncaixar = pendentes.map((t) => ({
+        id: t.id,
+        priority: t.priority ?? 3,
+        estimatedMinutes: t.estimatedMinutes ?? 0,
+      }));
+      const { items, skipped } = await generateDailySchedule(data, false, {
+        maxMinutes: getMaxDailyWorkMinutes(),
+        ...(paraEncaixar.length ? { tasks: paraEncaixar } : {}),
+      });
+      const criados = items.filter((i) => !jaNaAgenda.some((j) => j.id === i.id));
       const base = formatSchedule(items, data);
+      // Sem esta linha o modelo não sabe distinguir o que ele acabou de criar do
+      // que já estava lá, e acaba anunciando como novo um dia inteiro antigo.
+      const resumo =
+        `\n\n(${jaNaAgenda.length} ${jaNaAgenda.length === 1 ? 'bloco já existia' : 'blocos já existiam'}` +
+        `; ${criados.length} ${criados.length === 1 ? 'novo encaixado' : 'novos encaixados'} agora.)`;
       // O que não coube precisa ser dito: calado, o dia só "terminava cedo".
       const fora = skipped.length
         ? `\n\n⚠️ Não couberam no limite de carga do dia (${skipped.length}): ` +
@@ -1388,7 +1428,9 @@ async function executeTool(
           '. Diga se quer esticar o dia ou passar para amanhã.'
         : '';
       const overload = await detectOverload(data);
-      return overload ? `${base}${fora}\n\n${overload}` : `${base}${fora}`;
+      return overload
+        ? `${base}${resumo}${fora}\n\n${overload}`
+        : `${base}${resumo}${fora}`;
     }
 
     if (call.function.name === 'realocar_agenda') {
