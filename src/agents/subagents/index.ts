@@ -64,6 +64,9 @@ import { proactiveMuted } from '../pause';
 export const ORCHESTRATOR_NAME = 'Agenda / Orquestrador';
 
 /** Ferramentas que o agente pode chamar por conta própria (function calling). */
+/** Teto de itens devolvidos por listar_lembretes; o excedente é anunciado, nunca omitido em silêncio. */
+const LIST_TASKS_LIMIT = 60;
+
 const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
@@ -976,12 +979,16 @@ async function executeTool(
       const data = String(args.data || '').trim();
       const status = String(args.status || 'pendentes').trim();
       const all = await listTasks();
+      // Pendente = o Igor ainda não confirmou que fez (completedAt vazio). Não
+      // dá para filtrar por `done`: esse campo diz que o lembrete DISPAROU no
+      // WhatsApp, não que foi concluído — usá-lo sumia com tudo que tocou e
+      // ficou sem resposta, que é justamente o que ele mais precisa ver.
       const byStatus =
         status === 'disparados_hoje'
           ? all.filter(
               (t) => t.done && !t.completedAt && dayKey(new Date(t.remindAt)) === dayKey()
             )
-          : all.filter((t) => !t.done);
+          : all.filter((t) => !t.completedAt);
       const filtered = data
         ? byStatus.filter((t) => dayKey(new Date(t.remindAt)) === data)
         : byStatus;
@@ -989,14 +996,18 @@ async function executeTool(
         if (status === 'disparados_hoje') return 'Nenhum lembrete disparado hoje sem confirmação.';
         return data ? `Sem lembretes pendentes em ${data}.` : 'Sem lembretes pendentes.';
       }
-      return filtered
-        .slice(0, 30)
-        .map((t) => {
-          const d = new Date(t.remindAt);
-          const rec = t.recurrence ? ` (${t.recurrence.replace('_', ' ')})` : '';
-          return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}${rec}`;
-        })
-        .join('\n');
+      const shown = filtered.slice(0, LIST_TASKS_LIMIT);
+      const linhas = shown.map((t) => {
+        const d = new Date(t.remindAt);
+        const rec = t.recurrence ? ` (${t.recurrence.replace('_', ' ')})` : '';
+        const tocou = t.done && !t.completedAt ? ' [já disparou, sem confirmação]' : '';
+        return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}${rec}${tocou}`;
+      });
+      // O corte precisa ser DITO: calado, o agente listava o pedaço e afirmava
+      // que era tudo.
+      const restante = filtered.length - shown.length;
+      const rodape = restante > 0 ? `\n(+${restante} não listados — total de ${filtered.length})` : '';
+      return `Total: ${filtered.length}\n${linhas.join('\n')}${rodape}`;
     }
 
     if (call.function.name === 'editar_lembrete') {
