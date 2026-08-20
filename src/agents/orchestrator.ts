@@ -124,6 +124,25 @@ export async function learnUserPatterns(days = 28): Promise<string> {
   }
 }
 
+/** Tarefa que o planejador não conseguiu encaixar, e por quê. */
+export interface SkippedTask {
+  id: string;
+  title: string;
+  minutes: number;
+  /** 'limite' = estourou o teto de carga do dia; 'expediente' = passou do fim útil. */
+  reason: 'limite' | 'expediente';
+}
+
+/**
+ * Resultado do planejamento. `skipped` existe para o descarte nunca ser
+ * silencioso: sem ele, a agenda simplesmente acabava cedo e as tarefas que não
+ * couberam sumiam sem aviso.
+ */
+export interface ScheduleResult {
+  items: AgendaItem[];
+  skipped: SkippedTask[];
+}
+
 /**
  * Gera o cronograma do dia a partir das `tasks` pendentes de hoje + itens já na
  * `agenda`, com prioridade calculada pelo agente.
@@ -144,7 +163,7 @@ export async function generateDailySchedule(
     taskIds?: string[];
     tasks?: { id: string; priority?: number; estimatedMinutes?: number }[];
   } = {}
-): Promise<AgendaItem[]> {
+): Promise<ScheduleResult> {
   // F10: traz os eventos do Google Calendar ANTES de planejar — eles entram
   // como itens fixos e o modelo encaixa as tarefas em volta. Best-effort.
   await syncCalendarRange(date, date);
@@ -222,9 +241,16 @@ export async function generateDailySchedule(
     );
     let cursor = dayStart;
     let plannedMinutes = 0;
+    const skipped: SkippedTask[] = [];
+    // Prioridade a partir da qual o dia já está cheio. `sorted` vem em ordem de
+    // prioridade, então continuar tentando aproveita o espaço que sobrou com
+    // tarefas curtas — mas só as da MESMA faixa: sem isso, uma "baixa" de 20min
+    // furava a fila de uma "alta" de 2h que acabara de ser descartada.
+    let blockedPriority: number | null = null;
 
     for (const task of sorted) {
       const plan = taskPlans.get(task.id);
+      const priority = plan?.priority ?? 3;
       // Zero/ausente significa "A definir (IA)". Reaproveita a estimativa já
       // calculada na criação da tarefa e, nas antigas, consulta o estimador.
       const aiEstimate = aiEstimates.get(task.id);
@@ -232,13 +258,25 @@ export async function generateDailySchedule(
         480,
         Math.max(15, plan?.estimatedMinutes && plan.estimatedMinutes > 0 ? plan.estimatedMinutes : aiEstimate || 45)
       );
-      if (plannedMinutes + duration > maxMinutes) continue;
+      if (blockedPriority !== null && priority > blockedPriority) {
+        skipped.push({ id: task.id, title: task.text, minutes: duration, reason: 'limite' });
+        continue;
+      }
+      if (plannedMinutes + duration > maxMinutes) {
+        blockedPriority = priority;
+        skipped.push({ id: task.id, title: task.text, minutes: duration, reason: 'limite' });
+        continue;
+      }
       let start = cursor;
       for (const block of occupied) {
         if (start + duration <= block.start) break;
         if (start < block.end && start + duration > block.start) start = block.end;
       }
-      if (start + duration > dayEnd) continue;
+      if (start + duration > dayEnd) {
+        blockedPriority = priority;
+        skipped.push({ id: task.id, title: task.text, minutes: duration, reason: 'expediente' });
+        continue;
+      }
       const item = await createAgendaItem({
         title: task.text,
         date,
@@ -257,7 +295,7 @@ export async function generateDailySchedule(
       cursor = start + duration;
       plannedMinutes += duration;
     }
-    return getAgendaForDay(date);
+    return { items: await getAgendaForDay(date), skipped };
   }
 
   for (const t of pendingForDay) {
@@ -291,7 +329,7 @@ export async function generateDailySchedule(
   // modelo para distribuir horários, justamente porque era ele quem realocava as
   // tarefas para a manhã e ignorava o horário pedido.
   void fixedFromTasks;
-  return getAgendaForDay(date);
+  return { items: await getAgendaForDay(date), skipped: [] };
 }
 
 // ===================== F8: detector de procrastinação =====================
@@ -561,7 +599,7 @@ export async function sendDailySchedule(date = dayKey(), carriedOver: Task[] = [
     console.log('[orchestrator] tudo pausado — cronograma do dia não enviado.');
     return;
   }
-  const items = await generateDailySchedule(date);
+  const { items } = await generateDailySchedule(date);
 
   // O que sobrou de ontem entra como PERGUNTA, não como agenda: soltamos essas
   // tarefas do horário na liberação das 07:00, e é o Igor quem decide se elas

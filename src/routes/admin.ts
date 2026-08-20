@@ -685,14 +685,14 @@ adminRouter.post('/agenda/generate', async (req, res) => {
           })
           .filter((task): task is NonNullable<typeof task> => task !== null)
       : undefined;
-    const items = await generateDailySchedule(date, force, {
+    const { items, skipped } = await generateDailySchedule(date, force, {
       startTime: (req.query.startTime as string) || undefined,
       endTime: (req.query.endTime as string) || undefined,
       maxMinutes: Number.isFinite(maxMinutesRaw) && maxMinutesRaw > 0 ? maxMinutesRaw : undefined,
       taskIds,
       tasks,
     });
-    res.json({ date, count: items.length, items });
+    res.json({ date, count: items.length, items, skipped });
   } catch (err) {
     console.error('[agenda] erro ao gerar cronograma:', err);
     res.status(500).json({ error: 'Erro ao organizar agenda' });

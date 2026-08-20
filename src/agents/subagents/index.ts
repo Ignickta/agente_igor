@@ -1379,10 +1379,16 @@ async function executeTool(
         await sendDailySchedule(data);
         return `Cronograma de ${data} gerado e enviado pelo WhatsApp.`;
       }
-      const items = await generateDailySchedule(data);
+      const { items, skipped } = await generateDailySchedule(data);
       const base = formatSchedule(items, data);
+      // O que não coube precisa ser dito: calado, o dia só "terminava cedo".
+      const fora = skipped.length
+        ? `\n\n⚠️ Não couberam no limite de carga do dia (${skipped.length}): ` +
+          skipped.map((t) => `${t.title} (${t.minutes}min)`).join('; ') +
+          '. Diga se quer esticar o dia ou passar para amanhã.'
+        : '';
       const overload = await detectOverload(data);
-      return overload ? `${base}\n\n${overload}` : base;
+      return overload ? `${base}${fora}\n\n${overload}` : `${base}${fora}`;
     }
 
     if (call.function.name === 'realocar_agenda') {
