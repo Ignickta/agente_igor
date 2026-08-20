@@ -28,7 +28,12 @@ import {
 import { routeByEmbedding, hintFrom } from '../agents/embeddingRouter';
 import { realDurationMinutes } from '../agents/estimate';
 import { CLAIMS_ACTION_REGEX } from '../agents/subagents';
-import { compactWhatsAppReply, MAX_WHATSAPP_REPLY_CHARS } from '../agents/replyFormat';
+import {
+  compactWhatsAppReply,
+  splitWhatsAppReply,
+  MAX_REPLY_PARTS,
+  MAX_WHATSAPP_REPLY_CHARS,
+} from '../agents/replyFormat';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import {
   weekRange,
@@ -290,6 +295,54 @@ function suiteWhatsAppReplyLength(): void {
   const compact = compactWhatsAppReply(long);
   check('resposta-curta', 'corta resposta longa no limite técnico', compact.length <= MAX_WHATSAPP_REPLY_CHARS);
   check('resposta-curta', 'indica que a resposta foi encurtada', compact.endsWith('…'));
+
+  // Listar pendências não é prolixidade: a lista inteira É a resposta certa.
+  const itens = [
+    'Estudar inglês',
+    'Conversar inglês',
+    'Colocar valores no asaas. Tanto custo quanto arrecadações',
+    'Agendar revisão',
+    'Ver vídeo para por em prática',
+    'Lançar pedidos do arroz',
+    'Lançar pedidos do óleo e enviar carga pra vandilson',
+    'Organizar Chips',
+    'Bot não mostra todos os lembretes',
+    'Entender pq não tá mais enviando msg',
+    'Entender pq aqui só tá indo até 13 hora',
+    'Testar criação de conteúdo editorial para o blog',
+    'Comprar registro',
+    'Colocar os dados do Google ads de finanças',
+    'Melhorar blog de finanças',
+    'Inverter aqui prioridade',
+  ];
+  const lista = `Segue a lista completa:\n${itens.map((t) => `• ${t}`).join('\n')}`;
+  const partes = splitWhatsAppReply(lista);
+  check('lista-completa', 'lista longa vira mais de uma mensagem', partes.length > 1);
+  check(
+    'lista-completa',
+    'cada mensagem respeita o limite técnico',
+    partes.every((p) => p.length <= MAX_WHATSAPP_REPLY_CHARS)
+  );
+  check('lista-completa', 'nenhum item é cortado no meio', !partes.join('\n').includes('…'));
+  check(
+    'lista-completa',
+    'entrega todos os itens da lista',
+    itens.every((t) => partes.some((p) => p.includes(t)))
+  );
+  check('lista-completa', 'resposta curta continua em uma mensagem só', splitWhatsAppReply(short).length === 1);
+  check(
+    'lista-completa',
+    'prosa longa não vira enxurrada de mensagens',
+    splitWhatsAppReply(long).length === 1
+  );
+  const listona = `Pendências:\n${Array.from({ length: 300 }, (_, i) => `• Tarefa número ${i + 1}`).join('\n')}`;
+  const muitas = splitWhatsAppReply(listona);
+  check('lista-completa', 'respeita o teto de mensagens', muitas.length <= MAX_REPLY_PARTS);
+  check(
+    'lista-completa',
+    'avisa quantos itens ficaram de fora',
+    /e mais \d+ itens/.test(muitas[muitas.length - 1])
+  );
 }
 
 // ===================== Suíte B: atalho "feito" =====================
