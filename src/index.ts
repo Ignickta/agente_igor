@@ -7,7 +7,7 @@ import { extractFromImage, extractFromPdf } from './services/vision';
 import { sendText, sendAudio } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
-import { compactWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
+import { splitWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { isPauseRequest, isResumeRequest, enterPause, leavePause } from './agents/pause';
 import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
@@ -241,21 +241,26 @@ async function handleResolvedText(
   try {
     const { reply } = await handleMessage(from, text, isAudio, quotedText);
     if (!reply) return;
-    const conciseReply = compactWhatsAppReply(reply);
+    // Uma mensagem no caso normal; várias quando a resposta é uma listagem que
+    // não cabe no limite — assim nenhum item chega cortado pela metade.
+    const parts = splitWhatsAppReply(reply);
 
     // Por padrão respondemos em TEXTO, inclusive para mensagens de áudio (que
     // são transcritas na entrada). Só geramos áudio (TTS) quando o usuário pediu
     // explicitamente nesta mensagem; nesse caso o texto vai junto como registro.
     if (audioRequested) {
       try {
-        const audioBase64 = await textToSpeechBase64(conciseReply);
+        const audioBase64 = await textToSpeechBase64(parts.join('\n'));
         await sendAudio(from, audioBase64);
       } catch (ttsErr) {
         console.error('[webhook] TTS falhou, enviando só texto:', ttsErr);
       }
     }
-    // Texto com pequeno "delay" para exibir "digitando..." de forma natural.
-    await sendText(from, conciseReply, 1200);
+    // Texto com pequeno "delay" para exibir "digitando..." de forma natural. Os
+    // blocos seguintes usam delay curto: já está claro que é a mesma resposta.
+    for (let i = 0; i < parts.length; i += 1) {
+      await sendText(from, parts[i], i === 0 ? 1200 : 400);
+    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('[webhook] falha ao gerar/enviar resposta:', errMsg);
