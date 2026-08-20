@@ -8,6 +8,7 @@ import {
   deleteSubagent,
   createTask,
   listTasks,
+  getActivePause,
   getTask,
   updateTask,
   deleteTask,
@@ -79,11 +80,79 @@ adminRouter.get('/health', async (_req, res) => {
       evolutionConnected: connectionState === 'open',
       lastMessageProcessedAt: getLastMessageProcessedAt(),
       recentErrors: getRecentErrors(),
+      proactive: await proactiveDiagnosis(),
     });
   } catch (err) {
     res.status(500).json({ error: 'Falha ao obter status de saúde do backend' });
   }
 });
+
+/**
+ * Por que o agente está (ou não está) mandando mensagem por conta própria.
+ *
+ * Cada gate abaixo silencia TODAS as proativas e nenhum deles aparecia em lugar
+ * nenhum: do lado de fora, um agente pausado é indistinguível de um agente
+ * quebrado. A pausa em especial não expira — só sai com "pode voltar" — então
+ * pode durar semanas sem qualquer sinal.
+ */
+async function proactiveDiagnosis() {
+  const settings = effectiveSettings();
+  const pause = config.ownerPhone ? await getActivePause(config.ownerPhone) : null;
+  const tasks = await listTasks();
+  const pendentes = tasks.filter((t) => !t.completedAt);
+  const comPrazo = pendentes.filter((t) => taskHasReminder(t));
+  const comProjeto = pendentes.filter((t) => !!t.subagentId);
+
+  const blockers: string[] = [];
+  if (!config.proactiveNotifications) {
+    blockers.push('PROACTIVE_NOTIFICATIONS está "off" no ambiente: nenhuma proativa sai.');
+  }
+  if (!config.ownerPhone) blockers.push('OWNER_PHONE não configurado: não há para quem enviar.');
+  if (pause) {
+    const desde = new Date(pause.startedAt).toISOString();
+    blockers.push(
+      `Tudo pausado desde ${desde}${pause.reason ? ` (pedido: "${pause.reason}")` : ''}. ` +
+        'A pausa não expira sozinha — mande "pode voltar" no WhatsApp.'
+    );
+  }
+  const desligadas = Object.entries(settings.notifications)
+    .filter(([, v]) => !v.enabled)
+    .map(([k]) => k);
+  if (desligadas.length) {
+    blockers.push(`Notificações desligadas nas configurações: ${desligadas.join(', ')}.`);
+  }
+  // Sem gate ativo, o silêncio costuma ser falta de matéria-prima: lembrete só
+  // dispara com prazo, e a proatividade dos subagentes só olha tarefa que tem
+  // projeto. Uma lista inteira "sem prazo" e "sem projeto" não gera nada.
+  if (blockers.length === 0) {
+    if (pendentes.length === 0) {
+      blockers.push('Não há tarefas pendentes: não existe o que cobrar.');
+    } else if (comPrazo.length === 0) {
+      blockers.push(
+        `Nenhuma das ${pendentes.length} tarefas pendentes tem prazo: lembrete só dispara com ` +
+          'data/hora marcada, então nada vence e nada é cobrado.'
+      );
+    }
+    if (comProjeto.length === 0 && pendentes.length > 0) {
+      blockers.push(
+        'Nenhuma tarefa pendente está ligada a um projeto: a verificação proativa das 09:30 ' +
+          'percorre os subagentes e ignora tarefas sem projeto.'
+      );
+    }
+  }
+
+  return {
+    enabled: config.proactiveNotifications && !!config.ownerPhone,
+    paused: !!pause,
+    pausedSince: pause ? new Date(pause.startedAt).toISOString() : null,
+    pauseReason: pause?.reason ?? null,
+    notifications: settings.notifications,
+    pendingTasks: pendentes.length,
+    pendingWithReminder: comPrazo.length,
+    pendingWithProject: comProjeto.length,
+    blockers,
+  };
+}
 
 adminRouter.get('/metrics', async (req, res) => {
   try {
