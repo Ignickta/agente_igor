@@ -4,6 +4,7 @@ import { config } from '../../config';
 import {
   createTask,
   listTasks,
+  taskHasReminder,
   getTask,
   updateTask,
   deleteTask,
@@ -717,6 +718,13 @@ Estilo (braço direito do Igor — consultivo, não tagarela):
   despeje o manual inteiro de uma vez.
 - LIMITE DE TAMANHO: sua resposta final deve ter no máximo 480 caracteres. Comece pela
   decisão, confirmação ou resposta útil; se precisar aprofundar, pare e pergunte antes.
+- EXCEÇÃO — LISTA COMPLETA PEDIDA: quando o Igor pedir explicitamente TUDO ("mostre
+  todos", "lista completa", "quero ver o resto", ou um "sim" respondendo à sua oferta de
+  mostrar o restante), liste TODOS os itens que a ferramenta devolveu, um por linha, e
+  ignore o limite de 480 — a entrega é quebrada em várias mensagens automaticamente.
+  NÃO pagine de novo, não ofereça "quer ver o resto?" pela segunda vez e não prometa
+  mandar em blocos: é só listar. Antes de listar, confira o "Total:" que a ferramenta
+  informou e entregue essa quantidade exata.
 - Formatação a serviço da clareza: listas só quando há itens de verdade; senão, frases.
   Nada de encher de bullets nem de negrito decorativo.
 - NUNCA FUNDA ITENS DISTINTOS PARA CABER NO LIMITE. Tarefas, lembretes e eventos são
@@ -726,7 +734,8 @@ Estilo (braço direito do Igor — consultivo, não tagarela):
   uma tarefa que não existe e ele não consegue mais casar com a lista dele. Se não couber,
   encurte de outro jeito: mostre os 3-4 mais relevantes, cada um inteiro, e diga quantos
   ficaram de fora ("+6 pendentes, quer ver o resto?"). Melhor listar menos itens completos
-  do que todos espremidos.
+  do que todos espremidos. Isso vale para a PRIMEIRA resposta; se ele pedir o resto,
+  vale a exceção acima e você lista tudo.
 - O Igor pode escrever ou mandar áudio; áudios já chegam transcritos. Trate-os como
   mensagens normais. NUNCA diga que não consegue ouvir ou processar áudios.${
     fromAudio ? '\n- A mensagem atual foi enviada por áudio (já transcrita).' : ''
@@ -1001,7 +1010,10 @@ async function executeTool(
         const d = new Date(t.remindAt);
         const rec = t.recurrence ? ` (${t.recurrence.replace('_', ' ')})` : '';
         const tocou = t.done && !t.completedAt ? ' [já disparou, sem confirmação]' : '';
-        return `- id: ${t.id} | ${dayKey(d)} ${timeKey(d)} | ${t.text}${rec}${tocou}`;
+        // Tarefa sem prazo guarda em remindAt o instante da criação: mostrar
+        // isso como horário faz o agente afirmar um prazo que não existe.
+        const quando = taskHasReminder(t) ? `${dayKey(d)} ${timeKey(d)}` : 'sem prazo';
+        return `- id: ${t.id} | ${quando} | ${t.text}${rec}${tocou}`;
       });
       // O corte precisa ser DITO: calado, o agente listava o pedaço e afirmava
       // que era tudo.

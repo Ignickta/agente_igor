@@ -8,6 +8,7 @@ import {
   recordMessage,
   recordRouteMiss,
   listTasks,
+  taskHasReminder,
   createTask,
   updateAgendaItem,
   getTask,
@@ -296,21 +297,31 @@ export function postponeHasSpecificTarget(text: string): boolean {
   return (hasSpecificTime && !isPlusOneHour) || hasSpecificDay;
 }
 
+/** Teto do atalho de listagem. Acima disso o agente aponta o painel em vez de despejar tudo. */
+const SHORTCUT_LIST_LIMIT = 40;
+
 async function tryNaturalTaskCommand(contact: string, text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
   if (lower.includes('?')) return null;
 
   if (/\b(lista|liste|mostra|mostrar|quais)\b.*\b(pend[eê]ncias?|pendentes?|tarefas?|lembretes?)\b/i.test(text)) {
-    const tasks = (await listTasks())
+    const pendentes = (await listTasks())
       .filter((t) => !t.completedAt)
-      .sort((a, b) => a.remindAt.localeCompare(b.remindAt))
-      .slice(0, 15);
-    if (tasks.length === 0) return 'Você não tem tarefas ou lembretes pendentes agora.';
+      .sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+    if (pendentes.length === 0) return 'Você não tem tarefas ou lembretes pendentes agora.';
+    const tasks = pendentes.slice(0, SHORTCUT_LIST_LIMIT);
     const linhas = tasks.map((t) => {
       const status = t.done ? 'tocou sem confirmação' : 'pendente';
-      return `• ${t.text} — ${new Date(t.remindAt).toLocaleString('pt-BR', { timeZone: config.timezone })} (${status})`;
+      // Tarefa sem prazo guarda em remindAt a hora em que foi criada; imprimir
+      // isso como se fosse prazo faz o agente parecer que inventou horário.
+      const quando = taskHasReminder(t)
+        ? new Date(t.remindAt).toLocaleString('pt-BR', { timeZone: config.timezone })
+        : 'sem prazo';
+      return `• ${t.text} — ${quando} (${status})`;
     });
-    return `📋 *Pendências atuais:*\n${linhas.join('\n')}`;
+    const restante = pendentes.length - tasks.length;
+    const rodape = restante > 0 ? `\n+${restante} não listadas (veja no painel).` : '';
+    return `📋 *Pendências atuais (${pendentes.length}):*\n${linhas.join('\n')}${rodape}`;
   }
 
   if (DONE_REGEX.test(lower)) {

@@ -222,7 +222,7 @@ export async function deleteLegacyFact(
 
 // ===================== Tarefas =====================
 
-function taskHasReminder(task: Task): boolean {
+export function taskHasReminder(task: Task): boolean {
   if (task.hasReminder === false) return false;
   if (task.done || task.firedAt) return true;
   const remindTime = new Date(task.remindAt).getTime();
