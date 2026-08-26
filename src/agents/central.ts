@@ -1,4 +1,4 @@
-import { Subagent } from '../types';
+import { AgendaItem, Subagent, UndoOp } from '../types';
 import { config } from '../config';
 import { chatJson, ChatMessage } from '../services/openai';
 import {
@@ -11,6 +11,8 @@ import {
   taskHasReminder,
   createTask,
   updateAgendaItem,
+  getAgendaItemsByTaskId,
+  getAgendaForDay,
   getTask,
   updateTask,
   markTaskDone,
@@ -300,6 +302,71 @@ export function postponeHasSpecificTarget(text: string): boolean {
 /** Teto do atalho de listagem. Acima disso o agente aponta o painel em vez de despejar tudo. */
 const SHORTCUT_LIST_LIMIT = 40;
 
+/**
+ * Conclui os BLOCOS da agenda ligados a uma Task e devolve o que é preciso para
+ * desfazer os dois lados juntos.
+ *
+ * O atalho de frase natural ("inglês feito") marcava SÓ a Task: o bloco
+ * correspondente do cronograma continuava aberto no painel e nas cobranças do
+ * dia, enquanto responder "sim" a uma cobrança já concluía item e lembrete de
+ * uma vez. A conclusão tem que valer igual venha por qual caminho vier.
+ */
+async function completeLinkedAgenda(
+  taskId: string,
+  taskText: string
+): Promise<{ restore: () => Promise<void>; ops: UndoOp[] }> {
+  let linked: AgendaItem[] = [];
+  try {
+    linked = (await getAgendaItemsByTaskId(taskId)).filter((i) => i.status !== 'done');
+    // Nem todo bloco do cronograma guarda o taskId de origem. Sem esse elo, o
+    // item ficaria aberto do mesmo jeito — então cai para um casamento por
+    // título no dia de hoje. Exige as MESMAS palavras (não um score parcial):
+    // um match frouxo aqui concluiria o bloco errado, que é pior que não fazer
+    // nada.
+    if (linked.length === 0) {
+      const alvo = new Set(normalizeTaskText(taskText));
+      if (alvo.size > 0) {
+        const hoje = await getAgendaForDay(dayKey());
+        linked = hoje.filter((i) => {
+          if (i.status === 'done' || i.taskId) return false;
+          const titulo = new Set(normalizeTaskText(i.title));
+          return (
+            titulo.size === alvo.size && [...alvo].every((w) => titulo.has(w))
+          );
+        });
+      }
+    }
+  } catch (err) {
+    // Best-effort: falha aqui não pode derrubar a conclusão da tarefa em si.
+    console.error('[central] falha ao buscar blocos da agenda da task:', err);
+    return { restore: async () => {}, ops: [] };
+  }
+  for (const item of linked) {
+    try {
+      await updateAgendaItem(item.id, { status: 'done', completedAt: Date.now() });
+    } catch (err) {
+      console.error('[central] falha ao concluir bloco da agenda:', err);
+    }
+  }
+  return {
+    restore: async () => {
+      for (const item of linked) {
+        await updateAgendaItem(item.id, {
+          status: item.status,
+          completedAt: item.completedAt ?? null,
+        });
+      }
+    },
+    ops: linked.map(
+      (item): UndoOp => ({
+        kind: 'agenda.update',
+        id: item.id,
+        data: { status: item.status, completedAt: item.completedAt ?? null },
+      })
+    ),
+  };
+}
+
 async function tryNaturalTaskCommand(contact: string, text: string): Promise<string | null> {
   const lower = text.trim().toLowerCase();
   if (lower.includes('?')) return null;
@@ -342,16 +409,21 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
       }
       for (const task of candidates) {
         await markTaskDone(task.id);
+        const agenda = await completeLinkedAgenda(task.id, task.text);
         recordUndo(
           contact,
           `a conclusão de "${task.text}" por confirmação plural`,
-          () => updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null }),
+          async () => {
+            await updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null });
+            await agenda.restore();
+          },
           [
             {
               kind: 'task.update',
               id: task.id,
               data: { done: task.done, completedAt: task.completedAt ?? null },
             },
+            ...agenda.ops,
           ]
         );
       }
@@ -375,11 +447,22 @@ async function tryNaturalTaskCommand(contact: string, text: string): Promise<str
       return null;
     }
     await markTaskDone(task.id);
+    const agenda = await completeLinkedAgenda(task.id, task.text);
     recordUndo(
       contact,
       `a conclusão de "${task.text}" por frase natural`,
-      () => updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null }),
-      [{ kind: 'task.update', id: task.id, data: { done: task.done, completedAt: task.completedAt ?? null } }]
+      async () => {
+        await updateTask(task.id, { done: task.done, completedAt: task.completedAt ?? null });
+        await agenda.restore();
+      },
+      [
+        {
+          kind: 'task.update',
+          id: task.id,
+          data: { done: task.done, completedAt: task.completedAt ?? null },
+        },
+        ...agenda.ops,
+      ]
     );
     return `✅ Marquei como concluído: *${task.text}*.`;
   }
