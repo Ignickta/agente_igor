@@ -30,6 +30,7 @@ import {
   updateSharedFact,
   deleteSharedFact,
   listActions,
+  listLeads,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
 import { enterPause, leavePause } from '../agents/pause';
@@ -41,7 +42,12 @@ import { handleMessage } from '../agents/central';
 import { embed } from '../services/openai';
 import { cosine } from '../services/memory';
 import { effectiveSettings, updateSettings } from '../services/settings';
-import { ProactiveSettings } from '../services/firebase';
+import {
+  effectiveLeadBotSettings,
+  leadBotConfigurationError,
+  updateLeadBotSettings,
+} from '../services/leadSettings';
+import { LeadBotSettings, ProactiveSettings } from '../services/firebase';
 import { timeKey, parseLocalIso } from '../services/datetime';
 
 export const adminRouter = Router();
@@ -440,6 +446,52 @@ adminRouter.put('/settings', async (req, res) => {
   } catch (err) {
     console.error('[settings] erro ao salvar configurações:', err);
     res.status(500).json({ error: 'Erro ao salvar configurações' });
+  }
+});
+
+// ===================== Atendimento comercial =====================
+
+adminRouter.get('/lead-settings', async (_req, res) => {
+  const settings = effectiveLeadBotSettings();
+  res.json({
+    ...settings,
+    ready: !leadBotConfigurationError(settings),
+    configurationError: leadBotConfigurationError(settings),
+  });
+});
+
+adminRouter.put('/lead-settings', async (req, res) => {
+  try {
+    const body = req.body as Partial<LeadBotSettings>;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: 'Corpo inválido' });
+    }
+
+    const candidate = { ...effectiveLeadBotSettings(), ...body };
+    const validationError = candidate.enabled ? leadBotConfigurationError(candidate) : null;
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    const saved = await updateLeadBotSettings(body);
+    res.json({
+      ...saved,
+      ready: !leadBotConfigurationError(saved),
+      configurationError: leadBotConfigurationError(saved),
+    });
+  } catch (err) {
+    console.error('[lead-settings] erro ao salvar configurações:', err);
+    res.status(500).json({ error: 'Erro ao salvar configurações do atendimento' });
+  }
+});
+
+adminRouter.get('/leads', async (req, res) => {
+  try {
+    const requestedLimit = Number(req.query.limit || 100);
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const leads = await listLeads(requestedLimit);
+    res.json(status ? leads.filter((lead) => lead.status === status) : leads);
+  } catch (err) {
+    console.error('[leads] erro ao listar leads:', err);
+    res.status(500).json({ error: 'Erro ao carregar leads' });
   }
 });
 

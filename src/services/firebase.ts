@@ -41,11 +41,107 @@ const settingsCol = db.collection('settings');
 const actionsCol = db.collection('actions');
 const routeExamplesCol = db.collection('route_examples');
 const pendingPromptsCol = db.collection('pending_prompts');
+const leadConversationsCol = db.collection('lead_conversations');
+const leadsCol = db.collection('leads');
 
 function withoutUndefined<T extends Record<string, unknown>>(data: T): T {
   return Object.fromEntries(
     Object.entries(data).filter(([, value]) => value !== undefined)
   ) as T;
+}
+
+export interface LeadConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
+
+/** Histórico comercial isolado da memória e dos fatos do agente pessoal. */
+export async function getLeadConversation(
+  contact: string,
+  limit = 12
+): Promise<LeadConversationMessage[]> {
+  const snap = await leadConversationsCol
+    .doc(contact)
+    .collection('messages')
+    .orderBy('timestamp', 'desc')
+    .limit(limit)
+    .get();
+  return snap.docs
+    .map((doc) => doc.data() as LeadConversationMessage)
+    .reverse();
+}
+
+export async function saveLeadConversationMessage(
+  contact: string,
+  role: LeadConversationMessage['role'],
+  content: string
+): Promise<void> {
+  await leadConversationsCol.doc(contact).collection('messages').add({
+    role,
+    content,
+    timestamp: Date.now(),
+  });
+}
+
+export type LeadStatus = 'qualifying' | 'qualified' | 'disqualified';
+
+export interface LeadRecord {
+  contact: string;
+  name: string | null;
+  businessType: string | null;
+  city: string | null;
+  status: LeadStatus;
+  disqualificationReason: string | null;
+  createdAt: number;
+  updatedAt: number;
+  qualifiedAt: number | null;
+  notifiedAt: number | null;
+}
+
+export async function getLead(contact: string): Promise<LeadRecord | null> {
+  const doc = await leadsCol.doc(contact).get();
+  return doc.exists ? (doc.data() as LeadRecord) : null;
+}
+
+export async function saveLead(
+  contact: string,
+  data: Pick<
+    LeadRecord,
+    'name' | 'businessType' | 'city' | 'status' | 'disqualificationReason'
+  >
+): Promise<LeadRecord> {
+  const previous = await getLead(contact);
+  const now = Date.now();
+  const record: LeadRecord = {
+    contact,
+    name: data.name,
+    businessType: data.businessType,
+    city: data.city,
+    status: data.status,
+    disqualificationReason: data.disqualificationReason,
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now,
+    qualifiedAt:
+      data.status === 'qualified' ? previous?.qualifiedAt ?? now : previous?.qualifiedAt ?? null,
+    notifiedAt: previous?.notifiedAt ?? null,
+  };
+  await leadsCol.doc(contact).set(record);
+  return record;
+}
+
+export async function markLeadNotified(contact: string): Promise<number> {
+  const notifiedAt = Date.now();
+  await leadsCol.doc(contact).set({ notifiedAt, updatedAt: notifiedAt }, { merge: true });
+  return notifiedAt;
+}
+
+export async function listLeads(limit = 100): Promise<LeadRecord[]> {
+  const snap = await leadsCol
+    .orderBy('updatedAt', 'desc')
+    .limit(Math.max(1, Math.min(200, limit)))
+    .get();
+  return snap.docs.map((doc) => doc.data() as LeadRecord);
 }
 
 // ===================== Subagentes =====================
@@ -998,6 +1094,30 @@ export async function getStoredSettings(): Promise<ProactiveSettings | null> {
 /** Grava (sobrescreve) as configurações de proatividade. */
 export async function saveStoredSettings(data: ProactiveSettings): Promise<void> {
   await settingsCol.doc(SETTINGS_DOC).set(data);
+}
+
+// ===================== Configurações do atendimento comercial =====================
+
+/** Configuração editável do atendente de leads, isolada das preferências pessoais. */
+export interface LeadBotSettings {
+  enabled: boolean;
+  businessName: string;
+  businessContext: string;
+  instructions: string;
+  historyLimit: number;
+  maxMessagesPerHour: number;
+}
+
+const LEAD_SETTINGS_DOC = 'lead_bot';
+
+export async function getStoredLeadBotSettings(): Promise<Partial<LeadBotSettings> | null> {
+  const doc = await settingsCol.doc(LEAD_SETTINGS_DOC).get();
+  if (!doc.exists) return null;
+  return doc.data() as Partial<LeadBotSettings>;
+}
+
+export async function saveStoredLeadBotSettings(data: LeadBotSettings): Promise<void> {
+  await settingsCol.doc(LEAD_SETTINGS_DOC).set({ ...data, updatedAt: Date.now() });
 }
 
 // ===================== Auditoria de ações (undo persistente) =====================

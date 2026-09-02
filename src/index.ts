@@ -10,12 +10,19 @@ import { handleMessage } from './agents/central';
 import { splitWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { isPauseRequest, isResumeRequest, enterPause, leavePause } from './agents/pause';
-import { seedDefaultSubagents, ensureSubagent } from './services/firebase';
+import { markLeadNotified, seedDefaultSubagents, ensureSubagent } from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
 import { recordMessageProcessed, recordError } from './services/status';
 import { loadSettings } from './services/settings';
+import {
+  consumeLeadQuota,
+  isLeadBotReady,
+  loadLeadBotSettings,
+} from './services/leadSettings';
 import { enqueueMessage } from './services/messageBuffer';
+import { handleLeadMessage } from './agents/leads';
+import { IncomingMessage } from './types';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -71,9 +78,14 @@ async function processIncoming(body: unknown): Promise<void> {
   const msg = await parseWebhook(body);
   if (!msg) return;
 
-  // Trava de segurança: só responde a números autorizados (allowlist + dono).
+  // Dono/allowlist preservam o agente pessoal. Qualquer outro contato segue
+  // para o atendimento comercial isolado, quando ele estiver habilitado.
   if (!isAllowed(msg.from)) {
-    console.log(`[webhook] mensagem ignorada de número não autorizado: ${msg.from}`);
+    if (!isLeadBotReady()) {
+      console.log(`[webhook] lead ignorado (atendimento comercial desativado): ${msg.from}`);
+      return;
+    }
+    await processLeadIncoming(msg);
     return;
   }
 
@@ -171,6 +183,74 @@ async function processIncoming(body: unknown): Promise<void> {
   await processInContactQueue(msg.from, () =>
     handleResolvedText(msg.from, text, msg.isAudio, msg.quotedText)
   );
+}
+
+/** Processa leads sem expor nenhuma capacidade ou memória do agente pessoal. */
+async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
+  if (!consumeLeadQuota(msg.from)) {
+    console.warn(`[leads] limite por hora atingido para ${msg.from}`);
+    return;
+  }
+
+  let text = msg.text || msg.caption || '';
+
+  if (msg.isAudio) {
+    if (!msg.audioBase64) {
+      await sendText(msg.from, 'Não consegui ouvir seu áudio. Pode escrever sua mensagem?');
+      return;
+    }
+    try {
+      text = await transcribeAudioBase64(msg.audioBase64);
+    } catch (err) {
+      console.error('[leads] falha ao transcrever áudio:', err);
+      await sendText(msg.from, 'Não consegui ouvir seu áudio. Pode escrever sua mensagem?');
+      return;
+    }
+  } else if (msg.mediaType) {
+    // Não processa anexos de desconhecidos com as ferramentas do agente pessoal.
+    // A legenda ainda pode ser atendida normalmente quando existir.
+    if (!text.trim()) {
+      await sendText(
+        msg.from,
+        'Recebi seu arquivo. Pode me explicar por texto o que você precisa para eu encaminhar corretamente?'
+      );
+      return;
+    }
+  }
+
+  if (!text.trim()) return;
+
+  enqueueMessage(`lead:${msg.from}`, text, (merged) => {
+    processInContactQueue(`lead:${msg.from}`, async () => {
+      const result = await handleLeadMessage(msg.from, merged);
+      const { reply, lead } = result;
+      if (!reply) return;
+      const parts = splitWhatsAppReply(reply);
+      for (let i = 0; i < parts.length; i += 1) {
+        await sendText(msg.from, parts[i], i === 0 ? 1200 : 400);
+      }
+
+      if (lead?.status === 'qualified' && !lead.notifiedAt && config.ownerPhone) {
+        const typeLabel: Record<string, string> = {
+          mercado: 'Mercado',
+          distribuidora: 'Distribuidora',
+          atacadista: 'Atacadista',
+          cesta_basica: 'Empresa de cesta básica',
+        };
+        await sendText(
+          config.ownerPhone,
+          [
+            '🌾 *Novo lead qualificado*',
+            `Nome: ${lead.name}`,
+            `Tipo: ${typeLabel[lead.businessType || ''] || lead.businessType}`,
+            `Cidade: ${lead.city}`,
+            `WhatsApp: ${lead.contact}`,
+          ].join('\n')
+        );
+        await markLeadNotified(lead.contact);
+      }
+    }).catch((err) => console.error('[leads] erro ao processar lote:', err));
+  });
 }
 
 /**
@@ -279,6 +359,9 @@ async function bootstrap(): Promise<void> {
   // Carrega as configurações de proatividade do painel (Firestore) para o
   // overlay em runtime. Sem isso, urgentKeywords/carga/flags caem nos defaults.
   await loadSettings();
+
+  // Carrega o contexto e as instruções comerciais editáveis no painel.
+  await loadLeadBotSettings();
 
   // Inicia jobs proativos (cronograma do dia, lembretes, transições).
   // Em dev local, defina DISABLE_SCHEDULER=1 para não disparar mensagens reais.

@@ -8,6 +8,8 @@ proativas (bom dia, lembretes).
 ## ✨ Funcionalidades
 
 - Recebe mensagens **e áudios** via WhatsApp (Evolution API).
+- Atende **leads no mesmo número**, em um fluxo comercial isolado do agente pessoal.
+- Qualifica leads B2B, registra o resultado no painel e avisa o dono no WhatsApp.
 - **Agente central** identifica o projeto e roteia para o subagente correto (keyword + LLM).
 - Cada **subagente** tem prompt/personalidade própria, carregados dinamicamente do Firebase.
 - **Transcrição de áudio** automática via OpenAI Whisper.
@@ -104,9 +106,18 @@ Preencha o `.env`:
 | `OWNER_PHONE` *(opcional)* | Seu número para mensagens proativas (ex: `5511999999999`) |
 | `ADMIN_TOKEN` *(opcional)* | Token para proteger as rotas `/admin` |
 | `ALLOWED_NUMBERS` *(opcional)* | Números autorizados a falar com o agente (só dígitos, separados por vírgula). O dono já entra automático. |
+| `LEAD_BOT_ENABLED` *(opcional)* | Ativa o atendimento comercial para números fora da allowlist (`true`/`false`). |
+| `LEAD_BOT_BUSINESS_NAME` *(opcional)* | Nome apresentado pelo assistente comercial. |
+| `LEAD_BOT_BUSINESS_CONTEXT` *(opcional)* | Produtos, serviços e regras que o bot está autorizado a informar. |
+| `LEAD_BOT_INSTRUCTIONS` *(opcional)* | Instruções de abordagem, qualificação e encaminhamento dos leads. |
+| `LEAD_BOT_MAX_MESSAGES_PER_HOUR` *(opcional)* | Limite de mensagens processadas por contato a cada hora (padrão: 30). |
 | `GOOGLE_CALENDAR_ID` *(opcional)* | ID da sua agenda Google (normalmente seu e-mail). Ativa o espelhamento com o Google Calendar. |
 
-> 🔒 **Segurança:** o agente só responde a números na allowlist (`ALLOWED_NUMBERS` + `OWNER_PHONE`). Mensagens de qualquer outro número são ignoradas. Mensagens proativas (bom dia/lembretes) vão **apenas** para o dono.
+> 🔒 **Segurança:** `OWNER_PHONE` e `ALLOWED_NUMBERS` continuam no agente pessoal. Quando `LEAD_BOT_ENABLED=true`, os demais números usam um atendente comercial separado, sem acesso a agenda, tarefas, comandos, subagentes ou memória pessoal. Mensagens proativas continuam indo **apenas** para o dono.
+
+As configurações do atendimento comercial também podem ser editadas em **Configurações → Atendimento** no painel. Os valores salvos no painel são aplicados sem reiniciar o backend e substituem os defaults do `.env`.
+
+Quando o atendente coleta nome, tipo de empresa e cidade de um perfil aceito, o lead é marcado como qualificado e o `OWNER_PHONE` recebe um único resumo. Consumidores pessoa física são registrados como não qualificados e não geram aviso comercial.
 
 > **Firebase:** baixe a service account em *Configurações do projeto → Contas de serviço → Gerar nova chave privada* e copie `project_id`, `client_email` e `private_key`.
 

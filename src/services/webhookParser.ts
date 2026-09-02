@@ -1,6 +1,24 @@
 import { IncomingMessage } from '../types';
 import { getBase64FromMediaMessage, normalizeNumber } from './evolution';
 
+export function isUnsupportedConversationJid(remoteJid: string): boolean {
+  return (
+    remoteJid.endsWith('@g.us') ||
+    remoteJid.endsWith('@broadcast') ||
+    remoteJid.endsWith('@newsletter') ||
+    remoteJid.endsWith('@lid')
+  );
+}
+
+/** Prefere o telefone real quando a Evolution entrega o contato em modo LID. */
+export function resolveRemoteJid(key: Record<string, unknown>): string {
+  const primary = String(key.remoteJid || '');
+  const alternate = String(key.remoteJidAlt || '');
+  return primary.endsWith('@lid') && alternate.endsWith('@s.whatsapp.net')
+    ? alternate
+    : primary;
+}
+
 /**
  * Normaliza o payload de webhook da Evolution API (evento messages.upsert)
  * para a nossa estrutura interna. Ignora mensagens enviadas por nós (fromMe).
@@ -17,7 +35,12 @@ export async function parseWebhook(body: any): Promise<IncomingMessage | null> {
   const key = data.key || {};
   if (key.fromMe) return null; // ignora ecos das nossas próprias mensagens
 
-  const from = normalizeNumber(key.remoteJid || '');
+  // O atendente comercial é individual. Sem este filtro, o identificador de
+  // um grupo seria normalizado como se fosse um telefone e cairia no fluxo de leads.
+  const remoteJid = resolveRemoteJid(key);
+  if (isUnsupportedConversationJid(remoteJid)) return null;
+
+  const from = normalizeNumber(remoteJid);
   if (!from) return null;
 
   const message = data.message || {};

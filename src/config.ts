@@ -133,7 +133,32 @@ export const config = {
   googleCalendar: {
     calendarId: process.env.GOOGLE_CALENDAR_ID || '',
   },
-  ownerPhone: process.env.OWNER_PHONE || '',
+  ownerPhone: (process.env.OWNER_PHONE || '').replace(/\D/g, ''),
+  /**
+   * Atendimento comercial para contatos que não pertencem à allowlist pessoal.
+   * Fica isolado do agente pessoal: não acessa agenda, tarefas, subagentes nem
+   * memória do dono.
+   */
+  leadBot: {
+    enabled: (process.env.LEAD_BOT_ENABLED || 'false').toLowerCase() === 'true',
+    businessName:
+      process.env.LEAD_BOT_BUSINESS_NAME || 'Arroz Marrecão e Arroz Predileto',
+    businessContext:
+      process.env.LEAD_BOT_BUSINESS_CONTEXT ||
+      'Os leads chegam pelas marcas Arroz Marrecão e Arroz Predileto. O atendimento é exclusivamente para empresas do canal alimentar: mercados, distribuidoras, atacadistas e empresas que montam cestas básicas. Não há venda para consumidor pessoa física.',
+    instructions:
+      process.env.LEAD_BOT_INSTRUCTIONS ||
+      'Converse de forma leve, simpática e humana, sem parecer formulário. No primeiro contato, cumprimente com entusiasmo, apresente-se como Arroz Marrecão e Predileto e pergunte primeiro a cidade. Depois descubra naturalmente o tipo de empresa e, por fim, o nome da pessoa. Faça somente uma pergunta por mensagem. Quando tiver os três dados, agradeça com simpatia e diga que vai deixar tudo encaminhado para o time comercial continuar por ali. Não prolongue a qualificação com outras perguntas. Não tire pedidos, não feche vendas e não confirme preço, estoque, prazo, frete ou condição comercial. Se for consumidor pessoa física, explique com gentileza que a empresa não realiza venda direta ao consumidor.',
+    model: process.env.LEAD_BOT_MODEL || process.env.OPENAI_UTILITY_MODEL || 'gpt-5-mini',
+    historyLimit: Math.max(
+      2,
+      Math.min(30, parseInt(process.env.LEAD_BOT_HISTORY_LIMIT || '12', 10) || 12)
+    ),
+    maxMessagesPerHour: Math.max(
+      5,
+      Math.min(120, parseInt(process.env.LEAD_BOT_MAX_MESSAGES_PER_HOUR || '30', 10) || 30)
+    ),
+  },
   timezone: process.env.TZ || 'America/Sao_Paulo',
   /** Hora usada para compromissos de amanhã sem horário explícito. */
   defaultReminderTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(process.env.DEFAULT_REMINDER_TIME || '')

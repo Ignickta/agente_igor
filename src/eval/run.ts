@@ -47,6 +47,16 @@ import { parseEventWindow, CalendarEvent } from '../services/googleCalendar';
 import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent, PendingPrompt } from '../types';
 import { taskAllowedDuringPause } from '../agents/pause';
+import { isUnsupportedConversationJid, resolveRemoteJid } from '../services/webhookParser';
+import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
+import {
+  leadSystemPrompt,
+  qualificationStatus,
+  LEAD_RESPONSE_SCHEMA,
+  LeadModelResponse,
+} from '../agents/leads';
+import { chatJson, ChatMessage } from '../services/openai';
+import { config } from '../config';
 import {
   targetsOf,
   formatTargets,
@@ -153,6 +163,89 @@ function suitePauseExceptions(): void {
     'pausa-excecao',
     'lembrete criado durante a pausa pode tocar',
     taskAllowedDuringPause({ ...base, bypassPause: true })
+  );
+}
+
+function suiteLeadIsolation(): void {
+  suite('Atendimento comercial — isolamento e proteção');
+  check(
+    'leads-isolamento',
+    'rejeita conversa de grupo',
+    isUnsupportedConversationJid('120363000000000000@g.us')
+  );
+  check(
+    'leads-isolamento',
+    'rejeita status e listas de transmissão',
+    isUnsupportedConversationJid('status@broadcast')
+  );
+  check(
+    'leads-isolamento',
+    'aceita conversa individual',
+    !isUnsupportedConversationJid('5571999999999@s.whatsapp.net')
+  );
+  check(
+    'leads-isolamento',
+    'usa o telefone alternativo quando a Evolution envia um LID',
+    resolveRemoteJid({
+      remoteJid: '123456789@lid',
+      remoteJidAlt: '5571999999999@s.whatsapp.net',
+    }) === '5571999999999@s.whatsapp.net'
+  );
+  check(
+    'leads-isolamento',
+    'rejeita LID sem telefone alternativo',
+    isUnsupportedConversationJid(resolveRemoteJid({ remoteJid: '123456789@lid' }))
+  );
+
+  const limit = effectiveLeadBotSettings().maxMessagesPerHour;
+  const contact = 'eval-lead-rate-limit';
+  const now = Date.now();
+  let allowed = true;
+  for (let i = 0; i < limit; i += 1) allowed = allowed && consumeLeadQuota(contact, now + i);
+  check('leads-isolamento', 'permite mensagens até o limite por hora', allowed);
+  check(
+    'leads-isolamento',
+    'bloqueia o contato depois do limite por hora',
+    !consumeLeadQuota(contact, now + limit)
+  );
+
+  const prompt = leadSystemPrompt();
+  check(
+    'leads-isolamento',
+    'limita o atendimento aos segmentos empresariais aceitos',
+    /mercados, distribuidoras, atacadistas.*cestas básicas/i.test(prompt)
+  );
+  check(
+    'leads-isolamento',
+    'proíbe venda para consumidor pessoa física',
+    /nunca venda.*consumidor pessoa física/i.test(prompt)
+  );
+  check(
+    'leads-isolamento',
+    'proíbe tirar pedido e fechar venda',
+    /nunca tire pedido.*fechamento de venda/i.test(prompt)
+  );
+  check(
+    'leads-isolamento',
+    'abre a conversa com tom humano e pergunta primeiro a cidade',
+    /Olá! 😄.*Arroz Marrecão e Predileto.*qual cidade/is.test(prompt) &&
+      /Depois da cidade.*tipo de empresa.*nome da pessoa/is.test(prompt)
+  );
+  check(
+    'leads-isolamento',
+    'qualifica somente quando os três dados estão completos',
+    qualificationStatus('Ana', 'mercado', 'Salvador') === 'qualified' &&
+      qualificationStatus('Ana', 'mercado', null) === 'qualifying'
+  );
+  check(
+    'leads-isolamento',
+    'consumidor final é desqualificado',
+    qualificationStatus('João', 'consumidor_final', 'Feira de Santana') === 'disqualified'
+  );
+  check(
+    'leads-isolamento',
+    'tipo de empresa desconhecido não é qualificado',
+    qualificationStatus('José', 'restaurante', 'Salvador') === 'qualifying'
   );
 }
 
@@ -879,6 +972,62 @@ async function suiteLivePendingPrompt(): Promise<void> {
   );
 }
 
+async function suiteLiveLeadQualification(): Promise<void> {
+  suite('LIVE — conversa e extração dos leads de arroz');
+
+  async function qualify(text: string): Promise<LeadModelResponse | null> {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: leadSystemPrompt() },
+      {
+        role: 'system',
+        content:
+          'Dados já coletados deste contato: {"name":null,"businessType":null,"city":null,"status":"qualifying"}',
+      },
+      { role: 'user', content: text },
+    ];
+    return chatJson<LeadModelResponse>(messages, {
+      name: 'lead_qualification_eval',
+      schema: LEAD_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+      model: config.leadBot.model,
+      temperature: 0.2,
+    });
+  }
+
+  const opening = await qualify('Oi, vi o contato de vocês e queria mais informações');
+  check(
+    'live-leads',
+    'abertura se apresenta e pergunta a cidade com simpatia',
+    !!opening &&
+      /Marrecão|Predileto/i.test(opening.reply) &&
+      /cidade/i.test(opening.reply) &&
+      opening.status === 'qualifying',
+    opening ? JSON.stringify(opening) : 'null'
+  );
+
+  const complete = await qualify('Sou Carlos, tenho um mercado em Feira de Santana');
+  check(
+    'live-leads',
+    'mensagem completa extrai nome, mercado e cidade sem perguntar de novo',
+    !!complete &&
+      complete.name?.toLowerCase() === 'carlos' &&
+      complete.businessType === 'mercado' &&
+      /feira de santana/i.test(complete.city || '') &&
+      qualificationStatus(complete.name, complete.businessType, complete.city) === 'qualified' &&
+      !complete.reply.trim().endsWith('?'),
+    complete ? JSON.stringify(complete) : 'null'
+  );
+
+  const consumer = await qualify('Quero comprar dois pacotes para usar em casa');
+  check(
+    'live-leads',
+    'consumidor final é recusado com educação',
+    !!consumer &&
+      consumer.businessType === 'consumidor_final' &&
+      /consumidor|venda direta|mercados/i.test(consumer.reply),
+    consumer ? JSON.stringify(consumer) : 'null'
+  );
+}
+
 // ===================== Main =====================
 
 async function main(): Promise<void> {
@@ -888,6 +1037,7 @@ async function main(): Promise<void> {
   suiteAgendaRegex();
   suiteTomorrowReminders();
   suitePauseExceptions();
+  suiteLeadIsolation();
   suiteWhatsappTaskLists();
   suiteShortcutSafety();
   suitePendingPrompt();
@@ -904,6 +1054,7 @@ async function main(): Promise<void> {
     await suiteLiveRouting();
     await suiteLiveEmbedding();
     await suiteLivePendingPrompt();
+    await suiteLiveLeadQualification();
   }
 
   console.log(`\n${'='.repeat(50)}`);
