@@ -636,6 +636,62 @@ export async function upcomingView(days = 7, ref = dayKey()): Promise<string> {
   return formatRangeView(`Próximos ${days} dias`, start, end, byDay);
 }
 
+/**
+ * Tarefas pendentes que não viraram bloco na agenda do dia — nem por vínculo
+ * nem por título igual. São as que ficam sem cobrança nenhuma hoje: sem
+ * horário, nada as faz tocar. É a lista de pendências ("to-do") do Igor.
+ */
+export async function openTasksOutsideAgenda(date: string): Promise<Task[]> {
+  const agenda = await getAgendaForDay(date);
+  const naAgendaIds = new Set(agenda.map((i) => i.taskId).filter(Boolean));
+  const naAgendaTitulos = new Set(agenda.map((i) => i.title.trim().toLowerCase()));
+  return (await listTasks()).filter(
+    (t) =>
+      !t.completedAt &&
+      !t.done &&
+      !naAgendaIds.has(t.id) &&
+      !naAgendaTitulos.has(t.text.trim().toLowerCase())
+  );
+}
+
+/** Quantas pendências o to-do da manhã lista; o resto vira contador. */
+const TODO_LIMIT = 10;
+
+/**
+ * Segunda mensagem do bom dia: a lista de pendências. A agenda diz o que tem
+ * HORA hoje; isto diz o que está em aberto e não entrou em bloco nenhum — antes
+ * só aparecia se o Igor perguntasse.
+ *
+ * Vai em mensagem separada de propósito: no WhatsApp duas listas coladas viram
+ * uma só aos olhos, e o Igor deixaria de ver metade.
+ */
+function formatTodoMessage(pendentes: Task[], date: string): string | null {
+  if (pendentes.length === 0) return null;
+  const ordenadas = [...pendentes].sort((a, b) => a.createdAt - b.createdAt);
+  const linhas = ordenadas
+    .slice(0, TODO_LIMIT)
+    .map((t) => {
+      // Pendência COM horário hoje vai tocar sozinha — mostrar a hora evita que
+      // ela pareça só mais um item solto da lista.
+      const comHora =
+        taskHasReminder(t) && dayKey(new Date(t.remindAt)) === date
+          ? ` _(⏰ ${timeKey(new Date(t.remindAt))})_`
+          : '';
+      return `• ${t.text}${comHora}`;
+    })
+    .join('\n');
+  const resto = ordenadas.length - Math.min(TODO_LIMIT, ordenadas.length);
+  const cabecalho =
+    ordenadas.length === 1
+      ? '🗂️ *Sua lista* — 1 pendência fora da agenda:'
+      : `🗂️ *Sua lista* — ${ordenadas.length} pendências fora da agenda:`;
+  return (
+    `${cabecalho}\n${linhas}` +
+    (resto > 0 ? `\n_(+${resto})_` : '') +
+    '\n\n_Quer encaixar alguma no dia? É só me dizer qual._'
+  );
+}
+
 /** Gera (se necessário) e envia o cronograma do dia ao dono via WhatsApp. */
 export async function sendDailySchedule(date = dayKey(), carriedOver: Task[] = []): Promise<void> {
   if (!config.ownerPhone) {
@@ -671,6 +727,23 @@ export async function sendDailySchedule(date = dayKey(), carriedOver: Task[] = [
 
   await sendText(config.ownerPhone, base + pergunta);
   console.log(`[orchestrator] cronograma de ${date} enviado (${items.length} itens).`);
+
+  // Mensagem 2: a lista de pendências. O que acabou de ser perguntado como
+  // "ficaram de antes" fica de fora — o Igor não pode ver o mesmo item duas
+  // vezes na mesma manhã, uma como pergunta e outra como lista.
+  try {
+    const jaPerguntadas = new Set(carriedOver.map((t) => t.id));
+    const pendentes = (await openTasksOutsideAgenda(date)).filter(
+      (t) => !jaPerguntadas.has(t.id)
+    );
+    const todo = formatTodoMessage(pendentes, date);
+    if (todo) {
+      await sendText(config.ownerPhone, todo);
+      console.log(`[orchestrator] lista de pendências enviada (${pendentes.length}).`);
+    }
+  } catch (err) {
+    console.error('[orchestrator] falha ao enviar a lista de pendências:', err);
+  }
 
   // F4: se o dia estiver sobrecarregado, avisa e sugere realocações.
   try {

@@ -9,7 +9,7 @@ import {
   getMetrics,
   listTasks,
 } from '../services/firebase';
-import { weekRange } from './orchestrator';
+import { weekRange, openTasksOutsideAgenda } from './orchestrator';
 import { rememberAsk } from './pendingPrompt';
 import { PendingPromptTarget, Task } from '../types';
 import { CLAIMS_ACTION_REGEX } from './subagents';
@@ -43,24 +43,6 @@ async function canNotify(): Promise<boolean> {
  * Não promete adiar nada: o que não foi feito solta do horário na virada do dia
  * e só volta para a agenda se o Igor pedir.
  */
-/**
- * Tarefas pendentes que não viraram bloco na agenda do dia — nem por vínculo
- * nem por título igual. São as que ficam sem cobrança nenhuma hoje: sem
- * horário, nada as faz tocar.
- */
-async function openTasksOutsideAgenda(date: string): Promise<Task[]> {
-  const agenda = await getAgendaForDay(date);
-  const naAgendaIds = new Set(agenda.map((i) => i.taskId).filter(Boolean));
-  const naAgendaTitulos = new Set(agenda.map((i) => i.title.trim().toLowerCase()));
-  return (await listTasks()).filter(
-    (t) =>
-      !t.completedAt &&
-      !t.done &&
-      !naAgendaIds.has(t.id) &&
-      !naAgendaTitulos.has(t.text.trim().toLowerCase())
-  );
-}
-
 /** Aviso simples de tarefas em aberto: mostra algumas e diz quantas faltam. */
 function openTasksMessage(abertas: Task[]): string {
   const amostra = abertas.slice(0, 5).map((t) => `• ${t.text}`).join('\n');
