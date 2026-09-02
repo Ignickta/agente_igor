@@ -10,7 +10,14 @@ import { handleMessage } from './agents/central';
 import { splitWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
 import { isFocusRequest, isCancelFocusRequest, enterFocus, cancelFocus, focusGate } from './agents/focus';
 import { isPauseRequest, isResumeRequest, enterPause, leavePause } from './agents/pause';
-import { markLeadNotified, seedDefaultSubagents, ensureSubagent } from './services/firebase';
+import {
+  getLead,
+  LeadRecord,
+  markLeadEscalationNotified,
+  markLeadNotified,
+  seedDefaultSubagents,
+  ensureSubagent,
+} from './services/firebase';
 import { DEFAULT_SUBAGENTS, ORCHESTRATOR_SUBAGENT } from './agents/subagents/defaults';
 import { startScheduler } from './scheduler';
 import { recordMessageProcessed, recordError } from './services/status';
@@ -187,6 +194,13 @@ async function processIncoming(body: unknown): Promise<void> {
 
 /** Processa leads sem expor nenhuma capacidade ou memória do agente pessoal. */
 async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
+  const existingLead = await getLead(msg.from);
+  if (existingLead?.status === 'waiting_human') {
+    await notifyOwnerAboutPausedLead(existingLead);
+    console.log(`[leads] atendimento automático pausado para ${msg.from}`);
+    return;
+  }
+
   if (!consumeLeadQuota(msg.from)) {
     console.warn(`[leads] limite por hora atingido para ${msg.from}`);
     return;
@@ -230,7 +244,9 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
         await sendText(msg.from, parts[i], i === 0 ? 1200 : 400);
       }
 
-      if (lead?.status === 'qualified' && !lead.notifiedAt && config.ownerPhone) {
+      if (lead?.status === 'waiting_human') {
+        await notifyOwnerAboutPausedLead(lead, merged);
+      } else if (lead?.status === 'qualified' && !lead.notifiedAt && config.ownerPhone) {
         const typeLabel: Record<string, string> = {
           mercado: 'Mercado',
           distribuidora: 'Distribuidora',
@@ -251,6 +267,35 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
       }
     }).catch((err) => console.error('[leads] erro ao processar lote:', err));
   });
+}
+
+function safeNotificationText(value: string | null | undefined, maxLength = 500): string {
+  return (value || 'Não informado')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+async function notifyOwnerAboutPausedLead(
+  lead: LeadRecord,
+  latestMessage?: string
+): Promise<void> {
+  if (!config.ownerPhone || lead.escalationNotifiedAt) return;
+  const details = [
+    '⚠️ *Lead aguardando sua ajuda*',
+    `Contato: ${safeNotificationText(lead.contact, 40)}`,
+    `Nome: ${safeNotificationText(lead.name, 160)}`,
+    `Tipo de empresa: ${safeNotificationText(lead.businessType, 160)}`,
+    `Cidade: ${safeNotificationText(lead.city, 160)}`,
+    `Precisa confirmar: ${safeNotificationText(lead.humanReason)}`,
+  ];
+  if (latestMessage) {
+    details.push(`Mensagem: ${safeNotificationText(latestMessage)}`);
+  }
+  details.push('O bot foi pausado somente para esse contato. Retome pelo painel quando resolver.');
+  await sendText(config.ownerPhone, details.join('\n'));
+  await markLeadEscalationNotified(lead.contact);
 }
 
 /**

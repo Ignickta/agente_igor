@@ -84,7 +84,7 @@ export async function saveLeadConversationMessage(
   });
 }
 
-export type LeadStatus = 'qualifying' | 'qualified' | 'disqualified';
+export type LeadStatus = 'qualifying' | 'qualified' | 'disqualified' | 'waiting_human';
 
 export interface LeadRecord {
   contact: string;
@@ -93,10 +93,13 @@ export interface LeadRecord {
   city: string | null;
   status: LeadStatus;
   disqualificationReason: string | null;
+  humanReason: string | null;
   createdAt: number;
   updatedAt: number;
   qualifiedAt: number | null;
   notifiedAt: number | null;
+  escalatedAt: number | null;
+  escalationNotifiedAt: number | null;
 }
 
 export async function getLead(contact: string): Promise<LeadRecord | null> {
@@ -108,7 +111,12 @@ export async function saveLead(
   contact: string,
   data: Pick<
     LeadRecord,
-    'name' | 'businessType' | 'city' | 'status' | 'disqualificationReason'
+    | 'name'
+    | 'businessType'
+    | 'city'
+    | 'status'
+    | 'disqualificationReason'
+    | 'humanReason'
   >
 ): Promise<LeadRecord> {
   const previous = await getLead(contact);
@@ -120,11 +128,22 @@ export async function saveLead(
     city: data.city,
     status: data.status,
     disqualificationReason: data.disqualificationReason,
+    humanReason: data.status === 'waiting_human' ? data.humanReason : null,
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
     qualifiedAt:
       data.status === 'qualified' ? previous?.qualifiedAt ?? now : previous?.qualifiedAt ?? null,
     notifiedAt: previous?.notifiedAt ?? null,
+    escalatedAt:
+      data.status === 'waiting_human'
+        ? previous?.status === 'waiting_human'
+          ? previous.escalatedAt ?? now
+          : now
+        : null,
+    escalationNotifiedAt:
+      data.status === 'waiting_human' && previous?.status === 'waiting_human'
+        ? previous.escalationNotifiedAt ?? null
+        : null,
   };
   await leadsCol.doc(contact).set(record);
   return record;
@@ -134,6 +153,44 @@ export async function markLeadNotified(contact: string): Promise<number> {
   const notifiedAt = Date.now();
   await leadsCol.doc(contact).set({ notifiedAt, updatedAt: notifiedAt }, { merge: true });
   return notifiedAt;
+}
+
+export async function markLeadEscalationNotified(contact: string): Promise<number> {
+  const escalationNotifiedAt = Date.now();
+  await leadsCol.doc(contact).set(
+    { escalationNotifiedAt, updatedAt: escalationNotifiedAt },
+    { merge: true }
+  );
+  return escalationNotifiedAt;
+}
+
+export async function resumeLead(contact: string): Promise<LeadRecord | null> {
+  const lead = await getLead(contact);
+  if (!lead) return null;
+  const accepted = new Set(['mercado', 'distribuidora', 'atacadista', 'cesta_basica']);
+  const status: LeadStatus =
+    lead.name && lead.businessType && accepted.has(lead.businessType) && lead.city
+      ? 'qualified'
+      : 'qualifying';
+  const updatedAt = Date.now();
+  await leadsCol.doc(contact).set(
+    {
+      status,
+      humanReason: null,
+      escalatedAt: null,
+      escalationNotifiedAt: null,
+      updatedAt,
+    },
+    { merge: true }
+  );
+  return {
+    ...lead,
+    status,
+    humanReason: null,
+    escalatedAt: null,
+    escalationNotifiedAt: null,
+    updatedAt,
+  };
 }
 
 export async function listLeads(limit = 100): Promise<LeadRecord[]> {

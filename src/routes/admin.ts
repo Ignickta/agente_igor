@@ -31,6 +31,7 @@ import {
   deleteSharedFact,
   listActions,
   listLeads,
+  resumeLead,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
 import { enterPause, leavePause } from '../agents/pause';
@@ -492,6 +493,21 @@ adminRouter.get('/leads', async (req, res) => {
   } catch (err) {
     console.error('[leads] erro ao listar leads:', err);
     res.status(500).json({ error: 'Erro ao carregar leads' });
+  }
+});
+
+adminRouter.post('/leads/:contact/resume', async (req, res) => {
+  try {
+    const contact = req.params.contact.replace(/\D/g, '');
+    if (!/^\d{8,15}$/.test(contact)) {
+      return res.status(400).json({ error: 'Contato inválido' });
+    }
+    const lead = await resumeLead(contact);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+    res.json(lead);
+  } catch (err) {
+    console.error('[leads] erro ao retomar atendimento:', err);
+    res.status(500).json({ error: 'Erro ao retomar atendimento' });
   }
 });
 

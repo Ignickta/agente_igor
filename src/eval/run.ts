@@ -227,6 +227,13 @@ function suiteLeadIsolation(): void {
   );
   check(
     'leads-isolamento',
+    'pausa e pede ajuda humana quando a resposta não está autorizada',
+    /não esteja explicitamente.*needsHuman=true.*status=waiting_human/is.test(prompt) &&
+      LEAD_RESPONSE_SCHEMA.required.includes('humanReason') &&
+      LEAD_RESPONSE_SCHEMA.required.includes('needsHuman')
+  );
+  check(
+    'leads-isolamento',
     'abre a conversa com tom humano e pergunta primeiro a cidade',
     /Olá! 😄.*Arroz Marrecão e Predileto.*qual cidade/is.test(prompt) &&
       /Depois da cidade.*tipo de empresa.*nome da pessoa/is.test(prompt)
