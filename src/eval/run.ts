@@ -48,6 +48,7 @@ import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent, PendingPrompt } from '../types';
 import { taskAllowedDuringPause } from '../agents/pause';
 import { isUnsupportedConversationJid, resolveRemoteJid } from '../services/webhookParser';
+import { whatsappChatUrl } from '../services/evolution';
 import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
 import {
   leadSystemPrompt,
@@ -195,6 +196,21 @@ function suiteLeadIsolation(): void {
     'leads-isolamento',
     'rejeita LID sem telefone alternativo',
     isUnsupportedConversationJid(resolveRemoteJid({ remoteJid: '123456789@lid' }))
+  );
+  check(
+    'leads-isolamento',
+    'gera link clicável e restaura o 9º dígito de celular brasileiro legado',
+    whatsappChatUrl('557788429076@s.whatsapp.net') === 'https://wa.me/5577988429076'
+  );
+  check(
+    'leads-isolamento',
+    'preserva celular brasileiro que já tem o 9º dígito',
+    whatsappChatUrl('5577988429076') === 'https://wa.me/5577988429076'
+  );
+  check(
+    'leads-isolamento',
+    'não acrescenta 9º dígito a telefone fixo brasileiro',
+    whatsappChatUrl('557734222222') === 'https://wa.me/557734222222'
   );
 
   const limit = effectiveLeadBotSettings().maxMessagesPerHour;

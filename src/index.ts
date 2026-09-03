@@ -4,7 +4,7 @@ import { adminRouter } from './routes/admin';
 import { parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
 import { extractFromImage, extractFromPdf } from './services/vision';
-import { sendText, sendAudio } from './services/evolution';
+import { sendText, sendAudio, whatsappChatUrl } from './services/evolution';
 import { textToSpeechBase64 } from './services/tts';
 import { handleMessage } from './agents/central';
 import { splitWhatsAppReply, wantsAudioReply } from './agents/replyFormat';
@@ -260,7 +260,7 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
             `Nome: ${lead.name}`,
             `Tipo: ${typeLabel[lead.businessType || ''] || lead.businessType}`,
             `Cidade: ${lead.city}`,
-            `WhatsApp: ${lead.contact}`,
+            `WhatsApp: ${whatsappChatUrl(lead.contact)}`,
           ].join('\n')
         );
         await markLeadNotified(lead.contact);
@@ -284,7 +284,7 @@ async function notifyOwnerAboutPausedLead(
   if (!config.ownerPhone || lead.escalationNotifiedAt) return;
   const details = [
     '⚠️ *Lead aguardando sua ajuda*',
-    `Contato: ${safeNotificationText(lead.contact, 40)}`,
+    `Contato: ${whatsappChatUrl(lead.contact)}`,
     `Nome: ${safeNotificationText(lead.name, 160)}`,
     `Tipo de empresa: ${safeNotificationText(lead.businessType, 160)}`,
     `Cidade: ${safeNotificationText(lead.city, 160)}`,

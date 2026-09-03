@@ -157,6 +157,24 @@ export function normalizeNumber(jidOrNumber: string): string {
   return jidOrNumber.split('@')[0].replace(/\D/g, '');
 }
 
+/**
+ * Gera o link oficial para abrir uma conversa no WhatsApp.
+ *
+ * Alguns JIDs brasileiros ainda chegam com o celular no formato legado de
+ * oito dígitos. Para o link externo funcionar, restaura o 9º dígito quando o
+ * assinante começa entre 6 e 9. O JID original continua sendo usado internamente
+ * para responder à conversa existente.
+ */
+export function whatsappChatUrl(jidOrNumber: string): string {
+  const normalized = normalizeNumber(jidOrNumber);
+  const needsBrazilianNinthDigit =
+    /^55\d{10}$/.test(normalized) && /^[6-9]$/.test(normalized.charAt(4));
+  const linkNumber = needsBrazilianNinthDigit
+    ? `${normalized.slice(0, 4)}9${normalized.slice(4)}`
+    : normalized;
+  return `https://wa.me/${linkNumber}`;
+}
+
 function logAxiosError(context: string, err: unknown): void {
   if (axios.isAxiosError(err)) {
     console.error(
