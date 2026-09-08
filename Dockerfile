@@ -4,7 +4,10 @@ WORKDIR /app
 
 # Instala dependencias (inclui devDependencies para compilar o TypeScript)
 COPY package*.json ./
-RUN npm ci
+RUN npm ci \
+    --fetch-retries=5 \
+    --fetch-retry-mintimeout=20000 \
+    --fetch-retry-maxtimeout=120000
 
 # Compila o projeto
 COPY tsconfig.json ./
@@ -22,7 +25,11 @@ ENV GIT_SHA=$GIT_SHA
 
 # Apenas dependencias de producao
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev \
+    --fetch-retries=5 \
+    --fetch-retry-mintimeout=20000 \
+    --fetch-retry-maxtimeout=120000 \
+    && npm cache clean --force
 
 # Copia o JS compilado
 COPY --from=build /app/dist ./dist
