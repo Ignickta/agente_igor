@@ -191,8 +191,13 @@ export async function generateDailySchedule(
   const allDayTasks = (await listTasks()).filter((t) => {
     if (t.done || (selected && !selected.has(t.id))) return false;
     // O planejador explícito pode escolher qualquer tarefa pendente, inclusive
-    // as sem prazo. O fluxo legado continua limitado às tarefas do dia.
-    return taskPlans.size > 0 || dayKey(new Date(t.remindAt)) === date;
+    // as sem prazo. O fluxo automático/legado só pode considerar lembretes de
+    // verdade: tarefas sem prazo também carregam `remindAt = createdAt` por
+    // compatibilidade e, sem este gate, viravam blocos no horário da criação.
+    return (
+      taskPlans.size > 0 ||
+      (taskHasReminder(t) && dayKey(new Date(t.remindAt)) === date)
+    );
   });
 
   // Só encaixa o que ainda NÃO está representado na agenda (por taskId ou
@@ -349,7 +354,12 @@ export async function generateDailySchedule(
     return { items: await getAgendaForDay(date), skipped };
   }
 
-  for (const t of pendingForDay) {
+  // Defesa em profundidade: somente lembretes reais entram automaticamente.
+  // Tarefas sem prazo passam por este fluxo apenas quando selecionadas no
+  // planejador explícito, tratado e retornado no ramo `taskPlans` acima.
+  for (const t of pendingForDay.filter(
+    (task) => taskHasReminder(task) && dayKey(new Date(task.remindAt)) === date
+  )) {
     const startTime = timeKey(new Date(t.remindAt));
     const dur = t.estimatedMinutes && t.estimatedMinutes > 0 ? t.estimatedMinutes : 45;
     const [sh, sm] = startTime.split(':').map(Number);
