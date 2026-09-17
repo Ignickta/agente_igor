@@ -52,6 +52,7 @@ import { whatsappChatUrl } from '../services/evolution';
 import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
 import {
   buildPausedLeadForwardMessage,
+  leadReplyForClassification,
   leadSystemPrompt,
   qualificationStatus,
   LEAD_RESPONSE_SCHEMA,
@@ -268,6 +269,28 @@ function suiteLeadIsolation(): void {
   );
   check(
     'leads-isolamento',
+    'pedido de emprego é encerrado sem entrar na qualificação comercial',
+    qualificationStatus(null, 'candidato_emprego', null) === 'disqualified' &&
+      /não estamos contratando/i.test(
+        leadReplyForClassification('candidato_emprego', false, 'texto livre')
+      ) &&
+      /representante comercial/i.test(
+        leadReplyForClassification('candidato_emprego', false, 'texto livre')
+      )
+  );
+  check(
+    'leads-isolamento',
+    'interesse em representação comercial recebe encaminhamento específico',
+    /representar nossas marcas/i.test(
+      leadReplyForClassification('representante_comercial', true, 'texto livre')
+    ) &&
+      /businessType=representante_comercial.*needsHuman=true.*status=waiting_human/is.test(
+        prompt
+      ) &&
+      LEAD_RESPONSE_SCHEMA.properties.businessType.enum.includes('representante_comercial')
+  );
+  check(
+    'leads-isolamento',
     'tipo de empresa desconhecido não é qualificado',
     qualificationStatus('José', 'restaurante', 'Salvador') === 'qualifying'
   );
@@ -295,6 +318,18 @@ function suiteLeadIsolation(): void {
     partialForwardMessage ===
       'Olá! Tudo bem? Vi que você demonstrou interesse nos produtos Arroz Marrecão e Predileto para sua distribuidora. Estou entrando em contato para dar continuidade ao seu atendimento e apresentar nossos produtos e condições comerciais.' &&
       !partialForwardMessage.includes('? Você')
+  );
+
+  const representativeForwardMessage = buildPausedLeadForwardMessage({
+    name: 'Marina',
+    businessType: 'representante_comercial',
+    city: 'Vitória da Conquista',
+  });
+  check(
+    'leads-isolamento',
+    'gera mensagem de contato própria para representante comercial',
+    representativeForwardMessage ===
+      'Olá, Marina! Tudo bem? Obrigado pelo interesse em representar as marcas Arroz Marrecão e Predileto em Vitória da Conquista. Estou entrando em contato para entender melhor seu perfil e conversar sobre a possibilidade de representação comercial.'
   );
 }
 

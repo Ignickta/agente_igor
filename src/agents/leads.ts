@@ -12,6 +12,10 @@ import { chatJson, ChatMessage } from '../services/openai';
 
 const HUMAN_HANDOFF_REPLY =
   'Boa pergunta 😊 Vou confirmar essa informação com nosso time para te responder certinho. Assim que tivermos o retorno, continuamos por aqui.';
+const JOB_INQUIRY_REPLY =
+  'Agradecemos muito pelo seu interesse em trabalhar conosco! No momento, não estamos contratando. Caso seu interesse seja atuar como representante comercial, esse assunto é tratado separadamente e podemos encaminhar seu contato ao time responsável.';
+const SALES_REPRESENTATIVE_REPLY =
+  'Agradecemos pelo interesse em representar nossas marcas! Essa possibilidade é tratada separadamente pelo nosso time comercial. Vou encaminhar seu contato para avaliarmos e continuarmos o atendimento por aqui.';
 const SAFE_FAILURE_REASON = 'Não foi possível gerar uma resposta segura para esta mensagem.';
 
 const BUSINESS_TYPE_FORWARD_LABELS: Record<string, string> = {
@@ -36,6 +40,17 @@ export function buildPausedLeadForwardMessage(
   const name = cleanForwardField(lead.name);
   const businessType = cleanForwardField(lead.businessType);
   const city = cleanForwardField(lead.city);
+
+  if (businessType === 'representante_comercial') {
+    return [
+      `Olá${name ? `, ${name}` : ''}! Tudo bem?`,
+      `Obrigado pelo interesse em representar as marcas Arroz Marrecão e Predileto${
+        city ? ` em ${city}` : ''
+      }.`,
+      'Estou entrando em contato para entender melhor seu perfil e conversar sobre a possibilidade de representação comercial.',
+    ].join(' ');
+  }
+
   const businessLabel = BUSINESS_TYPE_FORWARD_LABELS[businessType];
   const destination = [
     businessLabel ? `para ${businessLabel}` : '',
@@ -61,7 +76,16 @@ export const LEAD_RESPONSE_SCHEMA = {
     name: { type: ['string', 'null'] },
     businessType: {
       type: ['string', 'null'],
-      enum: ['mercado', 'distribuidora', 'atacadista', 'cesta_basica', 'consumidor_final', null],
+      enum: [
+        'mercado',
+        'distribuidora',
+        'atacadista',
+        'cesta_basica',
+        'consumidor_final',
+        'candidato_emprego',
+        'representante_comercial',
+        null,
+      ],
     },
     city: { type: ['string', 'null'] },
     status: {
@@ -93,6 +117,8 @@ export interface LeadModelResponse {
     | 'atacadista'
     | 'cesta_basica'
     | 'consumidor_final'
+    | 'candidato_emprego'
+    | 'representante_comercial'
     | null;
   city: string | null;
   status: 'qualifying' | 'qualified' | 'disqualified' | 'waiting_human';
@@ -119,6 +145,8 @@ export function leadSystemPrompt(): string {
     'Depois da cidade, descubra naturalmente o tipo de empresa e então o nome da pessoa. Não repita perguntas cujas respostas já foram informadas.',
     'Este atendimento é exclusivamente B2B para mercados, distribuidoras, atacadistas e empresas que montam cestas básicas.',
     'Nunca venda nem ofereça produtos a consumidor pessoa física. Nesse caso, informe educadamente que não há venda direta ao consumidor e encerre o atendimento.',
+    'Se a pessoa pedir emprego, vaga, oportunidade de trabalho ou quiser enviar currículo, agradeça educadamente pelo interesse, informe que não estamos contratando no momento e explique que oportunidades para representante comercial são tratadas separadamente. Defina businessType=candidato_emprego, needsHuman=false, status=disqualified e disqualificationReason="Busca por emprego". Não peça nome, cidade nem tipo de empresa.',
+    'Se a pessoa disser explicitamente que quer ser representante comercial ou representar as marcas, não trate como pedido comum de emprego nem como comprador. Defina businessType=representante_comercial, needsHuman=true, status=waiting_human e humanReason="Interesse em representação comercial". Não faça perguntas de qualificação nessa resposta.',
     'Seu papel é somente qualificar o contato para a equipe comercial: nunca tire pedido nem conduza fechamento de venda.',
     'Assim que tiver nome, tipo de empresa e cidade, agradeça de forma acolhedora e diga que vai deixar tudo encaminhado para o time comercial continuar o atendimento por ali. Não faça novas perguntas.',
     'Nunca diga que é o agente pessoal Igor e nunca mencione agenda, tarefas, memória, comandos, subagentes, sistemas internos ou dados do proprietário.',
@@ -155,11 +183,23 @@ export function qualificationStatus(
   businessType: string | null,
   city: string | null
 ): LeadStatus {
-  if (businessType === 'consumidor_final') return 'disqualified';
+  if (businessType === 'consumidor_final' || businessType === 'candidato_emprego') {
+    return 'disqualified';
+  }
   if (name && businessType && QUALIFIED_BUSINESS_TYPES.has(businessType) && city) {
     return 'qualified';
   }
   return 'qualifying';
+}
+
+export function leadReplyForClassification(
+  businessType: string | null,
+  needsHuman: boolean,
+  generatedReply: string
+): string {
+  if (businessType === 'candidato_emprego') return JOB_INQUIRY_REPLY;
+  if (businessType === 'representante_comercial') return SALES_REPRESENTATIVE_REPLY;
+  return needsHuman ? HUMAN_HANDOFF_REPLY : generatedReply;
 }
 
 export async function handleLeadMessage(
@@ -208,14 +248,23 @@ export async function handleLeadMessage(
     const businessType = cleanField(parsed.businessType, previous?.businessType ?? null);
     const city = cleanField(parsed.city, previous?.city ?? null);
     const generatedReply = parsed.reply.trim().slice(0, 2_000);
-    const needsHuman =
-      parsed.needsHuman === true || parsed.status === 'waiting_human' || !generatedReply;
+    const isJobApplicant = businessType === 'candidato_emprego';
+    const isSalesRepresentative = businessType === 'representante_comercial';
+    const needsHuman = isJobApplicant
+      ? false
+      : isSalesRepresentative ||
+        parsed.needsHuman === true ||
+        parsed.status === 'waiting_human' ||
+        !generatedReply;
     const status: LeadStatus = needsHuman
       ? 'waiting_human'
       : qualificationStatus(name, businessType, city);
-    const isConsumer = status === 'disqualified';
-    const disqualificationReason = isConsumer
-      ? cleanField(parsed.disqualificationReason, 'Consumidor pessoa física')
+    const isDisqualified = status === 'disqualified';
+    const disqualificationReason = isDisqualified
+      ? cleanField(
+          parsed.disqualificationReason,
+          isJobApplicant ? 'Busca por emprego' : 'Consumidor pessoa física'
+        )
       : null;
     const humanReason = needsHuman
       ? cleanField(parsed.humanReason, 'O contato pediu uma informação não cadastrada.')
@@ -223,7 +272,7 @@ export async function handleLeadMessage(
     // Quando a própria classificação pede ajuda, não encaminhamos o texto livre
     // produzido pelo modelo: usamos uma resposta fixa para eliminar qualquer
     // afirmação comercial acidental na mensagem de transição.
-    const reply = needsHuman ? HUMAN_HANDOFF_REPLY : generatedReply;
+    const reply = leadReplyForClassification(businessType, needsHuman, generatedReply);
 
     const lead = await saveLead(contact, {
       name,
