@@ -11,6 +11,7 @@ import {
   ActionRecord,
   PersistedUndo,
   PendingPrompt,
+  Note,
 } from '../types';
 
 if (!admin.apps.length) {
@@ -43,6 +44,7 @@ const routeExamplesCol = db.collection('route_examples');
 const pendingPromptsCol = db.collection('pending_prompts');
 const leadConversationsCol = db.collection('lead_conversations');
 const leadsCol = db.collection('leads');
+const notesCol = db.collection('notes');
 
 function withoutUndefined<T extends Record<string, unknown>>(data: T): T {
   return Object.fromEntries(
@@ -232,6 +234,42 @@ export async function updateSubagent(
 
 export async function deleteSubagent(id: string): Promise<void> {
   await subagentsCol.doc(id).delete();
+}
+
+// ===================== Notas =====================
+
+export async function listNotes(): Promise<Note[]> {
+  const snap = await notesCol.get();
+  return snap.docs
+    .map((doc) => ({ id: doc.id, ...doc.data() } as Note))
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+}
+
+export async function getNote(id: string): Promise<Note | null> {
+  const doc = await notesCol.doc(id).get();
+  return doc.exists ? ({ id: doc.id, ...doc.data() } as Note) : null;
+}
+
+export async function createNote(
+  data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<Note> {
+  const now = Date.now();
+  const note = withoutUndefined({ ...data, createdAt: now, updatedAt: now });
+  const ref = await notesCol.add(note);
+  return { id: ref.id, ...note } as Note;
+}
+
+export async function updateNote(
+  id: string,
+  data: Partial<Omit<Note, 'id' | 'createdAt' | 'updatedAt'>>
+): Promise<void> {
+  await notesCol.doc(id).set(withoutUndefined({ ...data, updatedAt: Date.now() }), {
+    merge: true,
+  });
+}
+
+export async function deleteNote(id: string): Promise<void> {
+  await notesCol.doc(id).delete();
 }
 
 /** Cria os subagentes padrão se a coleção estiver vazia. */

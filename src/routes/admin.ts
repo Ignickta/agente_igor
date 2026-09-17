@@ -32,11 +32,17 @@ import {
   listActions,
   listLeads,
   resumeLead,
+  listNotes,
+  getNote,
+  createNote,
+  updateNote,
+  deleteNote,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
 import { enterPause, leavePause } from '../agents/pause';
 import { generateDailySchedule, advanceTask, dayKey } from '../agents/orchestrator';
 import { AgendaItem } from '../types';
+import { Note, NoteChecklistItem, NoteColor, NoteKind } from '../types';
 import { getConnectionState } from '../services/evolution';
 import { getUptimeSeconds, getRecentErrors, getLastMessageProcessedAt } from '../services/status';
 import { handleMessage } from '../agents/central';
@@ -370,14 +376,15 @@ adminRouter.get('/search', async (req, res) => {
     if (!q) return res.json([]);
 
     const contact = config.ownerPhone;
-    const [tasks, facts, actions] = await Promise.all([
+    const [tasks, facts, actions, notes] = await Promise.all([
       listTasks(),
       contact ? getSharedFacts(contact) : Promise.resolve([]),
       listActions(100),
+      listNotes(),
     ]);
 
     const results: Array<{
-      kind: 'task' | 'fact' | 'action';
+      kind: 'task' | 'fact' | 'action' | 'note';
       id: string;
       title: string;
       subtitle?: string;
@@ -417,10 +424,131 @@ adminRouter.get('/search', async (req, res) => {
       });
     }
 
+    for (const note of notes) {
+      const searchable = `${note.title} ${note.content} ${note.labels.join(' ')}`.toLowerCase();
+      if (!searchable.includes(q)) continue;
+      results.push({
+        kind: 'note',
+        id: note.id,
+        title: note.title || 'Nota sem título',
+        subtitle: note.kind === 'meeting' ? 'nota de reunião' : 'nota',
+        href: `/notes?note=${encodeURIComponent(note.id)}`,
+      });
+    }
+
     res.json(results.slice(0, 30));
   } catch (err) {
     console.error('[search] erro ao buscar:', err);
     res.status(500).json({ error: 'Erro ao buscar' });
+  }
+});
+
+const NOTE_KINDS = new Set<NoteKind>(['note', 'meeting']);
+const NOTE_COLORS = new Set<NoteColor>([
+  'default',
+  'yellow',
+  'green',
+  'blue',
+  'purple',
+  'red',
+]);
+
+function cleanStringList(value: unknown, max = 20): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function cleanChecklist(value: unknown): NoteChecklistItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((raw, index) => {
+      const item = raw as Record<string, unknown>;
+      const text = String(item?.text || '').trim();
+      if (!text) return null;
+      return {
+        id: String(item.id || `${Date.now()}-${index}`),
+        text,
+        checked: item.checked === true,
+      };
+    })
+    .filter((item): item is NoteChecklistItem => item !== null)
+    .slice(0, 100);
+}
+
+function notePayload(body: Record<string, unknown>, partial = false) {
+  const data: Partial<Omit<Note, 'id' | 'createdAt' | 'updatedAt'>> = {};
+  if (!partial || body.title !== undefined) data.title = String(body.title || '').trim().slice(0, 200);
+  if (!partial || body.content !== undefined) data.content = String(body.content || '').slice(0, 50_000);
+  if (!partial || body.kind !== undefined) {
+    const kind = String(body.kind || 'note') as NoteKind;
+    data.kind = NOTE_KINDS.has(kind) ? kind : 'note';
+  }
+  if (!partial || body.color !== undefined) {
+    const color = String(body.color || 'default') as NoteColor;
+    data.color = NOTE_COLORS.has(color) ? color : 'default';
+  }
+  if (!partial || body.labels !== undefined) data.labels = cleanStringList(body.labels);
+  if (!partial || body.participants !== undefined) data.participants = cleanStringList(body.participants, 50);
+  if (!partial || body.checklist !== undefined) data.checklist = cleanChecklist(body.checklist);
+  if (!partial || body.pinned !== undefined) data.pinned = body.pinned === true;
+  if (!partial || body.archived !== undefined) data.archived = body.archived === true;
+  if (!partial || body.meetingAt !== undefined) {
+    const meetingAt = String(body.meetingAt || '').trim();
+    data.meetingAt = meetingAt || undefined;
+  }
+  return data;
+}
+
+adminRouter.get('/notes', async (_req, res) => {
+  try {
+    res.json(await listNotes());
+  } catch (err) {
+    console.error('[notes] erro ao listar notas:', err);
+    res.status(500).json({ error: 'Erro ao listar notas' });
+  }
+});
+
+adminRouter.post('/notes', async (req, res) => {
+  try {
+    const data = notePayload(req.body || {}) as Omit<Note, 'id' | 'createdAt' | 'updatedAt'>;
+    if (!data.title && !data.content && data.checklist.length === 0) {
+      return res.status(400).json({ error: 'A nota precisa ter título, texto ou checklist' });
+    }
+    res.status(201).json(await createNote(data));
+  } catch (err) {
+    console.error('[notes] erro ao criar nota:', err);
+    res.status(500).json({ error: 'Erro ao criar nota' });
+  }
+});
+
+adminRouter.put('/notes/:id', async (req, res) => {
+  try {
+    if (!(await getNote(req.params.id))) {
+      return res.status(404).json({ error: 'Nota não encontrada' });
+    }
+    const data = notePayload(req.body || {}, true);
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    await updateNote(req.params.id, data);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[notes] erro ao atualizar nota:', err);
+    res.status(500).json({ error: 'Erro ao atualizar nota' });
+  }
+});
+
+adminRouter.delete('/notes/:id', async (req, res) => {
+  try {
+    if (!(await getNote(req.params.id))) {
+      return res.status(404).json({ error: 'Nota não encontrada' });
+    }
+    await deleteNote(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[notes] erro ao apagar nota:', err);
+    res.status(500).json({ error: 'Erro ao apagar nota' });
   }
 });
 

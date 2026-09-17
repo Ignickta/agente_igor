@@ -1,4 +1,4 @@
-import { Subagent, MemoryMessage, Task, AgendaItem, UndoOp } from '../../types';
+import { Subagent, MemoryMessage, Task, AgendaItem, UndoOp, NoteColor, NoteKind } from '../../types';
 import { openai, ChatMessage, supportsCustomTemperature } from '../../services/openai';
 import { config } from '../../config';
 import {
@@ -21,6 +21,11 @@ import {
   markRouteSuggestionApplied,
   updateSubagent,
   unarchiveSharedFact,
+  listNotes,
+  getNote,
+  createNote,
+  updateNote,
+  deleteNote,
 } from '../../services/firebase';
 import { getMaxDailyWorkMinutes } from '../../services/settings';
 import { recordUndo, undoLast } from '../undo';
@@ -239,6 +244,79 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           fato: { type: 'string', description: 'O fato a memorizar, conciso.' },
         },
         required: ['fato'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'criar_nota',
+      description:
+        'Cria uma nota persistente que aparece na área Notas do painel. Use quando o Igor pedir ' +
+        'para anotar, registrar ou guardar um texto, ideia, lista ou ata de reunião. Nota não é ' +
+        'lembrete: se houver data para avisar, use criar_lembrete também.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Título curto da nota.' },
+          conteudo: { type: 'string', description: 'Corpo da nota.' },
+          tipo: { type: 'string', enum: ['nota', 'reuniao'], description: 'Padrão: nota.' },
+          etiquetas: { type: 'array', items: { type: 'string' }, description: 'Marcadores opcionais.' },
+          participantes: { type: 'array', items: { type: 'string' }, description: 'Participantes, para reunião.' },
+          data_reuniao: { type: 'string', description: 'Data/hora local ISO da reunião, se aplicável.' },
+          itens: { type: 'array', items: { type: 'string' }, description: 'Itens opcionais de checklist.' },
+          cor: { type: 'string', enum: ['default', 'yellow', 'green', 'blue', 'purple', 'red'] },
+        },
+        required: ['titulo'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'listar_notas',
+      description:
+        'Lista e busca notas persistentes, com os ids necessários para editar ou apagar. Use ' +
+        'quando o Igor perguntar pelas notas ou se referir a uma nota existente.',
+      parameters: {
+        type: 'object',
+        properties: {
+          busca: { type: 'string', description: 'Texto para procurar no título, conteúdo ou etiquetas.' },
+          incluir_arquivadas: { type: 'boolean', description: 'Padrão false.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'editar_nota',
+      description: 'Edita título, conteúdo, etiquetas, cor, fixação ou arquivamento de uma nota. Liste antes se não souber o id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          titulo: { type: 'string' },
+          conteudo: { type: 'string' },
+          etiquetas: { type: 'array', items: { type: 'string' } },
+          fixada: { type: 'boolean' },
+          arquivada: { type: 'boolean' },
+          cor: { type: 'string', enum: ['default', 'yellow', 'green', 'blue', 'purple', 'red'] },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remover_nota',
+      description: 'Apaga definitivamente uma nota. Liste antes se não souber o id.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
       },
     },
   },
@@ -642,6 +720,9 @@ const WRITE_TOOLS = new Set([
   'desfazer_ultima_acao',
   'acionar_automacao',
   'salvar_fato',
+  'criar_nota',
+  'editar_nota',
+  'remover_nota',
   'aplicar_sugestoes_roteamento',
 ]);
 
@@ -1294,6 +1375,87 @@ async function executeTool(
       return res.saved
         ? `Fato memorizado: "${fato}".`
         : `Já sabia disso (algo equivalente já estava na memória); não dupliquei.`;
+    }
+
+    if (call.function.name === 'criar_nota') {
+      const titulo = String(args.titulo || '').trim();
+      const conteudo = String(args.conteudo || '').trim();
+      if (!titulo && !conteudo) return 'A nota precisa de título ou conteúdo.';
+      const tipo: NoteKind = args.tipo === 'reuniao' ? 'meeting' : 'note';
+      const cores: NoteColor[] = ['default', 'yellow', 'green', 'blue', 'purple', 'red'];
+      const cor = cores.includes(args.cor as NoteColor) ? (args.cor as NoteColor) : 'default';
+      const lista = (value: unknown, max = 30) =>
+        Array.isArray(value)
+          ? value.map((item) => String(item).trim()).filter(Boolean).slice(0, max)
+          : [];
+      const itens = lista(args.itens, 100);
+      const created = await createNote({
+        title: titulo,
+        content: conteudo,
+        kind: tipo,
+        color: cor,
+        labels: lista(args.etiquetas),
+        pinned: false,
+        archived: false,
+        checklist: itens.map((text, index) => ({
+          id: `${Date.now()}-${index}`,
+          text,
+          checked: false,
+        })),
+        ...(tipo === 'meeting' && args.data_reuniao
+          ? { meetingAt: String(args.data_reuniao) }
+          : {}),
+        participants: lista(args.participantes, 50),
+      });
+      return `Nota criada: "${created.title || 'Sem título'}" (id: ${created.id}).`;
+    }
+
+    if (call.function.name === 'listar_notas') {
+      const busca = String(args.busca || '').trim().toLowerCase();
+      const incluirArquivadas = args.incluir_arquivadas === true;
+      const notes = (await listNotes()).filter((note) => {
+        if (note.archived && !incluirArquivadas) return false;
+        if (!busca) return true;
+        return `${note.title} ${note.content} ${note.labels.join(' ')}`.toLowerCase().includes(busca);
+      });
+      if (!notes.length) return busca ? `Nenhuma nota encontrada para "${busca}".` : 'Nenhuma nota encontrada.';
+      const shown = notes.slice(0, 40);
+      const lines = shown.map((note) => {
+        const preview = note.content.replace(/\s+/g, ' ').trim().slice(0, 120);
+        const tags = note.labels.length ? ` [${note.labels.join(', ')}]` : '';
+        return `- id: ${note.id} | ${note.pinned ? '📌 ' : ''}${note.title || 'Sem título'}${tags}${preview ? ` — ${preview}` : ''}`;
+      });
+      const remaining = notes.length - shown.length;
+      return `Notas (${notes.length}):\n${lines.join('\n')}${remaining > 0 ? `\n(+${remaining} não exibidas)` : ''}`;
+    }
+
+    if (call.function.name === 'editar_nota') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id da nota.';
+      const note = await getNote(id);
+      if (!note) return `Nota "${id}" não encontrada. Use listar_notas para ver os ids.`;
+      const updates: Parameters<typeof updateNote>[1] = {};
+      if (args.titulo !== undefined) updates.title = String(args.titulo).trim();
+      if (args.conteudo !== undefined) updates.content = String(args.conteudo);
+      if (Array.isArray(args.etiquetas)) {
+        updates.labels = args.etiquetas.map((item) => String(item).trim()).filter(Boolean).slice(0, 20);
+      }
+      if (args.fixada !== undefined) updates.pinned = args.fixada === true;
+      if (args.arquivada !== undefined) updates.archived = args.arquivada === true;
+      const cores: NoteColor[] = ['default', 'yellow', 'green', 'blue', 'purple', 'red'];
+      if (args.cor !== undefined && cores.includes(args.cor as NoteColor)) updates.color = args.cor as NoteColor;
+      if (!Object.keys(updates).length) return 'Nada para alterar na nota.';
+      await updateNote(id, updates);
+      return `Nota atualizada: "${updates.title || note.title || 'Sem título'}".`;
+    }
+
+    if (call.function.name === 'remover_nota') {
+      const id = String(args.id || '').trim();
+      if (!id) return 'Informe o id da nota.';
+      const note = await getNote(id);
+      if (!note) return `Nota "${id}" não encontrada. Use listar_notas para ver os ids.`;
+      await deleteNote(id);
+      return `Nota removida: "${note.title || 'Sem título'}".`;
     }
 
     if (call.function.name === 'acionar_automacao') {

@@ -13,6 +13,33 @@ export interface Subagent {
   updatedAt?: number;
 }
 
+/** Nota pessoal persistida, inspirada no Google Keep e em notas de reunião. */
+export type NoteKind = 'note' | 'meeting';
+export type NoteColor = 'default' | 'yellow' | 'green' | 'blue' | 'purple' | 'red';
+
+export interface NoteChecklistItem {
+  id: string;
+  text: string;
+  checked: boolean;
+}
+
+export interface Note {
+  id: string;
+  title: string;
+  content: string;
+  kind: NoteKind;
+  color: NoteColor;
+  labels: string[];
+  pinned: boolean;
+  archived: boolean;
+  checklist: NoteChecklistItem[];
+  /** Data/hora opcional quando a nota registra uma reunião. */
+  meetingAt?: string;
+  participants: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** Uma mensagem de memória de conversa. */
 export interface MemoryMessage {
   role: 'user' | 'assistant';
