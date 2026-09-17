@@ -14,6 +14,45 @@ const HUMAN_HANDOFF_REPLY =
   'Boa pergunta 😊 Vou confirmar essa informação com nosso time para te responder certinho. Assim que tivermos o retorno, continuamos por aqui.';
 const SAFE_FAILURE_REASON = 'Não foi possível gerar uma resposta segura para esta mensagem.';
 
+const BUSINESS_TYPE_FORWARD_LABELS: Record<string, string> = {
+  mercado: 'seu mercado',
+  distribuidora: 'sua distribuidora',
+  atacadista: 'sua empresa atacadista',
+  cesta_basica: 'sua empresa de cestas básicas',
+};
+
+function cleanForwardField(value: string | null | undefined): string {
+  return (value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+/** Mensagem pronta para o proprietário copiar e encaminhar ao lead pausado. */
+export function buildPausedLeadForwardMessage(
+  lead: Pick<LeadRecord, 'name' | 'businessType' | 'city'>
+): string {
+  const name = cleanForwardField(lead.name);
+  const businessType = cleanForwardField(lead.businessType);
+  const city = cleanForwardField(lead.city);
+  const businessLabel = BUSINESS_TYPE_FORWARD_LABELS[businessType];
+  const destination = [
+    businessLabel ? `para ${businessLabel}` : '',
+    city ? `em ${city}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    `Olá${name ? `, ${name}` : ''}! Tudo bem?`,
+    `Vi que você demonstrou interesse nos produtos Arroz Marrecão e Predileto${
+      destination ? ` ${destination}` : ''
+    }.`,
+    'Estou entrando em contato para dar continuidade ao seu atendimento e apresentar nossos produtos e condições comerciais.',
+  ].join(' ');
+}
+
 export const LEAD_RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,

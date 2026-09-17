@@ -51,6 +51,7 @@ import { isUnsupportedConversationJid, resolveRemoteJid } from '../services/webh
 import { whatsappChatUrl } from '../services/evolution';
 import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
 import {
+  buildPausedLeadForwardMessage,
   leadSystemPrompt,
   qualificationStatus,
   LEAD_RESPONSE_SCHEMA,
@@ -269,6 +270,31 @@ function suiteLeadIsolation(): void {
     'leads-isolamento',
     'tipo de empresa desconhecido não é qualificado',
     qualificationStatus('José', 'restaurante', 'Salvador') === 'qualifying'
+  );
+
+  const completeForwardMessage = buildPausedLeadForwardMessage({
+    name: 'Charles',
+    businessType: 'mercado',
+    city: 'Brumado',
+  });
+  check(
+    'leads-isolamento',
+    'gera mensagem pronta com os dados já coletados do lead pausado',
+    completeForwardMessage ===
+      'Olá, Charles! Tudo bem? Vi que você demonstrou interesse nos produtos Arroz Marrecão e Predileto para seu mercado em Brumado. Estou entrando em contato para dar continuidade ao seu atendimento e apresentar nossos produtos e condições comerciais.'
+  );
+
+  const partialForwardMessage = buildPausedLeadForwardMessage({
+    name: null,
+    businessType: 'distribuidora',
+    city: null,
+  });
+  check(
+    'leads-isolamento',
+    'omite dados ausentes sem fazer novas perguntas',
+    partialForwardMessage ===
+      'Olá! Tudo bem? Vi que você demonstrou interesse nos produtos Arroz Marrecão e Predileto para sua distribuidora. Estou entrando em contato para dar continuidade ao seu atendimento e apresentar nossos produtos e condições comerciais.' &&
+      !partialForwardMessage.includes('? Você')
   );
 }
 

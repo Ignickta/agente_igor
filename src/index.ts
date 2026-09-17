@@ -28,7 +28,7 @@ import {
   loadLeadBotSettings,
 } from './services/leadSettings';
 import { enqueueMessage } from './services/messageBuffer';
-import { handleLeadMessage } from './agents/leads';
+import { buildPausedLeadForwardMessage, handleLeadMessage } from './agents/leads';
 import { IncomingMessage } from './types';
 
 const app = express();
@@ -295,6 +295,7 @@ async function notifyOwnerAboutPausedLead(
   }
   details.push('O bot foi pausado somente para esse contato. Retome pelo painel quando resolver.');
   await sendText(config.ownerPhone, details.join('\n'));
+  await sendText(config.ownerPhone, buildPausedLeadForwardMessage(lead));
   await markLeadEscalationNotified(lead.contact);
 }
 
