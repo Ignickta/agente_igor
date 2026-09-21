@@ -14,7 +14,6 @@ import {
   getAgendaForDay,
   updateAgendaItem,
   createAgendaItem,
-  getAgendaItem,
   deleteAgendaItem,
   getAgendaItemsByTaskId,
   getPendingRouteSuggestion,
@@ -51,7 +50,6 @@ import {
   monthlyView,
   upcomingView,
   detectOverload,
-  isLaterSlot,
   procrastinationWarning,
   PROCRASTINATION_THRESHOLD,
   dayKey,
@@ -59,11 +57,10 @@ import {
 } from '../orchestrator';
 import { parseLocalIso, timeKey } from '../../services/datetime';
 import {
-  calendarEnabled,
-  createCalendarEvent,
-  updateCalendarEvent,
-  deleteCalendarEvent,
-} from '../../services/googleCalendar';
+  createAppointment,
+  rescheduleAppointment,
+  cancelAppointment,
+} from '../../services/agendaActions';
 import type OpenAI from 'openai';
 import { proactiveMuted } from '../pause';
 
@@ -1648,58 +1645,27 @@ async function executeTool(
       const inicio = String(args.inicio || '').trim();
       const fim = String(args.fim || '').trim();
       const fixo = args.fixo === true;
-      if (!titulo) return 'Informe o título do evento.';
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
-      if (!/^\d{2}:\d{2}$/.test(inicio) || !/^\d{2}:\d{2}$/.test(fim)) {
-        return 'Horários inválidos; use HH:mm (ex: 15:00).';
-      }
-      if (fim <= inicio) return 'O fim deve ser depois do início.';
-      // Idempotência: com plano de muitos itens, o modelo às vezes repete a
-      // chamada para um evento que já criou em rodada anterior do tool-calling
-      // (foi assim que a agenda ganhou itens duplicados). Mesmo título no mesmo
-      // dia com horário sobreposto = já existe; não cria de novo.
-      const normEv = (s: string) => s.trim().toLowerCase();
-      const jaExiste = (await getAgendaForDay(data)).find(
-        (i) => normEv(i.title) === normEv(titulo) && i.startTime < fim && inicio < i.endTime
+      const res = await createAppointment(
+        { title: titulo, date: data, startTime: inicio, endTime: fim, fixed: fixo },
+        { channel: 'whatsapp', contact }
       );
-      if (jaExiste) {
-        return (
-          `Esse evento JÁ ESTÁ na agenda: "${jaExiste.title}" em ${data}, ` +
-          `${jaExiste.startTime}–${jaExiste.endTime} (id: ${jaExiste.id}). Nada foi criado de novo. ` +
-          `Para mudar horário ou título, use editar_item_agenda com esse id.`
-        );
-      }
-      const item = await createAgendaItem({
-        title: titulo,
-        date: data,
-        startTime: inicio,
-        endTime: fim,
-        priority: fixo ? 1 : 3,
-        type: 'event',
-        // Fixo = compromisso do usuário (imutável); móvel = bloco de planejamento
-        // que o reorganizador pode remanejar. O createdBy precisa acompanhar o
-        // fixo, senão a readaptação trava (reorganize pula createdBy === 'user').
-        createdBy: fixo ? 'user' : 'agent',
-      });
-      // F10: evento FIXO também vai para o Google Calendar (best-effort — a
-      // agenda local funciona igual se o Google falhar). Blocos não-fixos são
-      // planejamento interno e não poluem o calendário.
-      let gcalEventId: string | null = null;
-      if (fixo && calendarEnabled()) {
-        try {
-          gcalEventId = await createCalendarEvent({ title: titulo, date: data, startTime: inicio, endTime: fim });
-          if (gcalEventId) await updateAgendaItem(item.id, { gcalEventId });
-        } catch (err) {
-          console.error('[tool] criar_evento: falha ao criar no Google Calendar:', err);
+      if (!res.ok) {
+        if (res.reason === 'duplicate') {
+          const ja = res.existing;
+          return (
+            `Esse evento JÁ ESTÁ na agenda: "${ja.title}" em ${data}, ` +
+            `${ja.startTime}–${ja.endTime} (id: ${ja.id}). Nada foi criado de novo. ` +
+            `Para mudar horário ou título, use editar_item_agenda com esse id.`
+          );
         }
+        if (res.reason === 'missing_title') return 'Informe o título do evento.';
+        if (res.reason === 'invalid_date') return 'Data inválida; use YYYY-MM-DD.';
+        if (res.reason === 'invalid_time') return 'Horários inválidos; use HH:mm (ex: 15:00).';
+        return 'O fim deve ser depois do início.';
       }
-      recordUndo(contact, `a criação do evento "${titulo}"`, async () => {
-        await deleteAgendaItem(item.id);
-        if (gcalEventId) await deleteCalendarEvent(gcalEventId).catch(() => undefined);
-      });
       return (
         `Evento criado: "${titulo}" em ${data}, ${inicio}–${fim}${fixo ? ' (fixo)' : ''}` +
-        `${gcalEventId ? ' — também adicionado ao seu Google Calendar' : ''}.`
+        `${res.gcalEventId ? ' — também adicionado ao seu Google Calendar' : ''}.`
       );
     }
 
@@ -1719,199 +1685,44 @@ async function executeTool(
     if (call.function.name === 'editar_item_agenda') {
       const id = String(args.id || '').trim();
       if (!id) return 'Informe o id do item.';
-      const item = await getAgendaItem(id);
-      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
-
-      const titulo = String(args.titulo || '').trim();
-      const inicio = String(args.inicio || '').trim();
-      const fim = String(args.fim || '').trim();
-      const data = String(args.data || '').trim();
-      if (inicio && !/^\d{2}:\d{2}$/.test(inicio)) return 'Início inválido; use HH:mm.';
-      if (fim && !/^\d{2}:\d{2}$/.test(fim)) return 'Fim inválido; use HH:mm.';
-      if (data && !/^\d{4}-\d{2}-\d{2}$/.test(data)) return 'Data inválida; use YYYY-MM-DD.';
-
-      const updates: Partial<
-        Pick<AgendaItem, 'title' | 'startTime' | 'endTime' | 'date' | 'postponedCount'>
-      > = {};
-      if (titulo) updates.title = titulo;
-      if (inicio) updates.startTime = inicio;
-      if (fim) updates.endTime = fim;
-      if (data) updates.date = data;
-      if (Object.keys(updates).length === 0) {
+      const res = await rescheduleAppointment(
+        {
+          id,
+          title: String(args.titulo || '').trim(),
+          date: String(args.data || '').trim(),
+          startTime: String(args.inicio || '').trim(),
+          endTime: String(args.fim || '').trim(),
+        },
+        { channel: 'whatsapp', contact }
+      );
+      if (!res.ok) {
+        if (res.reason === 'not_found') {
+          return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+        }
+        if (res.reason === 'invalid_time') return 'Início inválido; use HH:mm.';
+        if (res.reason === 'invalid_date') return 'Data inválida; use YYYY-MM-DD.';
+        if (res.reason === 'invalid_range') return 'O fim deve ser depois do início.';
         return 'Nada para alterar: informe título, horários e/ou data.';
       }
-      // F8: mover para um slot MAIS TARDE (outro dia ou hora maior) é adiamento.
-      let adiamentosItem = 0;
-      if (
-        (inicio || data) &&
-        isLaterSlot(item.date, item.startTime, data || item.date, inicio || item.startTime)
-      ) {
-        adiamentosItem = (item.postponedCount ?? 0) + 1;
-        updates.postponedCount = adiamentosItem;
-      }
-      await updateAgendaItem(id, updates);
-      const after = { ...item, ...updates };
-      // F10: item espelhado → propaga a edição para o Google Calendar.
-      if (item.gcalEventId && calendarEnabled()) {
-        try {
-          await updateCalendarEvent(item.gcalEventId, {
-            ...(titulo ? { title: after.title } : {}),
-            date: after.date,
-            startTime: after.startTime,
-            endTime: after.endTime,
-          });
-        } catch (err) {
-          console.error('[tool] editar_item_agenda: falha ao propagar para o Google Calendar:', err);
-        }
-      }
-      // Propaga para o LEMBRETE que originou o bloco: mover o bloco sem mover a
-      // task deixava o lembrete tocando no dia/horário antigo (o "antecipei e
-      // ele continuou lembrando"). Rearma o disparo para o novo horário.
-      let linkedTask: Task | null = null;
-      let linkedTaskPrev: Partial<Omit<Task, 'id' | 'createdAt'>> | null = null;
-      if (item.taskId && (data || inicio || titulo)) {
-        linkedTask = await getTask(item.taskId);
-        if (linkedTask && !linkedTask.completedAt) {
-          linkedTaskPrev = {
-            text: linkedTask.text,
-            remindAt: linkedTask.remindAt,
-            done: linkedTask.done,
-            firedAt: linkedTask.firedAt ?? null,
-            lastNudgeAt: linkedTask.lastNudgeAt ?? null,
-          };
-          await updateTask(linkedTask.id, {
-            ...(titulo ? { text: titulo } : {}),
-            ...(data || inicio
-              ? {
-                  remindAt: parseLocalIso(`${after.date}T${after.startTime}:00`).toISOString(),
-                  done: false,
-                  firedAt: null,
-                  lastNudgeAt: null,
-                }
-              : {}),
-          });
-        } else {
-          linkedTask = null;
-        }
-      }
-      recordUndo(
-        contact,
-        `a edição do item "${item.title}"`,
-        async () => {
-          await updateAgendaItem(id, {
-            title: item.title,
-            startTime: item.startTime,
-            endTime: item.endTime,
-            date: item.date,
-            postponedCount: item.postponedCount ?? 0,
-          });
-          if (linkedTask && linkedTaskPrev) {
-            await updateTask(linkedTask.id, linkedTaskPrev);
-          }
-          if (item.gcalEventId && calendarEnabled()) {
-            await updateCalendarEvent(item.gcalEventId, {
-              title: item.title,
-              date: item.date,
-              startTime: item.startTime,
-              endTime: item.endTime,
-            }).catch(() => undefined);
-          }
-        },
-        [
-          {
-            kind: 'agenda.update',
-            id,
-            data: {
-              title: item.title,
-              startTime: item.startTime,
-              endTime: item.endTime,
-              date: item.date,
-              postponedCount: item.postponedCount ?? 0,
-            },
-          },
-          ...(linkedTask && linkedTaskPrev
-            ? [{ kind: 'task.update', id: linkedTask.id, data: linkedTaskPrev } as UndoOp]
-            : []),
-        ]
-      );
+      const after = res.after;
       const alertaItem =
-        adiamentosItem >= PROCRASTINATION_THRESHOLD
-          ? `\n\n${procrastinationWarning(after.title, adiamentosItem)}`
+        res.postponedCount >= PROCRASTINATION_THRESHOLD
+          ? `\n\n${procrastinationWarning(after.title, res.postponedCount)}`
           : '';
-      const lembreteMovido = linkedTask ? ' O lembrete ligado foi movido junto.' : '';
+      const lembreteMovido = res.linkedTaskMoved ? ' O lembrete ligado foi movido junto.' : '';
       return `Item atualizado: "${after.title}" em ${after.date}, ${after.startTime}–${after.endTime}.${lembreteMovido}${alertaItem}`;
     }
 
     if (call.function.name === 'remover_item_agenda') {
       const id = String(args.id || '').trim();
       if (!id) return 'Informe o id do item.';
-      const item = await getAgendaItem(id);
-      if (!item) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
-      await deleteAgendaItem(id);
-      // Cancela também o LEMBRETE que originou o bloco (compromisso cancelado
-      // = lembrete não deve mais tocar). Recorrentes ficam: a ocorrência some,
-      // a série continua.
-      let removedTask: Task | null = null;
-      if (item.taskId) {
-        const t = await getTask(item.taskId);
-        if (t && !t.recurrence && !t.completedAt) {
-          await deleteTask(t.id);
-          removedTask = t;
-        }
-      }
-      // F10: item espelhado → cancela o evento no Google Calendar também
-      // (senão o próximo sync recriaria o item aqui).
-      let gcalRemovido = false;
-      if (item.gcalEventId && calendarEnabled()) {
-        try {
-          await deleteCalendarEvent(item.gcalEventId);
-          gcalRemovido = true;
-        } catch (err) {
-          console.error('[tool] remover_item_agenda: falha ao remover do Google Calendar:', err);
-        }
-      }
-      recordUndo(contact, `a remoção do item "${item.title}"`, async () => {
-        if (removedTask) {
-          await createTask({
-            text: removedTask.text,
-            remindAt: removedTask.remindAt,
-            to: removedTask.to,
-            ...(removedTask.subagentId ? { subagentId: removedTask.subagentId } : {}),
-            ...(removedTask.estimatedMinutes
-              ? { estimatedMinutes: removedTask.estimatedMinutes }
-              : {}),
-          });
-        }
-        // Recria no Google primeiro (id novo) para religar o espelho.
-        let novoGcalId: string | null = null;
-        if (gcalRemovido) {
-          novoGcalId = await createCalendarEvent({
-            title: item.title,
-            date: item.date,
-            startTime: item.startTime,
-            endTime: item.endTime,
-          }).catch(() => null);
-        }
-        await createAgendaItem({
-          title: item.title,
-          date: item.date,
-          startTime: item.startTime,
-          endTime: item.endTime,
-          priority: item.priority,
-          type: item.type,
-          createdBy: item.createdBy,
-          status: item.status,
-          ...(item.notes ? { notes: item.notes } : {}),
-          ...(item.subagentId ? { subagentId: item.subagentId } : {}),
-          ...(item.estimatedMinutes ? { estimatedMinutes: item.estimatedMinutes } : {}),
-          ...(item.taskId ? { taskId: item.taskId } : {}),
-          ...(novoGcalId ? { gcalEventId: novoGcalId } : {}),
-        });
-      });
+      const res = await cancelAppointment(id, { channel: 'whatsapp', contact });
+      if (!res.ok) return `Item "${id}" não encontrado. Use listar_itens_agenda para ver os ids.`;
+      const { item } = res;
       return (
         `Item removido da agenda: "${item.title}" (${item.date} ${item.startTime}–${item.endTime})` +
-        `${removedTask ? ' — o lembrete ligado foi cancelado junto' : ''}` +
-        `${gcalRemovido ? ' — removido também do Google Calendar' : ''}.`
+        `${res.linkedTaskRemoved ? ' — o lembrete ligado foi cancelado junto' : ''}` +
+        `${res.gcalRemoved ? ' — removido também do Google Calendar' : ''}.`
       );
     }
 
