@@ -296,10 +296,17 @@ A Skill precisa de um endereço público fixo, em HTTPS, com certificado emitido
 por autoridade reconhecida. Certificado autoassinado exige configuração
 específica no console e não será usado.
 
-A definir e registrar na Fase 0:
+Endereço confirmado em 21/09/2026:
 
-- o domínio público do backend e o caminho completo do endpoint
-  (`https://<domínio>/alexa`);
+```text
+https://agente.ntagroupvps.com.br/alexa
+```
+
+É o mesmo backend que já atende o WhatsApp e o painel, atrás do proxy do
+Easypanel, com certificado válido e renovação automática. Nenhum servidor novo
+é criado para a Alexa.
+
+Ainda a conferir na Fase 0:
 - confirmação de que o proxy da hospedagem encaminha esse caminho para a porta
   interna do container e **não** altera o corpo da requisição;
 - confirmação de que o certificado é válido e renova sozinho;
