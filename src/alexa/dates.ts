@@ -167,6 +167,20 @@ export function resolveTimeSlot(value: string | undefined): string | null {
   return v.slice(0, 5);
 }
 
+/**
+ * Horário com a preposição certa: "às 15 horas", mas "ao meio-dia" e
+ * "à meia-noite". Colar "às" em tudo é o tipo de detalhe que passa despercebido
+ * no texto e salta aos ouvidos quando a Alexa fala.
+ */
+export function speakAtTime(time: string): string {
+  const [h, m] = time.split(':').map(Number);
+  if (h === 12 && m === 0) return 'ao meio-dia';
+  if (h === 0 && m === 0) return 'à meia-noite';
+  if (h === 12) return `ao ${speakTime(time)}`;
+  if (h === 0) return `à ${speakTime(time)}`;
+  return `às ${speakTime(time)}`;
+}
+
 /** Fala um horário do jeito que se diz em português. */
 export function speakTime(time: string): string {
   const [h, m] = time.split(':').map(Number);

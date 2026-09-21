@@ -42,7 +42,9 @@ import {
   resolveDayPeriod,
   resolveTimeSlot,
   speakTime,
+  speakAtTime,
 } from '../alexa/dates';
+import { formatAgendaSpeech } from '../alexa/intents';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import {
   normalizeTitle,
@@ -846,6 +848,98 @@ function suiteProcrastination(): void {
  *
  * Todos os casos fixam a data de hoje em 2026-09-21 (uma segunda-feira).
  */
+/**
+ * Como a agenda é FALADA.
+ *
+ * Voz não perdoa lista longa: quem ouve não pode reler. A regra é ler três e
+ * dizer quantos sobraram. Estes casos travam isso — e travam também a frase de
+ * agenda vazia, que precisa soar como resposta, não como falha.
+ */
+function suiteAlexaSpeech(): void {
+  const HOJE = '2026-09-21';
+  const ev = (title: string, date: string, startTime: string): AgendaItem => ({
+    id: title,
+    title,
+    date,
+    startTime,
+    endTime: '23:59',
+    priority: 1,
+    type: 'event',
+    status: 'pending',
+    createdBy: 'user',
+    createdAt: 0,
+  });
+
+  suite('Alexa — leitura da agenda em voz');
+
+  check(
+    'alexa-speech',
+    'agenda vazia soa como resposta',
+    formatAgendaSpeech([], 'amanhã', false, HOJE) === 'Você não tem nada amanhã.',
+    formatAgendaSpeech([], 'amanhã', false, HOJE)
+  );
+
+  const um = formatAgendaSpeech([ev('dentista', '2026-09-22', '10:00')], 'amanhã', false, HOJE);
+  check('alexa-speech', 'um item não diz "1 compromissos"', um === 'Amanhã você tem dentista às 10 horas.', um);
+
+  const dois = formatAgendaSpeech(
+    [ev('dentista', '2026-09-22', '10:00'), ev('reunião com João', '2026-09-22', '15:00')],
+    'amanhã',
+    false,
+    HOJE
+  );
+  check(
+    'alexa-speech',
+    'dois itens são ligados por "e"',
+    dois === 'Amanhã você tem 2 compromissos: dentista às 10 horas e reunião com João às 15 horas.',
+    dois
+  );
+
+  const muitos = formatAgendaSpeech(
+    [
+      ev('academia', '2026-09-22', '07:00'),
+      ev('dentista', '2026-09-22', '10:00'),
+      ev('almoço', '2026-09-22', '12:00'),
+      ev('reunião', '2026-09-22', '15:00'),
+      ev('jantar', '2026-09-22', '20:00'),
+    ],
+    'amanhã',
+    false,
+    HOJE
+  );
+  check(
+    'alexa-speech',
+    'lista longa lê os três primeiros',
+    ['academia', 'dentista', 'almoço'].every((t) => muitos.includes(t)),
+    muitos
+  );
+  check(
+    'alexa-speech',
+    'lista longa NÃO lê do quarto em diante',
+    !muitos.includes('reunião') && !muitos.includes('jantar'),
+    muitos
+  );
+  check('alexa-speech', 'lista longa diz quantos sobraram', muitos.includes('E mais 2.'), muitos);
+  check('alexa-speech', 'lista longa diz o total', muitos.includes('5 compromissos'), muitos);
+
+  const variosDias = formatAgendaSpeech(
+    [ev('dentista', '2026-09-22', '10:00'), ev('academia', '2026-09-23', '07:00')],
+    'nos próximos dias',
+    true,
+    HOJE
+  );
+  check('alexa-speech', 'intervalo de vários dias fala o dia de cada item', variosDias.includes('amanhã, dentista') && variosDias.includes('depois de amanhã, academia'), variosDias);
+
+  const umDia = formatAgendaSpeech([ev('dentista', '2026-09-22', '10:00')], 'amanhã', false, HOJE);
+  check('alexa-speech', 'um só dia NÃO repete o dia em cada item', !umDia.includes('amanhã, dentista'), umDia);
+
+  const almoco = formatAgendaSpeech([ev('almoço', '2026-09-22', '12:00')], 'amanhã', false, HOJE);
+  check('alexa-speech', 'diz "ao meio-dia", não "às meio-dia"', almoco.includes('ao meio-dia'), almoco);
+  check('alexa-speech', 'preposição normal continua "às"', speakAtTime('15:00') === 'às 15 horas', speakAtTime('15:00'));
+  check('alexa-speech', 'meia-noite usa "à"', speakAtTime('00:00') === 'à meia-noite', speakAtTime('00:00'));
+  check('alexa-speech', 'meio-dia e meia usa "ao"', speakAtTime('12:30') === 'ao meio-dia e meia', speakAtTime('12:30'));
+}
+
 function suiteAlexaDates(): void {
   const HOJE = '2026-09-21';
 
@@ -1406,6 +1500,7 @@ async function main(): Promise<void> {
   suiteProcrastination();
   suiteAgendaActions();
   suiteAlexaDates();
+  suiteAlexaSpeech();
   suiteCalendar();
   if (live) {
     await suiteLiveRouting();

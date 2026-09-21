@@ -1,0 +1,122 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "agente igor",
+      "modelConfiguration": {
+        "fallbackIntentSensitivity": {
+          "level": "MEDIUM"
+        }
+      },
+      "intents": [
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.YesIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NoIntent",
+          "samples": []
+        },
+        {
+          "name": "ConsultarAgendaIntent",
+          "slots": [
+            {
+              "name": "data",
+              "type": "AMAZON.DATE"
+            },
+            {
+              "name": "periodoDia",
+              "type": "PeriodoDia"
+            }
+          ],
+          "samples": [
+            "qual é a minha agenda",
+            "qual é a minha agenda de {data}",
+            "qual é a minha agenda {data}",
+            "como está meu dia",
+            "como está meu dia {data}",
+            "o que eu tenho",
+            "o que eu tenho hoje",
+            "o que eu tenho {data}",
+            "o que eu tenho {data} {periodoDia}",
+            "o que eu tenho {periodoDia}",
+            "o que eu tenho de compromisso {data}",
+            "o que tem na agenda {data}",
+            "tenho algo {data}",
+            "tenho alguma coisa {data}",
+            "tenho algum compromisso {data}",
+            "tenho algo {data} {periodoDia}",
+            "me diz minha agenda {data}",
+            "me fala minha agenda de {data}",
+            "lê minha agenda {data}",
+            "ler minha agenda de {data}",
+            "compromissos de {data}",
+            "meus compromissos {data}",
+            "agenda de {data}"
+          ]
+        },
+        {
+          "name": "ProximosCompromissosIntent",
+          "slots": [],
+          "samples": [
+            "quais são meus próximos compromissos",
+            "meus próximos compromissos",
+            "próximos compromissos",
+            "o que vem por aí",
+            "o que eu tenho pela frente",
+            "o que está chegando",
+            "quais os próximos eventos",
+            "o que eu tenho nos próximos dias"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "name": "PeriodoDia",
+          "values": [
+            {
+              "id": "MANHA",
+              "name": {
+                "value": "de manhã",
+                "synonyms": ["manhã", "pela manhã", "na parte da manhã", "cedo"]
+              }
+            },
+            {
+              "id": "TARDE",
+              "name": {
+                "value": "à tarde",
+                "synonyms": ["tarde", "de tarde", "na parte da tarde"]
+              }
+            },
+            {
+              "id": "NOITE",
+              "name": {
+                "value": "à noite",
+                "synonyms": ["noite", "de noite", "na parte da noite"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

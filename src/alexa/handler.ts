@@ -1,5 +1,6 @@
 import { AlexaRequestEnvelope, AlexaResponseEnvelope } from './types';
 import { ask, tell, silent, SPEECH } from './responses';
+import { consultarAgenda, proximosCompromissos } from './intents';
 
 /**
  * Despachante dos pedidos da Alexa.
@@ -8,9 +9,9 @@ import { ask, tell, silent, SPEECH } from './responses';
  * arquivo faz tem de caber no orçamento de poucos segundos da Alexa: nada de
  * LLM, nada de chamada externa.
  *
- * Nesta fase ele só abre a Skill e trata os intents padrão — a agenda ainda
- * não é tocada. Isso é proposital: dá para conferir autenticação e resposta no
- * dispositivo real antes de qualquer operação que escreva.
+ * Por enquanto só lê a agenda. Nenhum intent aqui escreve nada, o que deixa
+ * conferir autenticação, diálogo e consulta no dispositivo real antes de
+ * existir qualquer operação capaz de estragar a agenda.
  */
 export async function handleAlexaRequest(
   envelope: AlexaRequestEnvelope
@@ -34,6 +35,12 @@ export async function handleAlexaRequest(
     const intent = request.intent?.name ?? '';
 
     switch (intent) {
+      case 'ConsultarAgendaIntent':
+        return await consultarAgenda(request.intent);
+
+      case 'ProximosCompromissosIntent':
+        return await proximosCompromissos();
+
       case 'AMAZON.HelpIntent':
         return ask(SPEECH.help, SPEECH.helpReprompt);
 
@@ -45,9 +52,9 @@ export async function handleAlexaRequest(
         return ask(SPEECH.notUnderstood, SPEECH.notUnderstoodReprompt);
 
       default:
-        // Intent da agenda ainda não implementado (Fase 3 em diante).
+        // Criar, remarcar e cancelar entram na fase seguinte.
         return ask(
-          'Ainda não sei fazer isso. Por enquanto eu só consigo abrir e conversar.',
+          'Ainda não sei fazer isso. Por enquanto eu consigo consultar sua agenda.',
           SPEECH.notUnderstoodReprompt
         );
     }
