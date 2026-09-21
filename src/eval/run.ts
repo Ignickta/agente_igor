@@ -35,6 +35,14 @@ import {
   MAX_WHATSAPP_REPLY_CHARS,
 } from '../agents/replyFormat';
 import { AgendaItem } from '../types';
+import {
+  resolveDateSlot,
+  relativeLabel,
+  unambiguousLabel,
+  resolveDayPeriod,
+  resolveTimeSlot,
+  speakTime,
+} from '../alexa/dates';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import {
   normalizeTitle,
@@ -828,6 +836,121 @@ function suiteProcrastination(): void {
  * não pode mudar o comportamento do WhatsApp, e porque escolher o compromisso
  * errado por voz é o pior defeito possível da integração com a Alexa.
  */
+/**
+ * Datas e horas faladas — a tradução do que a Alexa devolve.
+ *
+ * O slot de data da Amazon não devolve só um dia: devolve semana, fim de
+ * semana e mês em formatos próprios. Mandar isso para o banco como se fosse
+ * uma data faz a Skill dizer "você não tem nada", que é o pior tipo de erro —
+ * parece resposta, não falha.
+ *
+ * Todos os casos fixam a data de hoje em 2026-09-21 (uma segunda-feira).
+ */
+function suiteAlexaDates(): void {
+  const HOJE = '2026-09-21';
+
+  suite('Alexa — data falada vira intervalo');
+
+  const dia = resolveDateSlot('2026-09-22', HOJE);
+  check('alexa-dates', 'dia único vira intervalo de um dia', dia?.start === '2026-09-22' && dia?.end === '2026-09-22');
+  check('alexa-dates', 'amanhã é reconhecido como amanhã', dia?.label === 'amanhã');
+
+  const semana = resolveDateSlot('2026-W39', HOJE);
+  check(
+    'alexa-dates',
+    'semana vira sete dias, não uma data quebrada',
+    semana !== null && semana.start <= semana.end && semana.end === '2026-09-27',
+    JSON.stringify(semana)
+  );
+
+  const semanaCorrente = resolveDateSlot('2026-W39', '2026-09-24');
+  check(
+    'alexa-dates',
+    'semana já começada não lê os dias que passaram',
+    semanaCorrente?.start === '2026-09-24',
+    JSON.stringify(semanaCorrente)
+  );
+
+  const fds = resolveDateSlot('2026-W39-WE', HOJE);
+  check(
+    'alexa-dates',
+    'fim de semana vira sábado e domingo',
+    fds?.start === '2026-09-26' && fds?.end === '2026-09-27',
+    JSON.stringify(fds)
+  );
+
+  const mes = resolveDateSlot('2026-10', HOJE);
+  check(
+    'alexa-dates',
+    'mês vira do dia 1 ao último dia',
+    mes?.start === '2026-10-01' && mes?.end === '2026-10-31',
+    JSON.stringify(mes)
+  );
+  check(
+    'alexa-dates',
+    'mês corrente começa hoje, não no dia 1',
+    resolveDateSlot('2026-09', HOJE)?.start === HOJE
+  );
+
+  check('alexa-dates', 'ano é vago demais e é recusado', resolveDateSlot('2026', HOJE) === null);
+  check('alexa-dates', 'estação do ano é recusada', resolveDateSlot('2026-SU', HOJE) === null);
+  check('alexa-dates', 'valor vazio é recusado', resolveDateSlot('', HOJE) === null);
+  check('alexa-dates', 'valor ausente é recusado', resolveDateSlot(undefined, HOJE) === null);
+
+  suite('Alexa — como a data é falada de volta');
+
+  check('alexa-dates', 'hoje', relativeLabel(HOJE, HOJE) === 'hoje');
+  check('alexa-dates', 'amanhã', relativeLabel('2026-09-22', HOJE) === 'amanhã');
+  check('alexa-dates', 'depois de amanhã', relativeLabel('2026-09-23', HOJE) === 'depois de amanhã');
+  check(
+    'alexa-dates',
+    'dia da semana quando é perto',
+    relativeLabel('2026-09-25', HOJE) === 'na sexta-feira',
+    relativeLabel('2026-09-25', HOJE)
+  );
+  check(
+    'alexa-dates',
+    'data por extenso quando é longe',
+    relativeLabel('2026-11-03', HOJE) === 'em 3 de novembro',
+    relativeLabel('2026-11-03', HOJE)
+  );
+
+  check(
+    'alexa-dates',
+    'confirmação fala o dia sem ambiguidade',
+    unambiguousLabel('2026-09-25', HOJE) === 'sexta-feira, 25 de setembro',
+    unambiguousLabel('2026-09-25', HOJE)
+  );
+  check(
+    'alexa-dates',
+    'confirmação de amanhã também diz a data',
+    unambiguousLabel('2026-09-22', HOJE) === 'amanhã, 22 de setembro',
+    unambiguousLabel('2026-09-22', HOJE)
+  );
+
+  suite('Alexa — hora e período do dia');
+
+  check('alexa-dates', '"à tarde" vira faixa de horário', resolveDayPeriod('tarde')?.from === '12:00');
+  check('alexa-dates', '"de manhã" vira faixa de horário', resolveDayPeriod('manhã')?.to === '12:00');
+  check('alexa-dates', '"à noite" vira faixa de horário', resolveDayPeriod('noite')?.from === '18:00');
+  check('alexa-dates', 'período desconhecido não filtra nada', resolveDayPeriod('qualquer coisa') === null);
+
+  check('alexa-dates', 'hora exata é aceita', resolveTimeSlot('15:00') === '15:00');
+  check('alexa-dates', 'hora com segundos é cortada', resolveTimeSlot('15:00:00') === '15:00');
+  check(
+    'alexa-dates',
+    'período no lugar da hora NÃO vira horário',
+    resolveTimeSlot('AF') === null && resolveTimeSlot('MO') === null
+  );
+  check('alexa-dates', 'hora vazia é recusada', resolveTimeSlot('') === null);
+
+  check('alexa-dates', 'fala 15:00 como "15 horas"', speakTime('15:00') === '15 horas');
+  check('alexa-dates', 'fala 12:00 como "meio-dia"', speakTime('12:00') === 'meio-dia');
+  check('alexa-dates', 'fala 00:00 como "meia-noite"', speakTime('00:00') === 'meia-noite');
+  check('alexa-dates', 'fala 15:30 como "15 e 30"', speakTime('15:30') === '15 e 30');
+  check('alexa-dates', 'fala 12:30 como "meio-dia e meia"', speakTime('12:30') === 'meio-dia e meia');
+}
+
 function suiteAgendaActions(): void {
   const item = (
     id: string,
@@ -1282,6 +1405,7 @@ async function main(): Promise<void> {
   suiteDurationCalibration();
   suiteProcrastination();
   suiteAgendaActions();
+  suiteAlexaDates();
   suiteCalendar();
   if (live) {
     await suiteLiveRouting();
