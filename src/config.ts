@@ -159,6 +159,30 @@ export const config = {
       Math.min(120, parseInt(process.env.LEAD_BOT_MAX_MESSAGES_PER_HOUR || '30', 10) || 30)
     ),
   },
+  /**
+   * Integração com a Alexa. A rota é pública na internet, então tudo aqui é
+   * restritivo por padrão: desligada, sem Skill e sem usuário autorizado.
+   */
+  alexa: {
+    /** Kill-switch. Desligada, a rota responde indisponível sem executar nada. */
+    enabled: (process.env.ALEXA_ENABLED || '').toLowerCase() === 'true',
+    /** ID da Skill criada no console; requisição de outra Skill é recusada. */
+    skillId: (process.env.ALEXA_SKILL_ID || '').trim(),
+    /** Conta Amazon autorizada. Vazio = nenhuma ação de agenda é executada. */
+    allowedUserId: (process.env.ALEXA_ALLOWED_USER_ID || '').trim(),
+    /**
+     * Captura única do ID da conta (ver 9.2.1 do plano). Ligada, registra o ID
+     * COMPLETO no log uma vez para ser copiado — e precisa ser desligada logo
+     * em seguida. Nunca deixar ligada em uso normal.
+     */
+    captureUserId: (process.env.ALEXA_CAPTURE_USER_ID || '').toLowerCase() === 'true',
+    /**
+     * Dispensa a validação de assinatura. Existe só para teste local, onde não
+     * há como produzir uma assinatura válida da Amazon. Em produção isto tem de
+     * ficar desligado — com ele ligado, qualquer um pode falar com a rota.
+     */
+    skipSignature: (process.env.ALEXA_SKIP_SIGNATURE || '').toLowerCase() === 'true',
+  },
   timezone: process.env.TZ || 'America/Sao_Paulo',
   /** Hora usada para compromissos de amanhã sem horário explícito. */
   defaultReminderTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(process.env.DEFAULT_REMINDER_TIME || '')

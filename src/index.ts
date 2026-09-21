@@ -30,8 +30,16 @@ import {
 import { enqueueMessage } from './services/messageBuffer';
 import { buildPausedLeadForwardMessage, handleLeadMessage } from './agents/leads';
 import { IncomingMessage } from './types';
+import alexaRouter from './routes/alexa';
 
 const app = express();
+
+// ATENÇÃO À ORDEM: a rota da Alexa precisa do corpo BRUTO (a Amazon assina os
+// bytes exatos que enviou) e por isso é montada ANTES do interpretador de JSON
+// global, que leria e descartaria esse texto. Mover esta linha para baixo
+// quebra a validação de assinatura de um jeito difícil de diagnosticar.
+app.use('/alexa', alexaRouter);
+
 app.use(express.json({ limit: '25mb' }));
 
 // Garante que duas mensagens próximas do mesmo contato não leiam e alterem o
