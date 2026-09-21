@@ -591,6 +591,45 @@ Funcionamento:
 
 Não registrar o `userId` completo em logs comuns. Quando necessário, usar uma versão mascarada ou hash.
 
+#### 9.2.1 Como capturar o ID autorizado
+
+Há uma tensão real entre "nunca registrar o ID completo" e "configurar o ID
+autorizado", já que ele só existe depois da primeira requisição vinda do
+dispositivo. A resolução é tratar a captura como um passo único e explícito, e
+não como um efeito colateral dos logs normais:
+
+1. subir com `ALEXA_ENABLED=true` e `ALEXA_ALLOWED_USER_ID` vazio — nesse estado
+   a rota valida assinatura e Skill ID, responde uma mensagem neutra e **não
+   executa nenhuma ação de agenda**;
+2. ligar uma flag temporária de captura, que registra o ID completo **uma única
+   vez** e volta a desligar sozinha;
+3. abrir a Skill uma vez no Echo;
+4. copiar o ID do log, configurar `ALEXA_ALLOWED_USER_ID` e reiniciar;
+5. apagar a linha de log correspondente e confirmar que os registros seguintes
+   trazem apenas a versão mascarada.
+
+A alternativa, se preferir não registrar o ID em momento algum, é comparar
+hashes: configurar o hash esperado e deixar o backend rejeitar tudo que não
+bater. Isso exige gerar o hash por fora e é mais trabalhoso na primeira vez.
+
+#### 9.2.2 O ID pode mudar
+
+O identificador de usuário da Alexa não é permanente: ele é regenerado quando a
+Skill é desabilitada e habilitada de novo no aplicativo Alexa, e pode mudar em
+outras situações de reinstalação.
+
+Quando isso acontece, tudo continua aparentemente certo — assinatura válida,
+Skill ID correto — mas todas as requisições passam a ser recusadas como conta
+não autorizada. Sem isto documentado, o sintoma parece um bug aleatório.
+
+Providências:
+
+- a mensagem de recusa por usuário deve ser distinta das demais, para
+  identificar a causa só de ouvir;
+- o log de recusa deve dizer explicitamente o motivo `unauthorized_user`;
+- o procedimento de recaptura é o mesmo de 9.2.1, e precisa estar no material de
+  troubleshooting da Fase 6.
+
 ### 9.3 Privacidade de voz e respostas
 
 - não persistir o payload completo da Alexa por padrão;
@@ -891,7 +930,8 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 - testar pronúncia e frases reais;
 - ajustar utterances;
 - testar latência e interrupções;
-- configurar `ALEXA_ALLOWED_USER_ID` definitivo;
+- configurar `ALEXA_ALLOWED_USER_ID` definitivo pelo procedimento de 9.2.1;
+- documentar a recaptura do ID para quando ele mudar (9.2.2);
 - documentar ativação, rollback e troubleshooting.
 
 **Saída:** MVP pronto para uso pessoal diário.
@@ -954,6 +994,7 @@ Se a refatoração da camada de agenda causar regressão, o deploy deve ser reve
 | Títulos parecidos | item errado remarcado/removido | desambiguação e limite de confiança |
 | Reentrega da requisição | duplicação | request ID persistido + deduplicação semântica |
 | Endpoint exposto | acesso indevido | assinatura, Skill ID, user ID e feature flag |
+| ID da conta muda ao reinstalar a Skill | Skill para de responder sem causa aparente | mensagem e log de recusa específicos + procedimento de recaptura documentado |
 | Refatoração muda WhatsApp | regressão em produção | serviço compartilhado + evals antes da Skill |
 | Resposta demora demais | Skill diz que houve problema mesmo com a escrita feita | orçamento de 3s, nada de rede externa no caminho crítico, idempotência na repetição |
 | Corpo da requisição já interpretado antes da rota | assinatura nunca valida e a Skill não abre | preservar o corpo bruto e testar com payload assinado antes do dispositivo |
