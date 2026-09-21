@@ -229,6 +229,36 @@ Essa rota **não** usará `x-admin-token`, porque a Alexa não enviará o token 
 
 O servidor deve responder de forma síncrona com o JSON esperado pela Alexa. Trabalhos externos não devem ser enviados para uma fila com resposta `200` antecipada, como ocorre atualmente no webhook do WhatsApp.
 
+#### 5.3.1 Corpo bruto da requisição (bloqueador)
+
+A Amazon assina o **corpo exato**, byte a byte, que enviou. A validação
+compara essa assinatura com o texto original recebido — não com o objeto já
+interpretado.
+
+O servidor atual registra um interpretador de JSON global logo na inicialização,
+antes de todas as rotas. Ele lê o corpo, transforma em objeto e **descarta o
+texto original**. Se a rota da Alexa for adicionada assim, sem nenhuma outra
+providência, a validação de assinatura falhará em 100% das requisições, mesmo
+com Skill ID, usuário e certificado corretos — e o sintoma será a Skill abrindo
+e respondendo erro imediatamente, sem pista óbvia da causa.
+
+Providências obrigatórias:
+
+- preservar o corpo bruto da rota `/alexa`, seja registrando a rota com um
+  leitor de corpo próprio **antes** do interpretador global, seja guardando o
+  buffer original durante a interpretação;
+- garantir que o buffer preservado seja exatamente o recebido, sem
+  reserialização, reordenação de chaves ou mudança de codificação;
+- aplicar à rota um limite de tamanho próprio e pequeno (o limite global de
+  25 MB existe por causa de mídia do WhatsApp e não faz sentido aqui);
+- incluir um teste que envie um corpo assinado conhecido e confirme que a
+  validação passa — sem esse teste a falha só aparece no dispositivo real.
+
+Em desenvolvimento, quando não há como produzir uma assinatura válida, a
+validação pode ser dispensada por uma variável exclusiva de ambiente local, que
+nunca deve existir em produção e que precisa ser registrada em log a cada
+requisição aceita por esse caminho.
+
 ### 5.4 Dependências sugeridas
 
 Preferencialmente usar os pacotes oficiais do Alexa Skills Kit para Node.js:
@@ -239,6 +269,41 @@ Preferencialmente usar os pacotes oficiais do Alexa Skills Kit para Node.js:
 Antes da implementação será confirmada a compatibilidade da versão corrente dos pacotes com Node.js e Express usados no projeto.
 
 O SDK deve cuidar da estrutura das respostas e parte da validação do protocolo. As restrições locais de Skill ID e usuário continuarão explícitas no código.
+
+### 5.5 Orçamento de tempo de resposta
+
+A Alexa encerra a requisição em torno de **8 segundos**. Estourar esse limite
+faz a Skill responder "houve um problema com a resposta da skill solicitada",
+mesmo que a escrita tenha sido concluída no backend — o que é pior do que uma
+falha limpa, porque o Igor não saberá se o compromisso foi gravado.
+
+Regras:
+
+- meta de resposta: **até 3 segundos** no caminho completo, incluindo Firestore;
+- nada de LLM, transcrição, Google Calendar ou chamada de rede externa no
+  caminho crítico;
+- a rota responde de forma síncrona; ao contrário do webhook do WhatsApp, não
+  existe a opção de confirmar cedo e processar depois;
+- se uma operação passar do orçamento, responder sem afirmar sucesso
+  ("não consegui confirmar agora") e deixar que a idempotência descrita na
+  seção 10 resolva a repetição;
+- medir e registrar a duração de cada requisição desde o início (seção 14), para
+  detectar degradação antes que ela vire timeout.
+
+### 5.6 Endereço público e certificado
+
+A Skill precisa de um endereço público fixo, em HTTPS, com certificado emitido
+por autoridade reconhecida. Certificado autoassinado exige configuração
+específica no console e não será usado.
+
+A definir e registrar na Fase 0:
+
+- o domínio público do backend e o caminho completo do endpoint
+  (`https://<domínio>/alexa`);
+- confirmação de que o proxy da hospedagem encaminha esse caminho para a porta
+  interna do container e **não** altera o corpo da requisição;
+- confirmação de que o certificado é válido e renova sozinho;
+- que o endpoint responde a `POST` e que qualquer outro método é rejeitado.
 
 ## 6. Modelo de interação em português
 
@@ -762,6 +827,8 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 - escolher o nome de invocação;
 - manter a Skill em modo de desenvolvimento;
 - obter o Skill ID;
+- definir e registrar o domínio público, o caminho do endpoint e a validade do
+  certificado (ver 5.6);
 - configurar o endpoint de desenvolvimento quando a rota estiver pronta.
 
 **Saída:** Skill vazia criada e identificada, visível no Echo do Igor.
@@ -779,7 +846,7 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 ### Fase 2 — Endpoint e segurança
 
 - adicionar dependências do ASK SDK;
-- criar `POST /alexa`;
+- criar `POST /alexa` preservando o corpo bruto da requisição (ver 5.3.1);
 - validar assinatura, timestamp, Skill ID e usuário;
 - adicionar feature flag `ALEXA_ENABLED`;
 - implementar `LaunchRequest`, ajuda, cancelamento e fallback;
@@ -836,6 +903,8 @@ O MVP estará concluído quando todos os itens abaixo forem verdadeiros:
 - [ ] “Alexa, abra Agente Igor” inicia uma sessão em português.
 - [ ] A Skill rejeita outra conta Amazon.
 - [ ] A Skill rejeita requisições que não vieram validamente da Alexa.
+- [ ] A validação de assinatura passa com um payload assinado real.
+- [ ] Nenhuma resposta ultrapassa o orçamento de tempo da Alexa.
 - [ ] É possível consultar a agenda de hoje e amanhã.
 - [ ] É possível criar um compromisso fornecendo dados em uma ou mais falas.
 - [ ] Nenhuma criação ocorre antes da confirmação.
@@ -886,7 +955,8 @@ Se a refatoração da camada de agenda causar regressão, o deploy deve ser reve
 | Reentrega da requisição | duplicação | request ID persistido + deduplicação semântica |
 | Endpoint exposto | acesso indevido | assinatura, Skill ID, user ID e feature flag |
 | Refatoração muda WhatsApp | regressão em produção | serviço compartilhado + evals antes da Skill |
-| Resposta demora demais | timeout percebido | consultas diretas, sem LLM, sem Google no caminho crítico |
+| Resposta demora demais | Skill diz que houve problema mesmo com a escrita feita | orçamento de 3s, nada de rede externa no caminho crítico, idempotência na repetição |
+| Corpo da requisição já interpretado antes da rota | assinatura nunca valida e a Skill não abre | preservar o corpo bruto e testar com payload assinado antes do dispositivo |
 | Firestore indisponível | operação incerta | resposta sem afirmar sucesso; idempotência na repetição |
 | Voz ou ruído gera slot incompleto | diálogo frustrante | perguntas curtas, uma informação por vez |
 | Nome de invocação não aprovado | bloqueio de configuração | validar cedo no console e ter nomes alternativos |
