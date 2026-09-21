@@ -78,6 +78,26 @@ Também serão testadas frases de uma etapa, quando aceitas pelo modelo de inter
 
 O nome de invocação definitivo precisa ser validado no console da Alexa, pois nomes de Skill estão sujeitos às regras fonéticas e de certificação da Amazon.
 
+### 2.4 Conta Amazon única para desenvolver e usar
+
+Uma Skill em modo de desenvolvimento **não** é publicada na loja. Ela só fica
+disponível nos dispositivos e aplicativos Alexa logados na **mesma conta Amazon
+usada para criar a Skill no console de desenvolvedor**.
+
+Decisão: a conta do desenvolvedor e a conta do Echo do Igor serão a mesma. Isso
+é o que torna o MVP viável sem publicação, sem *beta test* e sem *account
+linking*.
+
+Consequências que precisam ficar registradas:
+
+- não é necessário convidar testadores nem distribuir a Skill;
+- o Echo precisa estar logado nessa conta **antes** de qualquer teste de voz —
+  em outra conta a Skill simplesmente não aparece, e a Alexa responde algo como
+  "não encontrei essa skill", sem nenhum erro no backend para diagnosticar;
+- se um dia a Skill precisar rodar em outra conta (outro morador, outro Echo),
+  aí sim entram *beta test* ou publicação, e a restrição por usuário descrita
+  em 9.2 precisa ser revista.
+
 ## 3. Objetivos e não objetivos
 
 ### 3.1 Objetivos do MVP
@@ -734,6 +754,9 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 
 ### Fase 0 — Preparação da conta e Skill
 
+- confirmar que o Echo do Igor está logado na mesma conta Amazon que será usada
+  no console de desenvolvedor (ver 2.4) — esta é a primeira verificação, antes
+  de qualquer código;
 - criar ou confirmar a conta Amazon Developer;
 - criar uma Custom Skill em `pt-BR`;
 - escolher o nome de invocação;
@@ -741,7 +764,7 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 - obter o Skill ID;
 - configurar o endpoint de desenvolvimento quando a rota estiver pronta.
 
-**Saída:** Skill vazia criada e identificada.
+**Saída:** Skill vazia criada e identificada, visível no Echo do Igor.
 
 ### Fase 1 — Refatoração segura da agenda
 
