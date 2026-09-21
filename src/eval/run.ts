@@ -34,7 +34,16 @@ import {
   MAX_REPLY_PARTS,
   MAX_WHATSAPP_REPLY_CHARS,
 } from '../agents/replyFormat';
+import { AgendaItem } from '../types';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
+import {
+  normalizeTitle,
+  overlaps,
+  findDuplicate,
+  rankCandidates,
+  isAmbiguous,
+  conflictsIn,
+} from '../services/agendaActions';
 import {
   weekRange,
   monthRange,
@@ -812,6 +821,145 @@ function suiteProcrastination(): void {
 
 // ===================== Suíte F3: Google Calendar (F10) =====================
 
+/**
+ * Camada compartilhada da agenda — as regras que o WhatsApp e a Alexa dividem.
+ *
+ * Existe porque a extração dessas regras de dentro do executor de ferramentas
+ * não pode mudar o comportamento do WhatsApp, e porque escolher o compromisso
+ * errado por voz é o pior defeito possível da integração com a Alexa.
+ */
+function suiteAgendaActions(): void {
+  const item = (
+    id: string,
+    title: string,
+    date: string,
+    startTime: string,
+    endTime: string,
+    extra: Partial<AgendaItem> = {}
+  ): AgendaItem => ({
+    id,
+    title,
+    date,
+    startTime,
+    endTime,
+    priority: 1,
+    type: 'event',
+    status: 'pending',
+    createdBy: 'user',
+    createdAt: 0,
+    ...extra,
+  });
+
+  suite('Agenda compartilhada — sobreposição de horários');
+
+  check('agenda-actions', '10:00–11:00 x 10:30–11:30 → conflito', overlaps('10:00', '11:00', '10:30', '11:30'));
+  check('agenda-actions', '10:00–11:00 x 11:00–12:00 → encosta, não conflita', !overlaps('10:00', '11:00', '11:00', '12:00'));
+  check('agenda-actions', 'intervalo contido conta como conflito', overlaps('10:00', '12:00', '10:30', '11:00'));
+  check('agenda-actions', 'intervalos distantes não conflitam', !overlaps('08:00', '09:00', '14:00', '15:00'));
+
+  suite('Agenda compartilhada — título normalizado');
+
+  check('agenda-actions', 'acento e caixa somem na comparação', normalizeTitle('Reunião  COM  João') === 'reuniao com joao');
+  check('agenda-actions', 'espaço nas bordas some', normalizeTitle('  Dentista  ') === 'dentista');
+
+  suite('Agenda compartilhada — duplicata na criação');
+
+  const doDia = [item('a', 'Dentista', '2026-09-22', '10:00', '11:00')];
+  check(
+    'agenda-actions',
+    'mesmo título com horário sobreposto → duplicata',
+    findDuplicate(doDia, 'dentista', '10:30', '11:30')?.id === 'a'
+  );
+  check(
+    'agenda-actions',
+    'duplicata reconhecida mesmo com acento diferente',
+    findDuplicate([item('b', 'Reunião', '2026-09-22', '15:00', '16:00')], 'reuniao', '15:00', '16:00')?.id === 'b'
+  );
+  check(
+    'agenda-actions',
+    'mesmo título em horário livre NÃO é duplicata',
+    findDuplicate(doDia, 'dentista', '15:00', '16:00') === undefined
+  );
+  check(
+    'agenda-actions',
+    'título diferente no mesmo horário NÃO é duplicata',
+    findDuplicate(doDia, 'academia', '10:00', '11:00') === undefined
+  );
+
+  suite('Agenda compartilhada — escolha do compromisso por voz');
+
+  const semana = [
+    item('1', 'Dentista', '2026-09-22', '10:00', '11:00'),
+    item('2', 'Reunião comercial', '2026-09-22', '09:00', '10:00'),
+    item('3', 'Reunião com João', '2026-09-22', '15:00', '16:00'),
+    item('4', 'Academia', '2026-09-23', '07:00', '08:00'),
+  ];
+
+  const dentista = rankCandidates(semana, { title: 'dentista' });
+  check('agenda-actions', 'título exato vence', dentista[0]?.id === '1' && dentista.length === 1);
+
+  const joao = rankCandidates(semana, { title: 'reunião com joão' });
+  check('agenda-actions', 'título contido vence a palavra solta', joao[0]?.id === '3');
+
+  const reuniao = rankCandidates(semana, { title: 'reunião' });
+  check('agenda-actions', 'termo genérico traz as duas reuniões', reuniao.length === 2);
+  check(
+    'agenda-actions',
+    'duas reuniões empatadas → ambíguo, precisa perguntar',
+    isAmbiguous(semana, { title: 'reunião' })
+  );
+  check(
+    'agenda-actions',
+    'um só candidato → não é ambíguo',
+    !isAmbiguous(semana, { title: 'dentista' })
+  );
+  check(
+    'agenda-actions',
+    'nada parecido → lista vazia',
+    rankCandidates(semana, { title: 'natação' }).length === 0
+  );
+
+  const porHora = rankCandidates(semana, { aroundTime: '15:00' });
+  check('agenda-actions', 'só o horário: item exato na hora vem primeiro', porHora[0]?.id === '3');
+  check(
+    'agenda-actions',
+    'só o horário: itens distantes ficam de fora',
+    porHora.every((i) => i.id !== '4')
+  );
+
+  const titEHora = rankCandidates(semana, { title: 'reunião', aroundTime: '15:00' });
+  check('agenda-actions', 'título + horário desempata sem ambiguidade', titEHora[0]?.id === '3');
+  check(
+    'agenda-actions',
+    'título + horário deixa de ser ambíguo',
+    !isAmbiguous(semana, { title: 'reunião', aroundTime: '15:00' })
+  );
+
+  suite('Agenda compartilhada — conflito de horário');
+
+  const doDia22 = semana.filter((i) => i.date === '2026-09-22');
+  check(
+    'agenda-actions',
+    'novo horário sobre a reunião das 15h → avisa',
+    conflictsIn(doDia22, '15:30', '16:30').length === 1
+  );
+  check(
+    'agenda-actions',
+    'o próprio item não conta como conflito ao remarcar',
+    conflictsIn(doDia22, '15:00', '16:00', '3').length === 0
+  );
+  check(
+    'agenda-actions',
+    'item concluído não gera conflito',
+    conflictsIn(
+      [item('5', 'Almoço', '2026-09-22', '12:00', '13:00', { status: 'done' })],
+      '12:00',
+      '13:00'
+    ).length === 0
+  );
+  check('agenda-actions', 'horário livre não gera conflito', conflictsIn(doDia22, '20:00', '21:00').length === 0);
+}
+
 function suiteCalendar(): void {
   suite('Google Calendar — normalização de eventos (parseEventWindow)');
 
@@ -1133,6 +1281,7 @@ async function main(): Promise<void> {
   suiteDatetime();
   suiteDurationCalibration();
   suiteProcrastination();
+  suiteAgendaActions();
   suiteCalendar();
   if (live) {
     await suiteLiveRouting();

@@ -102,6 +102,23 @@ export type CreateAppointmentResult =
   | { ok: false; reason: 'duplicate'; existing: AgendaItem };
 
 /**
+ * Mesmo título no mesmo dia com horário sobreposto = já existe.
+ *
+ * Núcleo puro, separado do Firestore para poder ser testado sem rede.
+ */
+export function findDuplicate(
+  items: AgendaItem[],
+  title: string,
+  startTime: string,
+  endTime: string
+): AgendaItem | undefined {
+  const alvo = normalizeTitle(title);
+  return items.find(
+    (i) => normalizeTitle(i.title) === alvo && overlaps(startTime, endTime, i.startTime, i.endTime)
+  );
+}
+
+/**
  * Cria um compromisso na agenda.
  *
  * A checagem de duplicata (mesmo título no mesmo dia com horário sobreposto)
@@ -121,11 +138,7 @@ export async function createAppointment(
   }
   if (input.endTime <= input.startTime) return { ok: false, reason: 'invalid_range' };
 
-  const existing = (await getAgendaForDay(input.date)).find(
-    (i) =>
-      normalizeTitle(i.title) === normalizeTitle(title) &&
-      overlaps(input.startTime, input.endTime, i.startTime, i.endTime)
-  );
+  const existing = findDuplicate(await getAgendaForDay(input.date), title, input.startTime, input.endTime);
   if (existing) return { ok: false, reason: 'duplicate', existing };
 
   const item = await createAgendaItem({
@@ -191,13 +204,9 @@ export async function listAppointments(input: ListAppointmentsInput): Promise<Ag
   return input.excludeDone ? items.filter((i) => i.status !== 'done') : items;
 }
 
-export interface FindCandidatesInput {
-  /** Trecho do título falado; vazio devolve tudo do intervalo. */
-  title?: string;
+export interface FindCandidatesInput extends CandidateQuery {
   start: string;
   end: string;
-  /** HH:mm aproximado, quando a pessoa citar o horário em vez do nome. */
-  aroundTime?: string;
   /** Alterações e cancelamentos ignoram o que já está concluído. */
   excludeDone?: boolean;
 }
@@ -218,42 +227,79 @@ export async function findAppointmentCandidates(
     end: input.end,
     excludeDone: input.excludeDone,
   });
-  const alvo = normalizeTitle(input.title ?? '');
-  const termos = alvo.split(' ').filter((t) => t.length > 2);
+  return rankCandidates(items, input);
+}
 
-  const pontuados = items
-    .map((item) => {
-      const titulo = normalizeTitle(item.title);
-      let score = 0;
-      if (alvo) {
-        if (titulo === alvo) score += 100;
-        else if (titulo.includes(alvo)) score += 60;
-        else {
-          const achados = termos.filter((t) => titulo.includes(t)).length;
-          if (achados === 0) return null;
-          score += 20 * achados;
-        }
-      }
-      if (input.aroundTime) {
-        const diff = Math.abs(minutesOf(item.startTime) - minutesOf(input.aroundTime));
-        if (diff === 0) score += 40;
-        else if (diff <= 60) score += 20;
-        else if (!alvo) return null;
-      }
-      return { item, score };
-    })
-    .filter((c): c is { item: AgendaItem; score: number } => c !== null);
+/** Critério de escolha: quanto o item combina com o que foi falado. */
+export interface CandidateQuery {
+  /** Trecho do título falado. */
+  title?: string;
+  /** HH:mm aproximado, quando a pessoa citar o horário em vez do nome. */
+  aroundTime?: string;
+}
 
-  // Desempate por proximidade no tempo: entre dois iguais, o mais próximo de
-  // agora é quase sempre o que a pessoa quis dizer.
-  return pontuados
+/**
+ * Pontua um item contra o que foi falado. `null` = não é candidato.
+ *
+ * Título exato vale mais que título contido, que vale mais que palavras soltas.
+ * O horário aproximado só descarta sozinho quando nenhum título foi dito — se a
+ * pessoa disse o nome, um horário diferente não elimina o item, apenas o
+ * desempata mais abaixo.
+ */
+export function scoreCandidate(item: AgendaItem, query: CandidateQuery): number | null {
+  const alvo = normalizeTitle(query.title ?? '');
+  const titulo = normalizeTitle(item.title);
+  let score = 0;
+
+  if (alvo) {
+    if (titulo === alvo) score += 100;
+    else if (titulo.includes(alvo)) score += 60;
+    else {
+      const termos = alvo.split(' ').filter((t) => t.length > 2);
+      const achados = termos.filter((t) => titulo.includes(t)).length;
+      if (achados === 0) return null;
+      score += 20 * achados;
+    }
+  }
+
+  if (query.aroundTime) {
+    const diff = Math.abs(minutesOf(item.startTime) - minutesOf(query.aroundTime));
+    if (diff === 0) score += 40;
+    else if (diff <= 60) score += 20;
+    else if (!alvo) return null;
+  }
+
+  return score;
+}
+
+/**
+ * Ordena e filtra os candidatos. Núcleo puro: recebe os itens já carregados,
+ * para que a regra de escolha possa ser testada sem tocar no Firestore.
+ */
+export function rankCandidates(items: AgendaItem[], query: CandidateQuery): AgendaItem[] {
+  return items
+    .map((item) => ({ item, score: scoreCandidate(item, query) }))
+    .filter((c): c is { item: AgendaItem; score: number } => c.score !== null)
     .sort(
+      // Desempate por proximidade no tempo: entre dois iguais, o mais próximo
+      // de agora é quase sempre o que a pessoa quis dizer.
       (a, b) =>
         b.score - a.score ||
         a.item.date.localeCompare(b.item.date) ||
         a.item.startTime.localeCompare(b.item.startTime)
     )
     .map((c) => c.item);
+}
+
+/**
+ * Há empate na primeira posição? Nesse caso quem chamou NÃO pode escolher
+ * sozinho — tem de perguntar. É a trava que impede remarcar ou cancelar o
+ * compromisso errado por voz.
+ */
+export function isAmbiguous(items: AgendaItem[], query: CandidateQuery): boolean {
+  const ranked = rankCandidates(items, query);
+  if (ranked.length < 2) return false;
+  return scoreCandidate(ranked[0], query) === scoreCandidate(ranked[1], query);
 }
 
 function minutesOf(time: string): number {
@@ -272,7 +318,16 @@ export async function findConflicts(
   endTime: string,
   ignoreId?: string
 ): Promise<AgendaItem[]> {
-  const items = await getAgendaForDay(date);
+  return conflictsIn(await getAgendaForDay(date), startTime, endTime, ignoreId);
+}
+
+/** Núcleo puro de `findConflicts`, testável sem Firestore. */
+export function conflictsIn(
+  items: AgendaItem[],
+  startTime: string,
+  endTime: string,
+  ignoreId?: string
+): AgendaItem[] {
   return items.filter(
     (i) =>
       i.id !== ignoreId &&
