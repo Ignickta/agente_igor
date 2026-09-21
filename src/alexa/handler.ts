@@ -1,5 +1,5 @@
 import { AlexaRequestEnvelope, AlexaResponseEnvelope } from './types';
-import { ask, tell, silent, SPEECH } from './responses';
+import { ask, tell, SPEECH } from './responses';
 import { consultarAgenda, proximosCompromissos } from './intents';
 
 /**
@@ -15,7 +15,7 @@ import { consultarAgenda, proximosCompromissos } from './intents';
  */
 export async function handleAlexaRequest(
   envelope: AlexaRequestEnvelope
-): Promise<AlexaResponseEnvelope> {
+): Promise<AlexaResponseEnvelope | null> {
   const { request } = envelope;
 
   if (request.type === 'LaunchRequest') {
@@ -23,12 +23,13 @@ export async function handleAlexaRequest(
   }
 
   if (request.type === 'SessionEndedRequest') {
-    // A Amazon encerrou a sessão (silêncio, "para", ou erro). Nada a falar:
-    // responder com fala aqui é erro de protocolo.
+    // A Amazon encerrou a sessão (silêncio, "para", ou erro). O protocolo diz
+    // que a Skill NÃO pode responder a isto — nem com uma resposta vazia. O
+    // `null` faz a rota devolver 200 sem corpo nenhum.
     if (request.error) {
       console.error(`[alexa] sessão encerrada com erro: ${request.error.type} ${request.error.message}`);
     }
-    return silent();
+    return null;
   }
 
   if (request.type === 'IntentRequest') {

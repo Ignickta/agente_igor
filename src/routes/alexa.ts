@@ -69,6 +69,8 @@ router.post(
       if (durationMs > SLOW_REQUEST_MS) {
         console.warn(`[alexa] resposta lenta (${durationMs}ms) em ${intent} — risco de timeout`);
       }
+      // `null` = fim de sessão: o protocolo não admite resposta aqui, nem vazia.
+      if (response === null) return res.status(200).end();
       return res.json(response);
     } catch (err) {
       console.error(`[alexa] error intent=${intent} requestId=${envelope.request.requestId}`, err);

@@ -117,7 +117,11 @@ async function main(): Promise<void> {
   );
 
   r = await post(PORT, envelope(SKILL, USER, { type: 'SessionEndedRequest' }));
-  check('fim de sessão responde sem falar nada', !r.body.includes('outputSpeech'), r.body);
+  check(
+    'fim de sessão responde 200 com corpo VAZIO',
+    r.status === 200 && r.body === '',
+    `status ${r.status}, corpo: ${JSON.stringify(r.body)}`
+  );
 
   await close(server);
 

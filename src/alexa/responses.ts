@@ -36,11 +36,6 @@ export function tell(speech: string): AlexaResponseEnvelope {
   };
 }
 
-/** Resposta sem fala nenhuma (SessionEndedRequest exige isso). */
-export function silent(): AlexaResponseEnvelope {
-  return { version: '1.0', response: { shouldEndSession: true } };
-}
-
 export const SPEECH = {
   welcome: 'Olá, Igor. O que você quer fazer com sua agenda?',
   welcomeReprompt: 'Você pode perguntar o que tem hoje, ou pedir para marcar um compromisso.',
