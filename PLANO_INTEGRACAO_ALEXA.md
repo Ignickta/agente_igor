@@ -402,7 +402,7 @@ O cancelamento sempre exigirá confirmação explícita.
 - `AMAZON.CancelIntent`;
 - `AMAZON.StopIntent`;
 - `AMAZON.FallbackIntent`;
-- `AMAZON.YesIntent` e `AMAZON.NoIntent`, caso a confirmação seja controlada pela aplicação;
+- `AMAZON.YesIntent` e `AMAZON.NoIntent`, obrigatórios, já que a confirmação é controlada pela aplicação (ver 6.4);
 - tratamento de `LaunchRequest` e `SessionEndedRequest`.
 
 ### 6.2 Slots e normalização
@@ -420,6 +420,48 @@ timezone   → config.timezone
 ```
 
 Valores especiais de data retornados pela Alexa, como semana ou fim de semana, não devem ser enviados diretamente ao Firestore. Uma função de normalização converterá cada valor para um intervalo concreto.
+
+#### 6.2.1 Título junto com data e hora (ponto frágil)
+
+A frase mais natural do MVP — "marque dentista amanhã às dez" — é também a mais
+difícil para o modelo de interação, porque mistura **texto livre** com data e
+hora na mesma fala.
+
+Os slots de texto livre da Alexa têm restrições de uso e capturam de forma
+gulosa: ao ouvir "dentista amanhã às dez" é comum o título vir como "dentista
+amanhã às dez" inteiro, ou a data ser engolida pelo título. Isso não é
+configurável por tentativa e erro infinito — precisa de um plano B decidido
+desde já.
+
+Estratégia adotada:
+
+1. **Preferida:** slot de título restrito, com uma lista de valores
+   representativos dos compromissos recorrentes do Igor (dentista, academia,
+   reunião, almoço, médico, aula...), permitindo valores fora da lista. Dá muito
+   mais precisão na separação dos campos.
+2. **Plano B, se a captura continuar ruim:** quebrar em duas etapas — a frase de
+   abertura carrega data e hora, e a Alexa pergunta o nome do compromisso
+   separadamente ("Qual é o nome do compromisso?"). Mais lento, porém confiável.
+3. Manter as duas formas no modelo: frase completa para quando funcionar, frase
+   curta ("marque um compromisso amanhã às dez") sempre disponível.
+
+A confirmação final (seção 6.4) é a rede de proteção: mesmo que o título saia
+errado, o Igor ouve o que será gravado antes de qualquer escrita.
+
+#### 6.2.2 Verificação dos tipos nativos em pt-BR
+
+Nem todo tipo nativo de slot e nem todo intent padrão existem em todos os
+idiomas. Antes de escrever o modelo de interação, confirmar no console, em
+`pt-BR`, a disponibilidade de:
+
+- tipo de data e tipo de hora;
+- tipo de duração — se não houver, a duração será um slot customizado em
+  palavras ("meia hora", "uma hora", "duas horas") ou um número seguido de
+  unidade;
+- `AMAZON.FallbackIntent` — se não houver, o tratamento de frase não entendida
+  precisa de outra abordagem.
+
+Descobrir isso na Fase 0 evita refazer o modelo de interação depois.
 
 ### 6.3 Respostas adequadas para voz
 
@@ -443,6 +485,34 @@ Para listas longas:
 - informar quantos itens adicionais existem;
 - oferecer a leitura do restante;
 - não ler IDs, prioridades ou detalhes internos.
+
+### 6.4 Onde a confirmação é controlada
+
+Existem dois mecanismos possíveis de confirmação e **eles não devem ser
+misturados**: a confirmação automática da própria Alexa, declarada no modelo de
+interação, e a confirmação controlada pela aplicação, usando intents de sim e
+não.
+
+Decisão: **a confirmação é controlada pela aplicação.**
+
+Motivos:
+
+- o texto de confirmação precisa falar a data por extenso e sem ambiguidade
+  (seção 12.3), o que a confirmação automática não faz;
+- a confirmação reforçada de conflito de horário (seção 8.4) é uma segunda
+  pergunta, com texto próprio, fora do que o mecanismo automático cobre;
+- a desambiguação entre candidatos (seção 7.4) já exige estado nos atributos da
+  sessão; concentrar tudo no mesmo lugar evita dois fluxos concorrentes;
+- as mesmas regras poderão ser reaproveitadas pelo WhatsApp e pelo painel.
+
+Consequências:
+
+- o modelo de interação **não** marcará intents ou slots como exigindo
+  confirmação automática;
+- `AMAZON.YesIntent` e `AMAZON.NoIntent` são obrigatórios no modelo;
+- o que está pendente de confirmação fica nos atributos da sessão, com carimbo
+  de tempo, e é descartado quando a sessão termina;
+- um "sim" sem nada pendente responde que não há o que confirmar, e nunca grava.
 
 ## 7. Fluxos conversacionais
 
@@ -864,6 +934,8 @@ O simulador não representa perfeitamente reconhecimento de voz, ruído, pronún
 - criar ou confirmar a conta Amazon Developer;
 - criar uma Custom Skill em `pt-BR`;
 - escolher o nome de invocação;
+- verificar no console quais tipos nativos e intents padrão existem em `pt-BR`
+  (ver 6.2.2);
 - manter a Skill em modo de desenvolvimento;
 - obter o Skill ID;
 - definir e registrar o domínio público, o caminho do endpoint e a validade do
@@ -1000,6 +1072,8 @@ Se a refatoração da camada de agenda causar regressão, o deploy deve ser reve
 | Corpo da requisição já interpretado antes da rota | assinatura nunca valida e a Skill não abre | preservar o corpo bruto e testar com payload assinado antes do dispositivo |
 | Firestore indisponível | operação incerta | resposta sem afirmar sucesso; idempotência na repetição |
 | Voz ou ruído gera slot incompleto | diálogo frustrante | perguntas curtas, uma informação por vez |
+| Título livre engole data e hora da mesma frase | compromisso com nome errado | slot de título com valores representativos, plano B em duas etapas, confirmação falada antes de gravar |
+| Tipo nativo ausente em pt-BR | modelo de interação refeito | verificação no console na Fase 0 |
 | Nome de invocação não aprovado | bloqueio de configuração | validar cedo no console e ter nomes alternativos |
 
 ## 20. Melhorias posteriores
