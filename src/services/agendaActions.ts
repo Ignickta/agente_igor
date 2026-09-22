@@ -10,6 +10,7 @@ import {
   createTask,
   updateTask,
   deleteTask,
+  getPendingTasksBetween,
 } from './firebase';
 import {
   calendarEnabled,
@@ -18,7 +19,7 @@ import {
   deleteCalendarEvent,
 } from './googleCalendar';
 import { recordUndo } from '../agents/undo';
-import { parseLocalIso } from './datetime';
+import { parseLocalIso, dayKey, timeKey } from './datetime';
 
 /**
  * Camada compartilhada de ações da agenda.
@@ -202,6 +203,68 @@ export async function listAppointments(input: ListAppointmentsInput): Promise<Ag
       ? await getAgendaForDay(input.start)
       : await getAgendaInRange(input.start, end);
   return input.excludeDone ? items.filter((i) => i.status !== 'done') : items;
+}
+
+/**
+ * Um item do dia, venha ele da agenda ou dos lembretes.
+ *
+ * A agenda guarda compromissos com hora marcada; os lembretes vivem em outra
+ * coleção e só viram bloco de agenda quando o dia é organizado. Quem pergunta
+ * "o que eu tenho amanhã" quer as duas coisas — separar isso é detalhe de
+ * implementação, não do dia da pessoa.
+ */
+export interface ScheduleEntry {
+  kind: 'event' | 'reminder';
+  id: string;
+  title: string;
+  /** YYYY-MM-DD local. */
+  date: string;
+  /** HH:mm local. */
+  startTime: string;
+}
+
+/**
+ * Agenda e lembretes de um intervalo, juntos e em ordem de horário.
+ *
+ * Um lembrete que JÁ virou bloco na agenda aparece uma vez só, como
+ * compromisso — senão a pessoa ouviria a mesma coisa duas vezes com nomes
+ * diferentes.
+ */
+export async function listScheduleEntries(input: ListAppointmentsInput): Promise<ScheduleEntry[]> {
+  const end = input.end ?? input.start;
+  const [items, tasks] = await Promise.all([
+    listAppointments(input),
+    getPendingTasksBetween(input.start, end),
+  ]);
+
+  const jaNaAgenda = new Set(items.map((i) => i.taskId).filter(Boolean));
+
+  const eventos: ScheduleEntry[] = items.map((i) => ({
+    kind: 'event',
+    id: i.id,
+    title: i.title,
+    date: i.date,
+    startTime: i.startTime,
+  }));
+
+  const lembretes: ScheduleEntry[] = tasks
+    .filter((t) => !jaNaAgenda.has(t.id))
+    .map((t) => {
+      const quando = new Date(t.remindAt);
+      return {
+        kind: 'reminder' as const,
+        id: t.id,
+        title: t.text,
+        date: dayKey(quando),
+        startTime: timeKey(quando),
+      };
+    })
+    // A query traz um dia de folga de cada lado; o recorte exato é aqui.
+    .filter((e) => e.date >= input.start && e.date <= end);
+
+  return [...eventos, ...lembretes].sort(
+    (a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime)
+  );
 }
 
 export interface FindCandidatesInput extends CandidateQuery {

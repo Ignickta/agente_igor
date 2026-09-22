@@ -45,6 +45,7 @@ import {
   speakAtTime,
 } from '../alexa/dates';
 import { formatAgendaSpeech } from '../alexa/intents';
+import { ScheduleEntry } from '../services/agendaActions';
 import { DEFAULT_SUBAGENTS } from '../agents/subagents/defaults';
 import {
   normalizeTitle,
@@ -857,17 +858,19 @@ function suiteProcrastination(): void {
  */
 function suiteAlexaSpeech(): void {
   const HOJE = '2026-09-21';
-  const ev = (title: string, date: string, startTime: string): AgendaItem => ({
+  const ev = (title: string, date: string, startTime: string): ScheduleEntry => ({
+    kind: 'event',
     id: title,
     title,
     date,
     startTime,
-    endTime: '23:59',
-    priority: 1,
-    type: 'event',
-    status: 'pending',
-    createdBy: 'user',
-    createdAt: 0,
+  });
+  const lem = (title: string, date: string, startTime: string): ScheduleEntry => ({
+    kind: 'reminder',
+    id: title,
+    title,
+    date,
+    startTime,
   });
 
   suite('Alexa — leitura da agenda em voz');
@@ -932,6 +935,28 @@ function suiteAlexaSpeech(): void {
 
   const umDia = formatAgendaSpeech([ev('dentista', '2026-09-22', '10:00')], 'amanhã', false, HOJE);
   check('alexa-speech', 'um só dia NÃO repete o dia em cada item', !umDia.includes('amanhã, dentista'), umDia);
+
+  suite('Alexa — lembretes junto com os compromissos');
+
+  const misto = formatAgendaSpeech(
+    [ev('dentista', '2026-09-22', '10:00'), lem('pagar o boleto', '2026-09-22', '18:00')],
+    'amanhã',
+    false,
+    HOJE
+  );
+  check('alexa-speech', 'lembrete é anunciado como lembrete', misto.includes('lembrete de pagar o boleto'), misto);
+  check('alexa-speech', 'compromisso NÃO vira lembrete', !misto.includes('lembrete de dentista'), misto);
+  check('alexa-speech', 'os dois entram na mesma contagem', misto.includes('2 compromissos'), misto);
+
+  const soLembrete = formatAgendaSpeech([lem('ligar pro contador', '2026-09-22', '09:00')], 'amanhã', false, HOJE);
+  check(
+    'alexa-speech',
+    'dia só com lembrete não soa vazio',
+    soLembrete === 'Amanhã você tem lembrete de ligar pro contador às 9 horas.',
+    soLembrete
+  );
+
+  suite('Alexa — preposição de horário');
 
   const almoco = formatAgendaSpeech([ev('almoço', '2026-09-22', '12:00')], 'amanhã', false, HOJE);
   check('alexa-speech', 'diz "ao meio-dia", não "às meio-dia"', almoco.includes('ao meio-dia'), almoco);

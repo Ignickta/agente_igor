@@ -612,6 +612,31 @@ export async function getPendingTasks(): Promise<Task[]> {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Task));
 }
 
+/**
+ * Lembretes PENDENTES que disparam num intervalo de dias locais.
+ *
+ * `remindAt` é ISO/UTC e o intervalo é em dias locais, então as bordas não
+ * coincidem: a query recorta com folga de um dia para cada lado — só para
+ * limitar volume — e quem decide o dia exato é o filtro em memória de quem
+ * chamou. Varrer a coleção inteira e filtrar depois é o caminho conhecido para
+ * estourar a cota.
+ *
+ * Usa o mesmo índice composto (done ASC, remindAt ASC) de `getDueTasks`.
+ */
+export async function getPendingTasksBetween(start: string, end: string): Promise<Task[]> {
+  const dayMs = 86_400_000;
+  const from = new Date(new Date(`${start}T12:00:00Z`).getTime() - dayMs).toISOString();
+  const to = new Date(new Date(`${end}T12:00:00Z`).getTime() + dayMs).toISOString();
+  const snap = await tasksCol
+    .where('done', '==', false)
+    .where('remindAt', '>=', from)
+    .where('remindAt', '<=', to)
+    .get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Task))
+    .filter((t) => taskHasReminder(t));
+}
+
 /** Lista todas as tarefas, ordenadas por horário de lembrar (crescente). */
 export async function listTasks(): Promise<Task[]> {
   const snap = await tasksCol.get();

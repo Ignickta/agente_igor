@@ -1,5 +1,4 @@
-import { AgendaItem } from '../types';
-import { listAppointments } from '../services/agendaActions';
+import { listScheduleEntries, ScheduleEntry } from '../services/agendaActions';
 import { dayKey, addDays, timeKey } from '../services/datetime';
 import { AlexaIntent, AlexaResponseEnvelope } from './types';
 import { ask, SPEECH } from './responses';
@@ -29,18 +28,22 @@ function slot(intent: AlexaIntent | undefined, name: string): string | undefined
  * Quem ouve não pode reler: ler dez compromissos seguidos não informa, cansa.
  * Por isso lê três e diz quantos sobraram. O dia só entra na fala quando o
  * intervalo cobre mais de um dia — repetir "amanhã" em cada item soa robótico.
+ *
+ * Lembrete é anunciado como lembrete: sem isso, "pagar o boleto às 18 horas"
+ * soa como compromisso marcado, e a pessoa se organiza pelo que ouviu errado.
  */
 export function formatAgendaSpeech(
-  items: AgendaItem[],
+  items: ScheduleEntry[],
   rangeLabel: string,
   multiDay: boolean,
   today = dayKey()
 ): string {
   if (items.length === 0) return `Você não tem nada ${rangeLabel}.`;
 
-  const diz = (i: AgendaItem): string => {
+  const diz = (i: ScheduleEntry): string => {
     const quando = multiDay ? `${relativeLabel(i.date, today)}, ` : '';
-    return `${quando}${i.title} ${speakAtTime(i.startTime)}`;
+    const tipo = i.kind === 'reminder' ? 'lembrete de ' : '';
+    return `${quando}${tipo}${i.title} ${speakAtTime(i.startTime)}`;
   };
 
   const lidos = items.slice(0, MAX_FALADOS).map(diz);
@@ -69,6 +72,9 @@ function capitalize(text: string): string {
 /**
  * "O que eu tenho amanhã?", "tenho algo sexta à tarde?"
  *
+ * Lê compromissos e lembretes juntos: quem pergunta quer o dia inteiro, não a
+ * coleção onde a coisa foi guardada.
+ *
  * Sem data falada, assume hoje — é o que a pessoa quer dizer em 90% das vezes
  * e evita uma pergunta a mais no meio da conversa.
  */
@@ -80,7 +86,7 @@ export async function consultarAgenda(intent: AlexaIntent | undefined): Promise<
     label: 'hoje',
   };
 
-  const items = await listAppointments({
+  const items = await listScheduleEntries({
     start: range.start,
     end: range.end,
     excludeDone: true,
@@ -114,7 +120,7 @@ export async function proximosCompromissos(): Promise<AlexaResponseEnvelope> {
   const agora = timeKey();
 
   const items = (
-    await listAppointments({
+    await listScheduleEntries({
       start: hoje,
       end: addDays(hoje, DIAS_PROXIMOS),
       excludeDone: true,
