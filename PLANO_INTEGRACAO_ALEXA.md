@@ -1,6 +1,6 @@
 # Plano de implementação — Alexa no Agente Igor
 
-**Status:** planejamento  
+**Status:** em implementação — ver a seção 23  
 **Escopo:** uso pessoal e exclusivo do Igor  
 **Frase de entrada pretendida:** “Alexa, abra Agente Igor”  
 **Dependência do Google Calendar:** nenhuma  
@@ -1123,3 +1123,73 @@ Essa sequência entrega valor progressivamente e mantém as operações de escri
 - [Security Requirements for Alexa Skills](https://developer.amazon.com/en-US/docs/alexa/custom-skills/security-testing-for-an-alexa-skill.html)
 - [Account Linking](https://developer.amazon.com/en-US/alexa/alexa-skills-kit/get-deeper/account-linking-api)
 
+---
+
+## 23. Onde paramos (21/09/2026)
+
+### Pronto e no ar
+
+Tudo abaixo está no `main` e deployado na VPS (commit `bc866c2`).
+
+- **Camada compartilhada da agenda.** Criar, consultar, buscar, remarcar e
+  cancelar saíram de dentro do executor de ferramentas do WhatsApp e viraram um
+  serviço próprio. O WhatsApp já usa; as respostas dele continuam idênticas
+  palavra por palavra. Uma mudança de comportamento deliberada: a detecção de
+  duplicata passou a ignorar acento (antes "reuniao" e "reunião" viravam dois
+  compromissos).
+- **Rota da Alexa**, montada antes do interpretador de JSON global para
+  preservar o corpo bruto assinado. Recusa por Skill errada, conta errada,
+  assinatura inválida, carimbo velho e integração desligada, cada uma com fala
+  própria.
+- **Consulta por voz**: "o que eu tenho hoje/amanhã/sexta", filtro por período
+  do dia e próximos compromissos. Lê agenda e lembretes juntos, anunciando
+  lembrete como lembrete.
+- **Tradução de datas faladas** (dia, semana, fim de semana, mês) para
+  intervalos concretos no fuso do Igor.
+- **Modelo de interação pt-BR** carregado e construído no console.
+- **Endpoint configurado** no console, apontando para
+  `https://agente.ntagroupvps.com.br/alexa`, com certificado curinga.
+- **Conta autorizada registrada** (`ALEXA_ALLOWED_USER_ID`), captura desligada.
+- **Testes**: 230 evals + 9 casos de fumaça da rota (`npm run smoke:alexa`),
+  incluindo a trava que detecta se alguém quebrar a ordem dos middlewares.
+
+### Falta testar (é aqui que retomamos)
+
+Nada disso foi exercitado num Echo real ainda.
+
+1. Abrir a Skill: "Alexa, abra agente igor" → deve responder
+   "Olá, Igor. O que você quer fazer com sua agenda?".
+2. "o que eu tenho hoje" — dia com compromissos, dia vazio, dia só com
+   lembrete.
+3. "o que eu tenho amanhã", "tenho algo sexta", "tenho algo hoje à tarde".
+4. "quais são meus próximos compromissos".
+5. Dia com mais de três itens: confirmar que lê três e diz quantos sobraram.
+6. Como soa a fala: horários ("meio-dia", "15 horas"), nomes próprios, e se
+   alguma frase ficou comprida demais para ouvir.
+7. Latência percebida entre a pergunta e a resposta.
+8. Ajuda, "para" e uma frase sem sentido (não deve encerrar a sessão).
+
+### Ainda não implementado
+
+- **Criar compromisso por voz** (Fase 4): slots, diálogo para o que faltar,
+  confirmação falada com data sem ambiguidade, aviso de conflito de horário e
+  idempotência por requisição.
+- **Remarcar e cancelar** (Fase 5): busca de candidatos, desambiguação por voz,
+  preservação da duração.
+- O modelo de interação atual **só tem os intents de consulta** — criar,
+  remarcar e cancelar precisarão de um novo build no console.
+- A decisão de 6.2.1 (título falado junto com data e hora) só será exercitada
+  na Fase 4; é o ponto mais frágil previsto.
+
+### Detalhes que custaram tempo e não podem ser perdidos
+
+- O agente **não está no Easypanel**. Ele roda como container próprio na VPS; as
+  variáveis ficam em `/opt/agente-igor.env` e só são relidas rodando
+  `bash /opt/agente-igor/deploy.sh`. Os projetos do Easypanel (`crm`,
+  `evolution-api`) são outros sistemas.
+- Salvar o modelo no console **não** o publica: sem clicar em *Build skill* e
+  esperar o carimbo de horário mudar, a Alexa continua usando o modelo antigo —
+  e responde "não consegui encontrar nenhuma Skill de vídeo", que não parece
+  nada com o problema real.
+- `SessionEndedRequest` não admite resposta, nem vazia. Responder fazia o
+  simulador dizer "a Skill não forneceu uma resposta válida".
