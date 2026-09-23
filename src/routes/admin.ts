@@ -681,21 +681,35 @@ adminRouter.delete('/subagents/:id', async (req, res) => {
 
 // ===================== Tarefas / Lembretes =====================
 
+// `clientRequestId` (opcional) vira o id do documento: se o painel reenviar a
+// mesma criação depois de um timeout, a tarefa não é duplicada.
 adminRouter.post('/tasks', async (req, res) => {
   try {
-    const { text, remindAt, to, subagentId, priority } = req.body;
+    const { text, remindAt, to, subagentId, priority, clientRequestId } = req.body;
     if (!text) {
       return res.status(400).json({ error: 'text é obrigatório' });
     }
+    if (clientRequestId !== undefined && !/^[A-Za-z0-9_-]{8,64}$/.test(String(clientRequestId))) {
+      return res.status(400).json({ error: 'clientRequestId inválido' });
+    }
     const hasReminder = !!remindAt;
-    const task = await createTask({
-      text,
-      remindAt: hasReminder ? remindAt : new Date().toISOString(),
-      hasReminder,
-      to: to || config.ownerPhone,
-      ...(subagentId ? { subagentId } : {}),
-      ...(priority !== undefined ? { priority: Number(priority) } : {}),
-    });
+    const startedAt = Date.now();
+    const task = await createTask(
+      {
+        text,
+        remindAt: hasReminder ? remindAt : new Date().toISOString(),
+        hasReminder,
+        to: to || config.ownerPhone,
+        ...(subagentId ? { subagentId } : {}),
+        ...(priority !== undefined ? { priority: Number(priority) } : {}),
+      },
+      clientRequestId
+    );
+    // Rastro para investigar o timeout de 10s do painel ao criar tarefa.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > 2000) {
+      console.warn(`[tasks] criação lenta: ${elapsedMs}ms no Firestore (id ${task.id})`);
+    }
     res.status(201).json(task);
   } catch (err) {
     console.error('[tasks] erro ao criar tarefa:', err);

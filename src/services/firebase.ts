@@ -420,13 +420,32 @@ export function taskHasReminder(task: Task): boolean {
   return Number.isFinite(remindTime) && Math.abs(remindTime - task.createdAt) > 60_000;
 }
 
-export async function createTask(data: Omit<Task, 'id' | 'createdAt' | 'done'>): Promise<Task> {
+/**
+ * Cria uma tarefa. Com `id`, a gravação é idempotente: se o documento já
+ * existe (o painel reenviou a mesma criação depois de um timeout), devolve a
+ * tarefa gravada na primeira vez em vez de duplicar.
+ */
+export async function createTask(
+  data: Omit<Task, 'id' | 'createdAt' | 'done'>,
+  id?: string
+): Promise<Task> {
   const task = withoutUndefined({ ...data, done: false, createdAt: Date.now() }) as Omit<
     Task,
     'id'
   >;
-  const ref = await tasksCol.add(task);
-  return { id: ref.id, ...task };
+  if (!id) {
+    const ref = await tasksCol.add(task);
+    return { id: ref.id, ...task };
+  }
+  try {
+    await tasksCol.doc(id).create(task);
+    return { id, ...task };
+  } catch (err) {
+    // 6 = ALREADY_EXISTS no gRPC do Firestore.
+    if ((err as { code?: number }).code !== 6) throw err;
+    const existing = await tasksCol.doc(id).get();
+    return { id, ...existing.data() } as Task;
+  }
 }
 
 /**
