@@ -68,7 +68,7 @@ import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent, PendingPrompt } from '../types';
 import { taskAllowedDuringPause } from '../agents/pause';
 import { isUnsupportedConversationJid, resolveRemoteJid } from '../services/webhookParser';
-import { whatsappChatUrl } from '../services/evolution';
+import { normalizeRecipient, whatsappChatUrl } from '../services/evolution';
 import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
 import {
   buildPausedLeadForwardMessage,
@@ -228,6 +228,11 @@ function suiteLeadIsolation(): void {
     'leads-isolamento',
     'preserva celular brasileiro que já tem o 9º dígito',
     whatsappChatUrl('5577988429076') === 'https://wa.me/5577988429076'
+  );
+  check(
+    'leads-isolamento',
+    'preserva o JID ao enviar uma notificação para grupo',
+    normalizeRecipient('120363430073302512@g.us') === '120363430073302512@g.us'
   );
   check(
     'leads-isolamento',

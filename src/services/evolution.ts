@@ -19,7 +19,7 @@ export async function sendText(
   text: string,
   delayMs = 0
 ): Promise<void> {
-  const number = normalizeNumber(to);
+  const number = normalizeRecipient(to);
   if (process.env.DISABLE_WHATSAPP === '1') {
     console.log(`[dry-run] sendText → ${number}: ${text.slice(0, 80)}`);
     return;
@@ -155,6 +155,16 @@ export async function ensureConnected(): Promise<void> {
 /** Remove sufixos do JID (@s.whatsapp.net) e caracteres não numéricos. */
 export function normalizeNumber(jidOrNumber: string): string {
   return jidOrNumber.split('@')[0].replace(/\D/g, '');
+}
+
+/**
+ * Normaliza um destinatário sem destruir JIDs de grupos do WhatsApp.
+ * Telefones continuam sendo enviados somente com dígitos, como antes.
+ */
+export function normalizeRecipient(jidOrNumber: string): string {
+  const value = jidOrNumber.trim();
+  if (/^\d+(?:-\d+)?@g\.us$/.test(value)) return value;
+  return normalizeNumber(value);
 }
 
 /**

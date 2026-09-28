@@ -135,6 +135,14 @@ export const config = {
   },
   ownerPhone: (process.env.OWNER_PHONE || '').replace(/\D/g, ''),
   /**
+   * Destino exclusivo dos avisos comerciais. Aceita telefone ou JID de grupo
+   * (ex: 120363000000000000@g.us). Sem valor, mantém o comportamento antigo e
+   * envia os avisos ao dono.
+   */
+  leadNotificationRecipient:
+    (process.env.LEAD_NOTIFICATION_RECIPIENT || '').trim() ||
+    (process.env.OWNER_PHONE || '').replace(/\D/g, ''),
+  /**
    * Atendimento comercial para contatos que não pertencem à allowlist pessoal.
    * Fica isolado do agente pessoal: não acessa agenda, tarefas, subagentes nem
    * memória do dono.

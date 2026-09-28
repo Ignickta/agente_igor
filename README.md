@@ -104,6 +104,7 @@ Preencha o `.env`:
 | `FIREBASE_PRIVATE_KEY` | Private key da service account (entre aspas, com `\n`) |
 | `PORT` | Porta do servidor (padrão 3000) |
 | `OWNER_PHONE` *(opcional)* | Seu número para mensagens proativas (ex: `5511999999999`) |
+| `LEAD_NOTIFICATION_RECIPIENT` *(opcional)* | Telefone ou JID de grupo que recebe exclusivamente os avisos comerciais. Se vazio, usa `OWNER_PHONE`. |
 | `ADMIN_TOKEN` *(opcional)* | Token para proteger as rotas `/admin` |
 | `ALLOWED_NUMBERS` *(opcional)* | Números autorizados a falar com o agente (só dígitos, separados por vírgula). O dono já entra automático. |
 | `LEAD_BOT_ENABLED` *(opcional)* | Ativa o atendimento comercial para números fora da allowlist (`true`/`false`). |
@@ -117,7 +118,7 @@ Preencha o `.env`:
 
 As configurações do atendimento comercial também podem ser editadas em **Configurações → Atendimento** no painel. Os valores salvos no painel são aplicados sem reiniciar o backend e substituem os defaults do `.env`.
 
-Quando o atendente coleta nome, tipo de empresa e cidade de um perfil aceito, o lead é marcado como qualificado e o `OWNER_PHONE` recebe um único resumo. Consumidores pessoa física são registrados como não qualificados e não geram aviso comercial.
+Quando o atendente coleta nome, tipo de empresa e cidade de um perfil aceito, o lead é marcado como qualificado e o `LEAD_NOTIFICATION_RECIPIENT` recebe um único resumo (ou o `OWNER_PHONE`, quando não houver destino separado). Consumidores pessoa física são registrados como não qualificados e não geram aviso comercial.
 
 > **Firebase:** baixe a service account em *Configurações do projeto → Contas de serviço → Gerar nova chave privada* e copie `project_id`, `client_email` e `private_key`.
 

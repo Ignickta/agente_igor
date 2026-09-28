@@ -254,7 +254,11 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
 
       if (lead?.status === 'waiting_human') {
         await notifyOwnerAboutPausedLead(lead, merged);
-      } else if (lead?.status === 'qualified' && !lead.notifiedAt && config.ownerPhone) {
+      } else if (
+        lead?.status === 'qualified' &&
+        !lead.notifiedAt &&
+        config.leadNotificationRecipient
+      ) {
         const typeLabel: Record<string, string> = {
           mercado: 'Mercado',
           distribuidora: 'Distribuidora',
@@ -262,7 +266,7 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
           cesta_basica: 'Empresa de cesta básica',
         };
         await sendText(
-          config.ownerPhone,
+          config.leadNotificationRecipient,
           [
             '🌾 *Novo lead qualificado*',
             `Nome: ${lead.name}`,
@@ -289,7 +293,7 @@ async function notifyOwnerAboutPausedLead(
   lead: LeadRecord,
   latestMessage?: string
 ): Promise<void> {
-  if (!config.ownerPhone || lead.escalationNotifiedAt) return;
+  if (!config.leadNotificationRecipient || lead.escalationNotifiedAt) return;
   const details = [
     '⚠️ *Lead aguardando sua ajuda*',
     `Contato: ${whatsappChatUrl(lead.contact)}`,
@@ -302,8 +306,8 @@ async function notifyOwnerAboutPausedLead(
     details.push(`Mensagem: ${safeNotificationText(latestMessage)}`);
   }
   details.push('O bot foi pausado somente para esse contato. Retome pelo painel quando resolver.');
-  await sendText(config.ownerPhone, details.join('\n'));
-  await sendText(config.ownerPhone, buildPausedLeadForwardMessage(lead));
+  await sendText(config.leadNotificationRecipient, details.join('\n'));
+  await sendText(config.leadNotificationRecipient, buildPausedLeadForwardMessage(lead));
   await markLeadEscalationNotified(lead.contact);
 }
 
