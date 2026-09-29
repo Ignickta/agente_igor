@@ -265,6 +265,11 @@ function suiteLeadIsolation(): void {
   );
   check(
     'leads-isolamento',
+    'avisa só uma vez que não vende ao consumidor (sem "reforçar" nas despedidas)',
+    /não há venda direta ao consumidor UMA única vez.*não repita/is.test(prompt)
+  );
+  check(
+    'leads-isolamento',
     'proíbe tirar pedido e fechar venda',
     /nunca tire pedido.*fechamento de venda/i.test(prompt)
   );
