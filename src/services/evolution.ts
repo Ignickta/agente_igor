@@ -24,18 +24,45 @@ export async function sendText(
     console.log(`[dry-run] sendText → ${number}: ${text.slice(0, 80)}`);
     return;
   }
-  try {
-    // `delay` faz a Evolution exibir "digitando..." pelo tempo informado
-    // antes de entregar a mensagem — feedback natural sem endpoint extra.
-    await client.post(`/message/sendText/${config.evolution.instance}`, {
-      number,
-      text,
-      ...(delayMs > 0 ? { delay: delayMs } : {}),
-    });
-  } catch (err) {
-    logAxiosError('sendText', err);
-    throw err;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      // `delay` faz a Evolution exibir "digitando..." pelo tempo informado
+      // antes de entregar a mensagem — feedback natural sem endpoint extra.
+      await client.post(`/message/sendText/${config.evolution.instance}`, {
+        number,
+        text,
+        ...(delayMs > 0 ? { delay: delayMs } : {}),
+      });
+      return;
+    } catch (err) {
+      logAxiosError('sendText', err);
+      const wait = SEND_RETRY_DELAYS_MS[attempt];
+      if (wait === undefined || !isEvolutionUnreachable(err)) throw err;
+      console.warn(
+        `[evolution:sendText] WhatsApp fora do ar; nova tentativa ${attempt + 2} em ${wait / 1000}s → ${number}`
+      );
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
   }
+}
+
+/**
+ * Esperas entre tentativas quando a Evolution está fora do ar (~8 min no
+ * total). Em 2026-09-29 a VPS reiniciou e a resposta a um lead se perdeu
+ * porque a Evolution ainda estava subindo e devolveu 502.
+ */
+const SEND_RETRY_DELAYS_MS = [15_000, 45_000, 120_000, 300_000];
+
+/**
+ * Só repete quando a mensagem com certeza NÃO saiu: proxy sem destino
+ * (502/503) ou conexão recusada. Timeout fica de fora — a mensagem pode ter
+ * sido entregue e repetir duplicaria no WhatsApp do contato.
+ */
+function isEvolutionUnreachable(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  const status = err.response?.status;
+  if (status === 502 || status === 503) return true;
+  return !err.response && (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND');
 }
 
 /**
