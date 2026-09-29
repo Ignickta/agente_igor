@@ -1496,6 +1496,21 @@ async function suiteLiveLeadQualification(): Promise<void> {
     complete ? JSON.stringify(complete) : 'null'
   );
 
+  // Caso real de 2026-09-29: a pergunta de entrega pausava o lead antes da cidade.
+  const delivery = await qualify(
+    'Quero revender o Marrecão em meu estabelecimento! Vocês entregam aqui?'
+  );
+  check(
+    'live-leads',
+    'pergunta de entrega de comprador não pausa: registra a dúvida e pede a cidade',
+    !!delivery &&
+      delivery.needsHuman === false &&
+      delivery.status === 'qualifying' &&
+      !!delivery.pendingQuestion &&
+      /cidade/i.test(delivery.reply),
+    delivery ? JSON.stringify(delivery) : 'null'
+  );
+
   const consumer = await qualify('Quero comprar dois pacotes para usar em casa');
   check(
     'live-leads',

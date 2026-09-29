@@ -96,6 +96,8 @@ export interface LeadRecord {
   status: LeadStatus;
   disqualificationReason: string | null;
   humanReason: string | null;
+  /** Dúvida comercial do lead (entrega, preço...) para o time responder. */
+  pendingQuestion?: string | null;
   createdAt: number;
   updatedAt: number;
   qualifiedAt: number | null;
@@ -119,6 +121,7 @@ export async function saveLead(
     | 'status'
     | 'disqualificationReason'
     | 'humanReason'
+    | 'pendingQuestion'
   >
 ): Promise<LeadRecord> {
   const previous = await getLead(contact);
@@ -131,6 +134,7 @@ export async function saveLead(
     status: data.status,
     disqualificationReason: data.disqualificationReason,
     humanReason: data.status === 'waiting_human' ? data.humanReason : null,
+    pendingQuestion: data.pendingQuestion ?? null,
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
     qualifiedAt:

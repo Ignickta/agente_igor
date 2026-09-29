@@ -273,6 +273,9 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
             `Tipo: ${typeLabel[lead.businessType || ''] || lead.businessType}`,
             `Cidade: ${lead.city}`,
             `WhatsApp: ${whatsappChatUrl(lead.contact)}`,
+            ...(lead.pendingQuestion
+              ? [`Dúvida do lead: ${safeNotificationText(lead.pendingQuestion)}`]
+              : []),
           ].join('\n')
         );
         await markLeadNotified(lead.contact);
@@ -301,6 +304,9 @@ async function notifyOwnerAboutPausedLead(
     `Tipo de empresa: ${safeNotificationText(lead.businessType, 160)}`,
     `Cidade: ${safeNotificationText(lead.city, 160)}`,
     `Precisa confirmar: ${safeNotificationText(lead.humanReason)}`,
+    ...(lead.pendingQuestion
+      ? [`Dúvida do lead: ${safeNotificationText(lead.pendingQuestion)}`]
+      : []),
   ];
   if (latestMessage) {
     details.push(`Mensagem: ${safeNotificationText(latestMessage)}`);
