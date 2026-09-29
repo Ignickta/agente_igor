@@ -67,7 +67,11 @@ import { parseEventWindow, CalendarEvent } from '../services/googleCalendar';
 import { diffMirror, MirrorItem } from '../agents/calendarSync';
 import { Subagent, PendingPrompt } from '../types';
 import { taskAllowedDuringPause } from '../agents/pause';
-import { isUnsupportedConversationJid, resolveRemoteJid } from '../services/webhookParser';
+import {
+  hiddenSenderMessage,
+  isUnsupportedConversationJid,
+  resolveRemoteJid,
+} from '../services/webhookParser';
 import { normalizeRecipient, whatsappChatUrl } from '../services/evolution';
 import { consumeLeadQuota, effectiveLeadBotSettings } from '../services/leadSettings';
 import {
@@ -218,6 +222,32 @@ function suiteLeadIsolation(): void {
     'leads-isolamento',
     'rejeita LID sem telefone alternativo',
     isUnsupportedConversationJid(resolveRemoteJid({ remoteJid: '123456789@lid' }))
+  );
+  const hiddenLead = hiddenSenderMessage({
+    event: 'messages.upsert',
+    data: {
+      key: { remoteJid: '123456789@lid' },
+      pushName: 'Neia',
+      message: { conversation: 'Vocês entregam aqui?' },
+    },
+  });
+  check(
+    'leads-isolamento',
+    'LID sem telefone vira aviso ao dono com nome e mensagem',
+    hiddenLead?.pushName === 'Neia' && hiddenLead.text === 'Vocês entregam aqui?'
+  );
+  check(
+    'leads-isolamento',
+    'LID com telefone alternativo NÃO gera aviso (segue o fluxo normal)',
+    hiddenSenderMessage({
+      data: {
+        key: { remoteJid: '123@lid', remoteJidAlt: '5571999999999@s.whatsapp.net' },
+        message: { conversation: 'oi' },
+      },
+    }) === null &&
+      hiddenSenderMessage({
+        data: { key: { remoteJid: '123@lid', fromMe: true }, message: { conversation: 'oi' } },
+      }) === null
   );
   check(
     'leads-isolamento',

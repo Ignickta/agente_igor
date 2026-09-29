@@ -20,6 +20,32 @@ export function resolveRemoteJid(key: Record<string, unknown>): string {
 }
 
 /**
+ * Mensagem recebida de contato cujo telefone o WhatsApp escondeu (LID sem
+ * número alternativo). O parseWebhook descarta esses casos; isto devolve o
+ * nome e o texto para o dono ao menos ser avisado. Null em qualquer outro caso.
+ */
+export function hiddenSenderMessage(
+  body: any
+): { pushName: string | undefined; text: string | undefined } | null {
+  const event: string | undefined = body?.event;
+  if (event && event !== 'messages.upsert') return null;
+  const data = Array.isArray(body?.data) ? body.data[0] : body?.data;
+  const key = data?.key || {};
+  if (key.fromMe) return null;
+  if (!resolveRemoteJid(key).endsWith('@lid')) return null;
+  const message = data.message || {};
+  return {
+    pushName: data.pushName,
+    text:
+      message.conversation ||
+      message.extendedTextMessage?.text ||
+      message.imageMessage?.caption ||
+      message.videoMessage?.caption ||
+      (message.audioMessage ? '[áudio]' : undefined),
+  };
+}
+
+/**
  * Normaliza o payload de webhook da Evolution API (evento messages.upsert)
  * para a nossa estrutura interna. Ignora mensagens enviadas por nós (fromMe).
  *

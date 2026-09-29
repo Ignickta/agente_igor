@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import { config, isAllowed } from './config';
 import { adminRouter } from './routes/admin';
-import { parseWebhook } from './services/webhookParser';
+import { hiddenSenderMessage, parseWebhook } from './services/webhookParser';
 import { transcribeAudioBase64 } from './services/transcription';
 import { extractFromImage, extractFromPdf } from './services/vision';
 import { sendText, sendAudio, whatsappChatUrl } from './services/evolution';
@@ -90,6 +90,21 @@ app.post('/webhook', (req: Request, res: Response) => {
 });
 
 async function processIncoming(body: unknown): Promise<void> {
+  // O WhatsApp às vezes esconde o telefone (LID sem número alternativo), comum
+  // em quem chega por anúncio. Sem número não há como responder: avisa o dono
+  // com o nome e a mensagem para ele achar a conversa e responder na mão.
+  const hidden = hiddenSenderMessage(body);
+  if (hidden) {
+    if (isLeadBotReady()) {
+      await notifyOwnerAboutUnansweredLead(
+        `${safeNotificationText(hidden.pushName, 160)} (o WhatsApp escondeu o número — procure pelo nome)`,
+        hidden.text,
+        'O WhatsApp não informou o telefone do contato.'
+      );
+    }
+    return;
+  }
+
   const msg = await parseWebhook(body);
   if (!msg) return;
 
@@ -100,7 +115,18 @@ async function processIncoming(body: unknown): Promise<void> {
       console.log(`[webhook] lead ignorado (atendimento comercial desativado): ${msg.from}`);
       return;
     }
-    await processLeadIncoming(msg);
+    try {
+      await processLeadIncoming(msg);
+    } catch (err) {
+      // Ex.: cota do Firestore estourada ao abrir a ficha. Antes o lead ficava
+      // sem resposta e ninguém sabia (caso da Neia, 2026-09-24).
+      console.error('[leads] erro ao receber mensagem:', err);
+      await notifyOwnerAboutUnansweredLead(
+        whatsappChatUrl(msg.from),
+        msg.text || msg.caption,
+        errorSummary(err)
+      );
+    }
     return;
   }
 
@@ -243,6 +269,9 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
   if (!text.trim()) return;
 
   enqueueMessage(`lead:${msg.from}`, text, (merged) => {
+    // Só avisa "sem resposta" se a falha foi ANTES de o lead receber a
+    // resposta; erro no aviso de lead qualificado não é lead sem resposta.
+    let answered = false;
     processInContactQueue(`lead:${msg.from}`, async () => {
       const result = await handleLeadMessage(msg.from, merged);
       const { reply, lead } = result;
@@ -251,6 +280,7 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
       for (let i = 0; i < parts.length; i += 1) {
         await sendText(msg.from, parts[i], i === 0 ? 1200 : 400);
       }
+      answered = true;
 
       if (lead?.status === 'waiting_human') {
         await notifyOwnerAboutPausedLead(lead, merged);
@@ -280,8 +310,46 @@ async function processLeadIncoming(msg: IncomingMessage): Promise<void> {
         );
         await markLeadNotified(lead.contact);
       }
-    }).catch((err) => console.error('[leads] erro ao processar lote:', err));
+    }).catch(async (err) => {
+      console.error('[leads] erro ao processar lote:', err);
+      if (!answered) {
+        await notifyOwnerAboutUnansweredLead(whatsappChatUrl(msg.from), merged, errorSummary(err));
+      }
+    });
   });
+}
+
+function errorSummary(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  if (/RESOURCE_EXHAUSTED|quota/i.test(text)) return 'Cota diária do banco de dados estourada.';
+  if (/status code 50[23]|ECONNREFUSED/i.test(text)) return 'WhatsApp (Evolution) fora do ar.';
+  return safeNotificationText(text, 200);
+}
+
+/**
+ * Avisa o dono de que um lead ficou sem resposta automática. Não depende do
+ * Firestore (pode ser justamente ele que falhou) e nunca lança erro.
+ */
+async function notifyOwnerAboutUnansweredLead(
+  contact: string,
+  message: string | undefined,
+  reason: string
+): Promise<void> {
+  if (!config.leadNotificationRecipient) return;
+  try {
+    await sendText(
+      config.leadNotificationRecipient,
+      [
+        '🚨 *Lead ficou sem resposta automática*',
+        `Contato: ${contact}`,
+        `Mensagem: ${safeNotificationText(message)}`,
+        `Motivo: ${reason}`,
+        'Responda na mão pelo WhatsApp.',
+      ].join('\n')
+    );
+  } catch (err) {
+    console.error('[leads] falha ao avisar lead sem resposta:', err);
+  }
 }
 
 function safeNotificationText(value: string | null | undefined, maxLength = 500): string {
