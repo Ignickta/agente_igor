@@ -36,6 +36,8 @@ export interface Note {
   /** Data/hora opcional quando a nota registra uma reunião. */
   meetingAt?: string;
   participants: string[];
+  /** Posição manual (menor = primeiro). Notas antigas sem o campo caem por -updatedAt. */
+  order?: number;
   createdAt: number;
   updatedAt: number;
 }

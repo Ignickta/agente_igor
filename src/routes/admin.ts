@@ -37,6 +37,7 @@ import {
   createNote,
   updateNote,
   deleteNote,
+  reorderNotes,
 } from '../services/firebase';
 import { undoActionById } from '../agents/undo';
 import { enterPause, leavePause } from '../agents/pause';
@@ -521,6 +522,18 @@ adminRouter.post('/notes', async (req, res) => {
   } catch (err) {
     console.error('[notes] erro ao criar nota:', err);
     res.status(500).json({ error: 'Erro ao criar nota' });
+  }
+});
+
+adminRouter.post('/notes/reorder', async (req, res) => {
+  try {
+    const ids = cleanStringList(req.body?.ids, 1000);
+    if (!ids.length) return res.status(400).json({ error: 'Informe a lista de ids' });
+    await reorderNotes(ids);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[notes] erro ao reordenar notas:', err);
+    res.status(500).json({ error: 'Erro ao reordenar notas' });
   }
 });
 

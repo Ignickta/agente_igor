@@ -246,7 +246,18 @@ export async function listNotes(): Promise<Note[]> {
   const snap = await notesCol.get();
   return snap.docs
     .map((doc) => ({ id: doc.id, ...doc.data() } as Note))
-    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || noteSortKey(a) - noteSortKey(b));
+}
+
+function noteSortKey(note: Note): number {
+  return note.order ?? -note.updatedAt;
+}
+
+/** Grava a ordem manual (índice na lista) sem mexer no updatedAt. */
+export async function reorderNotes(ids: string[]): Promise<void> {
+  const batch = db.batch();
+  ids.forEach((id, index) => batch.update(notesCol.doc(id), { order: index }));
+  await batch.commit();
 }
 
 export async function getNote(id: string): Promise<Note | null> {
@@ -258,7 +269,8 @@ export async function createNote(
   data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>
 ): Promise<Note> {
   const now = Date.now();
-  const note = withoutUndefined({ ...data, createdAt: now, updatedAt: now });
+  // order negativo e decrescente: nota nova sempre entra no topo da ordem manual.
+  const note = withoutUndefined({ ...data, order: -now, createdAt: now, updatedAt: now });
   const ref = await notesCol.add(note);
   return { id: ref.id, ...note } as Note;
 }
