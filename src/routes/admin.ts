@@ -86,6 +86,26 @@ function requireToken(req: Request, res: Response, next: NextFunction): void {
 
 adminRouter.use(requireToken);
 
+// Registra a chegada e o desfecho sem conteúdo da tarefa ou credenciais.
+// O clientRequestId liga tentativas repetidas à mesma gravação.
+adminRouter.use((req, res, next) => {
+  if (req.method !== 'POST' || req.path !== '/tasks') return next();
+  const candidate = req.body?.clientRequestId;
+  const requestId = typeof candidate === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(candidate)
+    ? candidate : 'sem-id';
+  const started = Date.now();
+  console.info(`[tasks-request] received id=${requestId}`);
+  res.once('finish', () => {
+    console.info(`[tasks-request] finished id=${requestId} status=${res.statusCode} elapsedMs=${Date.now() - started}`);
+  });
+  res.once('close', () => {
+    if (!res.writableFinished) {
+      console.warn(`[tasks-request] disconnected id=${requestId} elapsedMs=${Date.now() - started}`);
+    }
+  });
+  next();
+});
+
 adminRouter.get('/health', async (_req, res) => {
   try {
     const connectionState = await getConnectionState();
